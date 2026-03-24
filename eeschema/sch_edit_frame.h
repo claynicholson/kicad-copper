@@ -60,6 +60,7 @@ class SCHEMATIC;
 class SCH_COMMIT;
 class SCH_DESIGN_BLOCK_PANE;
 class PANEL_REMOTE_SYMBOL;
+class COPPER_PANEL;
 class DIALOG_BOOK_REPORTER;
 class DIALOG_ERC;
 class DIALOG_SYMBOL_FIELDS_TABLE;
@@ -851,6 +852,8 @@ public:
 
     void ToggleRemoteSymbolPanel();
 
+    void ToggleCopperPanel();
+
 
     DIALOG_BOOK_REPORTER* GetSymbolDiffDialog();
 
@@ -1100,6 +1103,7 @@ private:
     std::vector<LIB_ID>         m_designBlockHistoryList;
     SCH_DESIGN_BLOCK_PANE*      m_designBlocksPane;
     PANEL_REMOTE_SYMBOL*        m_remoteSymbolPane;
+    COPPER_PANEL*               m_copperPanel;
 
     wxChoice*                   m_currentVariantCtrl;
 

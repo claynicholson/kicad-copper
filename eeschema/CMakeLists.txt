@@ -298,6 +298,7 @@ set( EESCHEMA_WIDGETS
     widgets/panel_sch_selection_filter.cpp
     widgets/panel_symbol_chooser.cpp
     widgets/panel_remote_symbol.cpp
+    widgets/copper_panel.cpp
     widgets/pinshape_combobox.cpp
     widgets/pintype_combobox.cpp
     widgets/symbol_diff_widget.cpp
