@@ -54,6 +54,7 @@ private:
     // Event handlers
     void onSendMessage( wxCommandEvent& aEvent );
     void onInputKeyDown( wxKeyEvent& aEvent );
+    void onDebugButton( wxCommandEvent& aEvent );
 
     // Message display
     void appendMessage( const wxString& aRole, const wxString& aText );
@@ -83,6 +84,12 @@ private:
     // Schematic patch application
     void applySchematicPatch( const nlohmann::json& aPatch );
 
+    // Post-placement wire fixup: read actual pin positions and re-route
+    void fixupWires();
+
+    // Library import (LCSC → KiCad via cloud API)
+    bool fetchAndInstallLibrary( const std::string& aLcscPn );
+
     // HTTP helpers
     std::string callCloudAPI( const std::string& aEndpoint, const nlohmann::json& aBody );
     std::vector<std::pair<std::string, std::string>> parseSSE( const std::string& aRaw );
@@ -98,6 +105,7 @@ private:
     wxRichTextCtrl*    m_conversation;
     wxTextCtrl*        m_input;
     wxButton*          m_sendButton;
+    wxButton*          m_debugButton;
     wxChoice*          m_vendorChoice;
     wxStaticText*      m_statusText;
 
