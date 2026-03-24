@@ -32,11 +32,15 @@
 #include <sch_label.h>
 #include <sch_junction.h>
 #include <sch_sheet.h>
+#include <sch_commit.h>
 #include <lib_symbol.h>
+#include <layer_ids.h>
+#include <tool/tool_manager.h>
 
 #include <nlohmann/json.hpp>
 
 #include <wx/button.h>
+#include <wx/choice.h>
 #include <wx/richtext/richtextctrl.h>
 #include <wx/sizer.h>
 #include <wx/stattext.h>
@@ -47,6 +51,7 @@
 #include <wx/dir.h>
 
 #include <fstream>
+#include <sstream>
 
 
 // ---------------------------------------------------------------------------
@@ -89,7 +94,7 @@ COPPER_PANEL::COPPER_PANEL( SCH_EDIT_FRAME* aParent ) :
         m_input( nullptr ),
         m_sendButton( nullptr ),
         m_statusText( nullptr ),
-        m_cloudUrl( "https://api.copper.dev" ),
+        m_cloudUrl( "http://localhost:8000" ),
         m_busy( false )
 {
     SetBackgroundColour( BG_PRIMARY );
@@ -125,10 +130,27 @@ void COPPER_PANEL::buildUI()
     header->SetFont( headerFont );
     mainSizer->Add( header, 0, wxALL | wxALIGN_LEFT, 8 );
 
+    // Vendor selector
+    wxBoxSizer* vendorSizer = new wxBoxSizer( wxHORIZONTAL );
+    wxStaticText* vendorLabel = new wxStaticText( this, wxID_ANY, wxT( "Vendor:" ) );
+    vendorLabel->SetForegroundColour( TEXT_SECONDARY );
+    vendorSizer->Add( vendorLabel, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4 );
+
+    wxArrayString vendorChoices;
+    vendorChoices.Add( wxT( "All Vendors" ) );
+    vendorChoices.Add( wxT( "LCSC / JLCPCB" ) );
+    vendorChoices.Add( wxT( "Mouser" ) );
+    vendorChoices.Add( wxT( "DigiKey" ) );
+    m_vendorChoice = new wxChoice( this, wxID_ANY, wxDefaultPosition, wxDefaultSize, vendorChoices );
+    m_vendorChoice->SetSelection( 0 );
+    vendorSizer->Add( m_vendorChoice, 1, wxALIGN_CENTER_VERTICAL );
+
+    mainSizer->Add( vendorSizer, 0, wxEXPAND | wxLEFT | wxRIGHT, 8 );
+
     // Separator
     wxPanel* sep = new wxPanel( this, wxID_ANY, wxDefaultPosition, wxSize( -1, 1 ) );
     sep->SetBackgroundColour( BORDER_COLOR );
-    mainSizer->Add( sep, 0, wxEXPAND | wxLEFT | wxRIGHT, 8 );
+    mainSizer->Add( sep, 0, wxEXPAND | wxALL, 8 );
 
     // Conversation area
     m_conversation = new wxRichTextCtrl( this, wxID_ANY, wxEmptyString,
@@ -138,11 +160,25 @@ void COPPER_PANEL::buildUI()
     m_conversation->SetForegroundColour( TEXT_PRIMARY );
     mainSizer->Add( m_conversation, 1, wxEXPAND | wxALL, 4 );
 
-    // Welcome message
+    // ASCII art banner
     m_conversation->SetDefaultStyle( wxRichTextAttr() );
+    m_conversation->BeginTextColour( ACCENT );
+    wxFont monoFont( 8, wxFONTFAMILY_TELETYPE, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_BOLD );
+    m_conversation->BeginFont( monoFont );
+    m_conversation->WriteText(
+        wxT( "  ____                            \n" )
+        wxT( " / ___|___  _ __  _ __   ___ _ __ \n" )
+        wxT( "| |   / _ \\| '_ \\| '_ \\ / _ \\ '__|\n" )
+        wxT( "| |__| (_) | |_) | |_) |  __/ |   \n" )
+        wxT( " \\____\\___/| .__/| .__/ \\___|_|   \n" )
+        wxT( "           |_|   |_|               \n" ) );
+    m_conversation->EndFont();
+    m_conversation->EndTextColour();
+
+    // Welcome message
     m_conversation->BeginTextColour( TEXT_SECONDARY );
-    m_conversation->WriteText( wxT( "Welcome to Copper AI. Ask me to design circuits, "
-                                     "explain schematics, find components, or verify your designs.\n\n"
+    m_conversation->WriteText( wxT( "\nAsk me to design circuits, explain schematics, "
+                                     "find components, or verify your designs.\n\n"
                                      "Try: \"Design a USB-powered RP2040 dev board\"\n" ) );
     m_conversation->EndTextColour();
 
@@ -342,6 +378,20 @@ wxString COPPER_PANEL::detectIntent( const wxString& aPrompt )
 }
 
 
+std::string COPPER_PANEL::getVendorFilter()
+{
+    int sel = m_vendorChoice->GetSelection();
+
+    switch( sel )
+    {
+    case 1: return "lcsc";
+    case 2: return "mouser";
+    case 3: return "digikey";
+    default: return "";
+    }
+}
+
+
 // ---------------------------------------------------------------------------
 // Schematic context extraction
 // ---------------------------------------------------------------------------
@@ -355,10 +405,13 @@ nlohmann::json COPPER_PANEL::buildProjectContext()
     SCH_SHEET_PATH rootPath;
     rootPath.push_back( &schematic.Root() );
 
+    ctx["project_path"] = std::string( m_frame->Prj().GetProjectPath().ToUTF8() );
     ctx["project_name"] = std::string( m_frame->Prj().GetProjectName().ToUTF8() );
-    ctx["schematic_path"] = std::string( m_frame->GetCurrentFileName().ToUTF8() );
 
-    // Components
+    // Build sheet with components matching ExistingComponent schema
+    nlohmann::json sheet;
+    sheet["filename"] = std::string( m_frame->GetCurrentFileName().ToUTF8() );
+
     nlohmann::json components = nlohmann::json::array();
 
     for( SCH_ITEM* item : screen->Items() )
@@ -371,63 +424,69 @@ nlohmann::json COPPER_PANEL::buildProjectContext()
 
         comp["reference"] = std::string( symbol->GetRef( &rootPath, false ).ToUTF8() );
         comp["value"] = std::string( symbol->GetValue( false, &rootPath, false ).ToUTF8() );
-        comp["lib_id"] = std::string( symbol->GetLibId().Format().wx_str() );
+
+        // Split lib_id into symbol_lib and symbol_name
+        LIB_ID libId = symbol->GetLibId();
+        comp["symbol_lib"] = std::string( libId.GetLibNickname().wx_str() );
+        comp["symbol_name"] = std::string( libId.GetLibItemName().wx_str() );
 
         VECTOR2I pos = symbol->GetPosition();
-        comp["x"] = pos.x / 25400.0;  // Convert to mm
-        comp["y"] = pos.y / 25400.0;
+        nlohmann::json posJson;
+        posJson["x"] = pos.x / 25400.0;
+        posJson["y"] = pos.y / 25400.0;
+        posJson["rotation"] = static_cast<double>( symbol->GetOrientation() * 90 );
+        comp["position"] = posJson;
 
         wxString footprint = symbol->GetFootprintFieldText( true, &rootPath, false );
         comp["footprint"] = std::string( footprint.ToUTF8() );
+        comp["properties"] = nlohmann::json::object();
 
         components.push_back( comp );
     }
 
-    ctx["components"] = components;
+    sheet["components"] = components;
 
-    // Wires
-    nlohmann::json wires = nlohmann::json::array();
-
-    for( SCH_ITEM* item : screen->Items() )
-    {
-        if( item->Type() != SCH_LINE_T )
-            continue;
-
-        SCH_LINE* line = static_cast<SCH_LINE*>( item );
-
-        if( !line->IsWire() )
-            continue;
-
-        nlohmann::json wire;
-        wire["x1"] = line->GetStartPoint().x / 25400.0;
-        wire["y1"] = line->GetStartPoint().y / 25400.0;
-        wire["x2"] = line->GetEndPoint().x / 25400.0;
-        wire["y2"] = line->GetEndPoint().y / 25400.0;
-        wires.push_back( wire );
-    }
-
-    ctx["wires"] = wires;
-
-    // Net labels
-    nlohmann::json labels = nlohmann::json::array();
+    // Nets
+    nlohmann::json nets = nlohmann::json::array();
 
     for( SCH_ITEM* item : screen->Items() )
     {
         if( item->Type() == SCH_LABEL_T || item->Type() == SCH_GLOBAL_LABEL_T )
         {
             SCH_LABEL_BASE* label = static_cast<SCH_LABEL_BASE*>( item );
-            nlohmann::json lbl;
-
-            lbl["name"] = std::string( label->GetText().ToUTF8() );
-            lbl["x"] = label->GetPosition().x / 25400.0;
-            lbl["y"] = label->GetPosition().y / 25400.0;
-            lbl["type"] = ( item->Type() == SCH_GLOBAL_LABEL_T ) ? "global" : "net";
-
-            labels.push_back( lbl );
+            nlohmann::json net;
+            net["name"] = std::string( label->GetText().ToUTF8() );
+            net["component_pins"] = nlohmann::json::array();
+            nets.push_back( net );
         }
     }
 
-    ctx["labels"] = labels;
+    sheet["nets"] = nets;
+
+    // Power rails
+    nlohmann::json powerRails = nlohmann::json::array();
+
+    for( SCH_ITEM* item : screen->Items() )
+    {
+        if( item->Type() == SCH_SYMBOL_T )
+        {
+            SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+
+            if( symbol->GetLibId().GetLibNickname() == "power" )
+            {
+                nlohmann::json rail;
+                rail["name"] = std::string( symbol->GetValue( false, &rootPath, false ).ToUTF8() );
+                rail["voltage"] = nullptr;
+                powerRails.push_back( rail );
+            }
+        }
+    }
+
+    sheet["power_rails"] = powerRails;
+
+    ctx["sheets"] = nlohmann::json::array( { sheet } );
+    ctx["available_symbol_libs"] = nlohmann::json::array();
+    ctx["available_footprint_libs"] = nlohmann::json::array();
 
     return ctx;
 }
@@ -445,26 +504,72 @@ std::string COPPER_PANEL::callCloudAPI( const std::string& aEndpoint,
     std::string url = m_cloudUrl + aEndpoint;
     curl.SetURL( url );
     curl.SetHeader( "Content-Type", "application/json" );
-    curl.SetHeader( "Authorization", "Bearer " + m_apiKey );
+    curl.SetHeader( "X-API-Key", m_apiKey );
     curl.SetHeader( "User-Agent", "KiCad-Copper/1.0" );
-    curl.SetPostFields( aBody.dump() );
+
+    std::string bodyStr = aBody.dump();
+    curl.SetPostFields( bodyStr );
     curl.SetFollowRedirects( true );
     curl.SetConnectTimeout( 30 );
 
     int code = curl.Perform();
 
     if( code != 0 )
-        throw std::runtime_error( "HTTP request failed: " + curl.GetErrorText( code ) );
+        throw std::runtime_error( "Connection failed: " + curl.GetErrorText( code ) );
 
     int status = curl.GetResponseStatusCode();
+    const std::string& buffer = curl.GetBuffer();
 
     if( status >= 400 )
     {
         throw std::runtime_error( "API error (HTTP " + std::to_string( status ) + "): "
-                                  + curl.GetBuffer() );
+                                  + buffer );
     }
 
-    return curl.GetBuffer();
+    return buffer;
+}
+
+
+std::vector<std::pair<std::string, std::string>> COPPER_PANEL::parseSSE( const std::string& aRaw )
+{
+    // Parse SSE stream into vector of (event, data) pairs
+    std::vector<std::pair<std::string, std::string>> events;
+    std::string currentEvent;
+    std::string currentData;
+
+    std::istringstream stream( aRaw );
+    std::string line;
+
+    while( std::getline( stream, line ) )
+    {
+        // Remove \r if present
+        if( !line.empty() && line.back() == '\r' )
+            line.pop_back();
+
+        if( line.rfind( "event: ", 0 ) == 0 )
+        {
+            currentEvent = line.substr( 7 );
+        }
+        else if( line.rfind( "data: ", 0 ) == 0 )
+        {
+            currentData = line.substr( 6 );
+        }
+        else if( line.empty() )
+        {
+            if( !currentEvent.empty() || !currentData.empty() )
+            {
+                events.push_back( { currentEvent, currentData } );
+                currentEvent.clear();
+                currentData.clear();
+            }
+        }
+    }
+
+    // Catch last event if no trailing blank line
+    if( !currentEvent.empty() || !currentData.empty() )
+        events.push_back( { currentEvent, currentData } );
+
+    return events;
 }
 
 
@@ -486,9 +591,21 @@ void COPPER_PANEL::doChat( const wxString& aPrompt )
     {
         try
         {
+            m_frame->CallAfter( [this]()
+            {
+                appendStatusMessage( wxT( "[Thinking] Analyzing your question..." ) );
+            } );
+
+            nlohmann::json ctx = buildProjectContext();
+
+            m_frame->CallAfter( [this]()
+            {
+                appendStatusMessage( wxT( "[Thinking] Sending schematic context to Copper AI..." ) );
+            } );
+
             nlohmann::json body;
             body["message"] = prompt;
-            body["project_context"] = buildProjectContext();
+            body["project_context"] = ctx;
 
             nlohmann::json historyArr = nlohmann::json::array();
             for( const auto& [role, content] : m_history )
@@ -497,10 +614,16 @@ void COPPER_PANEL::doChat( const wxString& aPrompt )
             }
             body["history"] = historyArr;
 
+            m_frame->CallAfter( [this]()
+            {
+                appendStatusMessage( wxT( "[Thinking] Waiting for response..." ) );
+            } );
+
             std::string response = callCloudAPI( "/v1/copilot/chat", body );
             nlohmann::json respJson = nlohmann::json::parse( response );
 
-            std::string reply = respJson.value( "response", respJson.value( "message", "" ) );
+            std::string reply = respJson.value( "reply", respJson.value( "response",
+                                respJson.value( "message", "" ) ) );
             m_history.push_back( { "assistant", reply } );
 
             m_frame->CallAfter( [this, reply]()
@@ -544,21 +667,101 @@ void COPPER_PANEL::doGenerate( const wxString& aPrompt )
             body["prompt"] = prompt;
             body["project_context"] = buildProjectContext();
 
-            std::string response = callCloudAPI( "/v1/copilot/generate", body );
-            nlohmann::json respJson = nlohmann::json::parse( response );
+            std::string vf = getVendorFilter();
+            if( !vf.empty() )
+                body["vendor_filter"] = vf;
 
-            std::string description = respJson.value( "description", "Design generated." );
+            // Generate returns SSE stream - fetch raw response
+            KICAD_CURL_EASY curl;
+            std::string url = m_cloudUrl + "/v1/copilot/generate";
+            curl.SetURL( url );
+            curl.SetHeader( "Content-Type", "application/json" );
+            curl.SetHeader( "X-API-Key", m_apiKey );
+            curl.SetHeader( "User-Agent", "KiCad-Copper/1.0" );
+            curl.SetHeader( "Accept", "text/event-stream" );
+            curl.SetPostFields( body.dump() );
+            curl.SetFollowRedirects( true );
+            curl.SetConnectTimeout( 120 );
 
-            m_frame->CallAfter( [this, respJson, description]()
+            int code = curl.Perform();
+
+            if( code != 0 )
+                throw std::runtime_error( "Connection failed: " + curl.GetErrorText( code ) );
+
+            int status = curl.GetResponseStatusCode();
+
+            if( status >= 400 )
+                throw std::runtime_error( "API error (HTTP " + std::to_string( status )
+                                          + "): " + curl.GetBuffer() );
+
+            // Parse SSE events
+            auto events = parseSSE( curl.GetBuffer() );
+            std::string description;
+            nlohmann::json lastPatch;
+
+            for( const auto& [evt, data] : events )
             {
-                appendAssistantMessage( wxString::FromUTF8( description ) );
+                if( data.empty() )
+                    continue;
 
-                if( respJson.contains( "patch" ) )
+                try
                 {
-                    appendStatusMessage( wxT( "Applying schematic changes..." ) );
-                    applySchematicPatch( respJson["patch"] );
-                    appendStatusMessage( wxT( "Schematic updated." ) );
+                    nlohmann::json eventData = nlohmann::json::parse( data );
+
+                    if( evt == "stage" )
+                    {
+                        std::string msg = eventData.value( "message", "" );
+                        std::string stage = eventData.value( "stage", "" );
+                        m_frame->CallAfter( [this, stage, msg]()
+                        {
+                            appendStatusMessage( wxString::Format( wxT( "[%s] %s" ),
+                                    wxString::FromUTF8( stage ),
+                                    wxString::FromUTF8( msg ) ) );
+                        } );
+                    }
+                    else if( evt == "operation" )
+                    {
+                        int idx = eventData.value( "index", 0 );
+                        int total = eventData.value( "total", 0 );
+                        m_frame->CallAfter( [this, idx, total]()
+                        {
+                            appendStatusMessage( wxString::Format(
+                                    wxT( "[Applying] Operation %d of %d" ), idx + 1, total ) );
+                        } );
+
+                        // Collect operations into a patch
+                        if( !lastPatch.contains( "operations" ) )
+                            lastPatch["operations"] = nlohmann::json::array();
+
+                        if( eventData.contains( "operation" ) )
+                            lastPatch["operations"].push_back( eventData["operation"] );
+                    }
+                    else if( evt == "complete" )
+                    {
+                        description = eventData.value( "description", "Design generated." );
+                    }
+                    else if( evt == "error" )
+                    {
+                        std::string errMsg = eventData.value( "error", "Unknown error" );
+                        m_frame->CallAfter( [this, errMsg]()
+                        {
+                            appendErrorMessage( wxString::FromUTF8( errMsg ) );
+                        } );
+                    }
                 }
+                catch( ... )
+                {
+                    // Skip unparseable events
+                }
+            }
+
+            m_frame->CallAfter( [this, description, lastPatch]()
+            {
+                if( !description.empty() )
+                    appendAssistantMessage( wxString::FromUTF8( description ) );
+
+                if( lastPatch.contains( "operations" ) )
+                    applySchematicPatch( lastPatch );
 
                 setBusy( false );
             } );
@@ -595,6 +798,10 @@ void COPPER_PANEL::doRecommend( const wxString& aPrompt )
             nlohmann::json body;
             body["prompt"] = prompt;
             body["project_context"] = buildProjectContext();
+
+            std::string vf = getVendorFilter();
+            if( !vf.empty() )
+                body["vendor_filter"] = vf;
 
             std::string response = callCloudAPI( "/v1/copilot/recommend", body );
             nlohmann::json respJson = nlohmann::json::parse( response );
@@ -639,15 +846,67 @@ void COPPER_PANEL::doExplain()
             nlohmann::json body;
             body["project_context"] = buildProjectContext();
 
-            std::string response = callCloudAPI( "/v1/copilot/explain", body );
-            nlohmann::json respJson = nlohmann::json::parse( response );
+            // Explain returns SSE
+            KICAD_CURL_EASY curl;
+            std::string url = m_cloudUrl + "/v1/copilot/explain";
+            curl.SetURL( url );
+            curl.SetHeader( "Content-Type", "application/json" );
+            curl.SetHeader( "X-API-Key", m_apiKey );
+            curl.SetHeader( "User-Agent", "KiCad-Copper/1.0" );
+            curl.SetHeader( "Accept", "text/event-stream" );
+            curl.SetPostFields( body.dump() );
+            curl.SetFollowRedirects( true );
+            curl.SetConnectTimeout( 120 );
 
-            std::string explanation = respJson.value( "explanation",
-                                                       respJson.value( "response", "" ) );
+            int code = curl.Perform();
+
+            if( code != 0 )
+                throw std::runtime_error( "Connection failed: " + curl.GetErrorText( code ) );
+
+            if( curl.GetResponseStatusCode() >= 400 )
+                throw std::runtime_error( "API error: " + curl.GetBuffer() );
+
+            auto events = parseSSE( curl.GetBuffer() );
+            std::string explanation;
+
+            for( const auto& [evt, data] : events )
+            {
+                if( data.empty() ) continue;
+
+                try
+                {
+                    nlohmann::json eventData = nlohmann::json::parse( data );
+
+                    if( evt == "stage" )
+                    {
+                        std::string msg = eventData.value( "message", "" );
+                        m_frame->CallAfter( [this, msg]()
+                        {
+                            appendStatusMessage( wxString::Format( wxT( "[Analyzing] %s" ),
+                                    wxString::FromUTF8( msg ) ) );
+                        } );
+                    }
+                    else if( evt == "complete" )
+                    {
+                        explanation = eventData.value( "explanation",
+                                      eventData.value( "response", "" ) );
+                    }
+                    else if( evt == "error" )
+                    {
+                        std::string errMsg = eventData.value( "error", "Unknown error" );
+                        m_frame->CallAfter( [this, errMsg]()
+                        {
+                            appendErrorMessage( wxString::FromUTF8( errMsg ) );
+                        } );
+                    }
+                }
+                catch( ... ) {}
+            }
 
             m_frame->CallAfter( [this, explanation]()
             {
-                appendAssistantMessage( wxString::FromUTF8( explanation ) );
+                if( !explanation.empty() )
+                    appendAssistantMessage( wxString::FromUTF8( explanation ) );
                 setBusy( false );
             } );
         }
@@ -683,14 +942,67 @@ void COPPER_PANEL::doVerify()
             nlohmann::json body;
             body["project_context"] = buildProjectContext();
 
-            std::string response = callCloudAPI( "/v1/copilot/verify", body );
-            nlohmann::json respJson = nlohmann::json::parse( response );
+            // Verify returns SSE
+            KICAD_CURL_EASY curl;
+            std::string url = m_cloudUrl + "/v1/copilot/verify";
+            curl.SetURL( url );
+            curl.SetHeader( "Content-Type", "application/json" );
+            curl.SetHeader( "X-API-Key", m_apiKey );
+            curl.SetHeader( "User-Agent", "KiCad-Copper/1.0" );
+            curl.SetHeader( "Accept", "text/event-stream" );
+            curl.SetPostFields( body.dump() );
+            curl.SetFollowRedirects( true );
+            curl.SetConnectTimeout( 120 );
 
-            std::string report = respJson.value( "report", respJson.value( "response", "" ) );
+            int code = curl.Perform();
+
+            if( code != 0 )
+                throw std::runtime_error( "Connection failed: " + curl.GetErrorText( code ) );
+
+            if( curl.GetResponseStatusCode() >= 400 )
+                throw std::runtime_error( "API error: " + curl.GetBuffer() );
+
+            auto events = parseSSE( curl.GetBuffer() );
+            std::string report;
+
+            for( const auto& [evt, data] : events )
+            {
+                if( data.empty() ) continue;
+
+                try
+                {
+                    nlohmann::json eventData = nlohmann::json::parse( data );
+
+                    if( evt == "stage" )
+                    {
+                        std::string msg = eventData.value( "message", "" );
+                        m_frame->CallAfter( [this, msg]()
+                        {
+                            appendStatusMessage( wxString::Format( wxT( "[Verifying] %s" ),
+                                    wxString::FromUTF8( msg ) ) );
+                        } );
+                    }
+                    else if( evt == "complete" )
+                    {
+                        report = eventData.value( "report",
+                                 eventData.value( "response", "" ) );
+                    }
+                    else if( evt == "error" )
+                    {
+                        std::string errMsg = eventData.value( "error", "Unknown error" );
+                        m_frame->CallAfter( [this, errMsg]()
+                        {
+                            appendErrorMessage( wxString::FromUTF8( errMsg ) );
+                        } );
+                    }
+                }
+                catch( ... ) {}
+            }
 
             m_frame->CallAfter( [this, report]()
             {
-                appendAssistantMessage( wxString::FromUTF8( report ) );
+                if( !report.empty() )
+                    appendAssistantMessage( wxString::FromUTF8( report ) );
                 setBusy( false );
             } );
         }
@@ -713,40 +1025,178 @@ void COPPER_PANEL::doVerify()
 
 void COPPER_PANEL::applySchematicPatch( const nlohmann::json& aPatch )
 {
-    // TODO: Implement native schematic manipulation using KiCad objects
-    // For now, log what would be applied
     if( !aPatch.contains( "operations" ) )
     {
         appendStatusMessage( wxT( "No operations in patch." ) );
         return;
     }
 
-    int count = 0;
+    TOOL_MANAGER* toolMgr = m_frame->GetToolManager();
+
+    if( !toolMgr )
+    {
+        appendErrorMessage( wxT( "Tool manager not available." ) );
+        return;
+    }
+
+    SCH_SCREEN* screen = m_frame->GetScreen();
+    SCH_SHEET_PATH& sheetPath = m_frame->GetCurrentSheet();
+    SCH_COMMIT commit( toolMgr );
+    int applied = 0;
+    int failed = 0;
 
     for( const auto& op : aPatch["operations"] )
     {
-        std::string type = op.value( "type", "" );
-        count++;
+        std::string opType = op.value( "op_type", op.value( "type", "" ) );
+        nlohmann::json data = op.value( "data", op );
 
-        if( type == "PLACE_COMPONENT" )
+        try
         {
-            appendStatusMessage( wxString::Format( wxT( "  Place: %s (%s)" ),
-                    wxString::FromUTF8( op.value( "reference", "?" ) ),
-                    wxString::FromUTF8( op.value( "lib_id", "?" ) ) ) );
+            if( opType == "PLACE_COMPONENT" )
+            {
+                std::string symLib = data.value( "symbol_lib", "" );
+                std::string symName = data.value( "symbol_name", "" );
+
+                if( symLib.empty() || symName.empty() )
+                {
+                    failed++;
+                    continue;
+                }
+
+                LIB_ID libId;
+                libId.SetLibNickname( wxString::FromUTF8( symLib ) );
+                libId.SetLibItemName( wxString::FromUTF8( symName ) );
+
+                LIB_SYMBOL* libSymbol = m_frame->GetLibSymbol( libId );
+
+                if( !libSymbol )
+                {
+                    appendStatusMessage( wxString::Format( wxT( "  Symbol not found: %s:%s" ),
+                            wxString::FromUTF8( symLib ),
+                            wxString::FromUTF8( symName ) ) );
+                    failed++;
+                    continue;
+                }
+
+                SCH_SYMBOL* symbol = new SCH_SYMBOL( *libSymbol, libId, &sheetPath, 1 );
+                symbol->SetParent( screen );
+
+                // Position (convert mm to internal units: 1mm = 25400 IU)
+                nlohmann::json pos = data.value( "position",
+                                      nlohmann::json( { { "x", 0 }, { "y", 0 } } ) );
+                double xMm = pos.value( "x", 0.0 );
+                double yMm = pos.value( "y", 0.0 );
+                symbol->SetPosition( VECTOR2I( xMm * 25400, yMm * 25400 ) );
+
+                // Reference and value
+                std::string ref = data.value( "reference", "" );
+                std::string val = data.value( "value", "" );
+
+                if( !ref.empty() )
+                    symbol->SetRef( &sheetPath, wxString::FromUTF8( ref ) );
+
+                if( !val.empty() )
+                    symbol->SetValue( &sheetPath, wxString::FromUTF8( val ) );
+
+                // Footprint
+                std::string fp = data.value( "footprint", "" );
+
+                if( !fp.empty() )
+                    symbol->SetFootprintFieldText( wxString::FromUTF8( fp ) );
+
+                symbol->AutoplaceFields( screen, AUTOPLACE_AUTO );
+
+                commit.Added( symbol, screen );
+                applied++;
+            }
+            else if( opType == "ADD_WIRE" )
+            {
+                nlohmann::json startPos = data.value( "start",
+                                           nlohmann::json( { { "x", 0 }, { "y", 0 } } ) );
+                nlohmann::json endPos = data.value( "end",
+                                         nlohmann::json( { { "x", 0 }, { "y", 0 } } ) );
+
+                VECTOR2I start( startPos.value( "x", 0.0 ) * 25400,
+                                startPos.value( "y", 0.0 ) * 25400 );
+                VECTOR2I end( endPos.value( "x", 0.0 ) * 25400,
+                              endPos.value( "y", 0.0 ) * 25400 );
+
+                SCH_LINE* wire = new SCH_LINE( start, LAYER_WIRE );
+                wire->SetEndPoint( end );
+                wire->SetParent( screen );
+
+                commit.Added( wire, screen );
+                applied++;
+            }
+            else if( opType == "ADD_NET_LABEL" )
+            {
+                std::string name = data.value( "name", "" );
+                nlohmann::json pos = data.value( "position",
+                                      nlohmann::json( { { "x", 0 }, { "y", 0 } } ) );
+
+                VECTOR2I labelPos( pos.value( "x", 0.0 ) * 25400,
+                                   pos.value( "y", 0.0 ) * 25400 );
+
+                SCH_LABEL* label = new SCH_LABEL( labelPos,
+                                                   wxString::FromUTF8( name ) );
+                label->SetParent( screen );
+
+                commit.Added( label, screen );
+                applied++;
+            }
+            else if( opType == "ADD_GLOBAL_LABEL" )
+            {
+                std::string name = data.value( "name", "" );
+                nlohmann::json pos = data.value( "position",
+                                      nlohmann::json( { { "x", 0 }, { "y", 0 } } ) );
+
+                VECTOR2I labelPos( pos.value( "x", 0.0 ) * 25400,
+                                   pos.value( "y", 0.0 ) * 25400 );
+
+                SCH_GLOBALLABEL* label = new SCH_GLOBALLABEL( labelPos,
+                                                               wxString::FromUTF8( name ) );
+                label->SetParent( screen );
+
+                commit.Added( label, screen );
+                applied++;
+            }
+            else if( opType == "ADD_JUNCTION" )
+            {
+                nlohmann::json pos = data.value( "position",
+                                      nlohmann::json( { { "x", 0 }, { "y", 0 } } ) );
+
+                VECTOR2I jPos( pos.value( "x", 0.0 ) * 25400,
+                               pos.value( "y", 0.0 ) * 25400 );
+
+                SCH_JUNCTION* junction = new SCH_JUNCTION( jPos );
+                junction->SetParent( screen );
+
+                commit.Added( junction, screen );
+                applied++;
+            }
+            else
+            {
+                // Unsupported op type — skip
+                failed++;
+            }
         }
-        else if( type == "ADD_WIRE" )
+        catch( const std::exception& e )
         {
-            appendStatusMessage( wxT( "  Add wire" ) );
-        }
-        else if( type == "ADD_NET_LABEL" || type == "ADD_GLOBAL_LABEL" )
-        {
-            appendStatusMessage( wxString::Format( wxT( "  Add label: %s" ),
-                    wxString::FromUTF8( op.value( "name", "?" ) ) ) );
+            appendStatusMessage( wxString::Format( wxT( "  Failed: %s — %s" ),
+                    wxString::FromUTF8( opType ),
+                    wxString::FromUTF8( e.what() ) ) );
+            failed++;
         }
     }
 
-    appendStatusMessage( wxString::Format( wxT( "%d operations logged (apply not yet implemented)." ),
-                                            count ) );
+    if( applied > 0 )
+    {
+        commit.Push( _( "Copper AI: Apply schematic patch" ) );
+        m_frame->GetCanvas()->Refresh();
+    }
+
+    appendStatusMessage( wxString::Format( wxT( "Applied %d operations (%d skipped)." ),
+                                            applied, failed ) );
 }
 
 
@@ -783,44 +1233,54 @@ void COPPER_PANEL::loadConfig()
 
 void COPPER_PANEL::promptForApiKey()
 {
-    wxTextEntryDialog dlg( this,
-                           wxT( "Enter your Copper API key.\n"
-                                "Get one at https://copper.dev/dashboard/api-keys" ),
-                           wxT( "Copper API Key" ),
-                           wxString::FromUTF8( m_apiKey ) );
+    wxTextEntryDialog keyDlg( this,
+                              wxT( "Enter your Copper API key.\n"
+                                   "Register locally: curl -X POST http://localhost:8000/v1/auth/register "
+                                   "-H \"Content-Type: application/json\" "
+                                   "-d '{\"email\":\"you@test.com\",\"password\":\"test123\"}'" ),
+                              wxT( "Copper API Key" ),
+                              wxString::FromUTF8( m_apiKey ) );
 
-    if( dlg.ShowModal() == wxID_OK )
+    if( keyDlg.ShowModal() != wxID_OK )
+        return;
+
+    m_apiKey = std::string( keyDlg.GetValue().ToUTF8() );
+
+    wxTextEntryDialog urlDlg( this,
+                              wxT( "Copper API URL (leave default for local development):" ),
+                              wxT( "Copper API URL" ),
+                              wxString::FromUTF8( m_cloudUrl ) );
+
+    if( urlDlg.ShowModal() == wxID_OK )
+        m_cloudUrl = std::string( urlDlg.GetValue().ToUTF8() );
+
+    // Save to config
+    wxString configDir = wxStandardPaths::Get().GetUserConfigDir()
+                         + wxFileName::GetPathSeparator() + wxT( ".copper" );
+
+    if( !wxDirExists( configDir ) )
+        wxMkdir( configDir );
+
+    wxString configPath = configDir + wxFileName::GetPathSeparator() + wxT( "config.json" );
+
+    try
     {
-        m_apiKey = std::string( dlg.GetValue().ToUTF8() );
+        nlohmann::json config;
 
-        // Save to config
-        wxString configDir = wxStandardPaths::Get().GetUserConfigDir()
-                             + wxFileName::GetPathSeparator() + wxT( ".copper" );
-
-        if( !wxDirExists( configDir ) )
-            wxMkdir( configDir );
-
-        wxString configPath = configDir + wxFileName::GetPathSeparator() + wxT( "config.json" );
-
-        try
+        if( wxFileName::FileExists( configPath ) )
         {
-            nlohmann::json config;
-
-            // Read existing config if present
-            if( wxFileName::FileExists( configPath ) )
-            {
-                std::ifstream f( configPath.ToStdString() );
-                config = nlohmann::json::parse( f );
-            }
-
-            config["api_key"] = m_apiKey;
-
-            std::ofstream f( configPath.ToStdString() );
-            f << config.dump( 2 );
+            std::ifstream f( configPath.ToStdString() );
+            config = nlohmann::json::parse( f );
         }
-        catch( ... )
-        {
-            appendErrorMessage( wxT( "Failed to save API key." ) );
-        }
+
+        config["api_key"] = m_apiKey;
+        config["cloud_url"] = m_cloudUrl;
+
+        std::ofstream f( configPath.ToStdString() );
+        f << config.dump( 2 );
+    }
+    catch( ... )
+    {
+        appendErrorMessage( wxT( "Failed to save settings." ) );
     }
 }
