@@ -196,6 +196,8 @@ void SCH_EDIT_FRAME::doReCreateMenuBar()
         remoteSymbolItem->SetHelp( _( "Search signed-in remote symbol providers and download verified libraries." ) );
     }
 
+    showHidePanels->Add( SCH_ACTIONS::showCopperPanel, ACTION_MENU::CHECK, _( "Copper AI" ) );
+
     viewMenu->Add( showHidePanels );
 
     viewMenu->AppendSeparator();

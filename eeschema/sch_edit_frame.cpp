@@ -34,6 +34,7 @@
 #include <dialogs/dialog_symbol_fields_table.h>
 #include <widgets/sch_design_block_pane.h>
 #include <widgets/panel_remote_symbol.h>
+#include <widgets/copper_panel.h>
 #include <wx/srchctrl.h>
 #include <mail_type.h>
 #include <wx/clntdata.h>
@@ -173,6 +174,7 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
         m_highlightedConnChanged( false ),
         m_designBlocksPane( nullptr ),
         m_remoteSymbolPane( nullptr ),
+        m_copperPanel( nullptr ),
         m_currentVariantCtrl( nullptr )
 {
     m_maximizeByDefault = true;
@@ -235,6 +237,7 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_searchPane = new SCH_SEARCH_PANE( this );
     m_propertiesPanel = new SCH_PROPERTIES_PANEL( this, this );
     m_remoteSymbolPane = new PANEL_REMOTE_SYMBOL( this );
+    m_copperPanel = new COPPER_PANEL( this );
 
     m_propertiesPanel->SetSplitterProportion( eeconfig()->m_AuiPanels.properties_splitter );
 
@@ -275,6 +278,17 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     m_auimgr.AddPane( m_designBlocksPane, defaultDesignBlocksPaneInfo( this ) );
     m_auimgr.AddPane( m_remoteSymbolPane, defaultRemoteSymbolPaneInfo( this ) );
+
+    m_auimgr.AddPane( m_copperPanel, EDA_PANE().Palette().Name( wxT( "CopperPanel" ) )
+                      .Caption( _( "Copper AI" ) )
+                      .Right().Layer( 3 ).Position( 2 )
+                      .TopDockable( false )
+                      .BottomDockable( false )
+                      .CloseButton( true )
+                      .MinSize( FromDIP( wxSize( 280, 200 ) ) )
+                      .BestSize( FromDIP( wxSize( 360, 400 ) ) )
+                      .FloatingSize( FromDIP( wxSize( 420, 600 ) ) )
+                      .Show( false ) );
 
     m_auimgr.AddPane( createHighlightedNetNavigator(), defaultNetNavigatorPaneInfo() );
 
@@ -2993,6 +3007,19 @@ void SCH_EDIT_FRAME::ToggleRemoteSymbolPanel()
 
         m_auimgr.Update();
     }
+}
+
+
+void SCH_EDIT_FRAME::ToggleCopperPanel()
+{
+    wxAuiPaneInfo& copperPane = m_auimgr.GetPane( wxT( "CopperPanel" ) );
+
+    copperPane.Show( !copperPane.IsShown() );
+
+    if( copperPane.IsShown() && m_copperPanel )
+        m_copperPanel->Activate();
+
+    m_auimgr.Update();
 }
 
 
