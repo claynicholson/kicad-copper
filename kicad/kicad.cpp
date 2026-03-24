@@ -93,7 +93,7 @@ PGM_KICAD& PgmTop()
 
 bool PGM_KICAD::OnPgmInit()
 {
-    App().SetAppDisplayName( wxT( "KiCad" ) );
+    App().SetAppDisplayName( wxT( "KiCad Copper" ) );
 
 #if defined(DEBUG)
     wxString absoluteArgv0 = wxStandardPaths::Get().GetExecutablePath();
