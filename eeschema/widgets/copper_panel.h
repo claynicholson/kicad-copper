@@ -31,6 +31,7 @@
 
 class SCH_EDIT_FRAME;
 class wxButton;
+class wxChoice;
 class wxRichTextCtrl;
 class wxStaticText;
 class wxTextCtrl;
@@ -67,6 +68,7 @@ private:
 
     // Intent detection
     wxString detectIntent( const wxString& aPrompt );
+    std::string getVendorFilter();
 
     // API calls (background thread)
     void doChat( const wxString& aPrompt );
@@ -83,6 +85,7 @@ private:
 
     // HTTP helpers
     std::string callCloudAPI( const std::string& aEndpoint, const nlohmann::json& aBody );
+    std::vector<std::pair<std::string, std::string>> parseSSE( const std::string& aRaw );
 
     // Config
     void loadConfig();
@@ -95,6 +98,7 @@ private:
     wxRichTextCtrl*    m_conversation;
     wxTextCtrl*        m_input;
     wxButton*          m_sendButton;
+    wxChoice*          m_vendorChoice;
     wxStaticText*      m_statusText;
 
     // State
