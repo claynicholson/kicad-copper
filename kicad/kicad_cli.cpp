@@ -407,7 +407,7 @@ static std::vector<std::string> preprocessArgs( int argc, char** argv )
 bool PGM_KICAD::OnPgmInit()
 {
     PGM_BASE::BuildArgvUtf8();
-    App().SetAppDisplayName( wxT( "kicad-cli" ) );
+    App().SetAppDisplayName( wxT( "kicad-copper-cli" ) );
 
 #if defined( DEBUG )
     wxString absoluteArgv0 = wxStandardPaths::Get().GetExecutablePath();
