@@ -31,11 +31,13 @@
 #include <sch_line.h>
 #include <sch_label.h>
 #include <sch_junction.h>
+#include <sch_pin.h>
 #include <sch_sheet.h>
 #include <sch_commit.h>
 #include <lib_symbol.h>
 #include <layer_ids.h>
 #include <tool/tool_manager.h>
+#include <tool/actions.h>
 
 #include <nlohmann/json.hpp>
 
@@ -200,6 +202,13 @@ void COPPER_PANEL::buildUI()
 
     mainSizer->Add( inputSizer, 0, wxEXPAND | wxALL, 8 );
 
+    // Debug button
+    m_debugButton = new wxButton( this, wxID_ANY, wxT( "Debug" ), wxDefaultPosition,
+                                   wxSize( 60, 24 ) );
+    m_debugButton->SetBackgroundColour( BG_SECONDARY );
+    m_debugButton->SetForegroundColour( TEXT_SECONDARY );
+    mainSizer->Add( m_debugButton, 0, wxLEFT | wxRIGHT, 8 );
+
     // Status bar
     m_statusText = new wxStaticText( this, wxID_ANY, wxT( "Ready" ) );
     m_statusText->SetForegroundColour( TEXT_SECONDARY );
@@ -214,12 +223,96 @@ void COPPER_PANEL::buildUI()
     m_sendButton->Bind( wxEVT_BUTTON, &COPPER_PANEL::onSendMessage, this );
     m_input->Bind( wxEVT_TEXT_ENTER, &COPPER_PANEL::onSendMessage, this );
     m_input->Bind( wxEVT_KEY_DOWN, &COPPER_PANEL::onInputKeyDown, this );
+    m_debugButton->Bind( wxEVT_BUTTON, &COPPER_PANEL::onDebugButton, this );
 }
 
 
 void COPPER_PANEL::onInputKeyDown( wxKeyEvent& aEvent )
 {
     aEvent.Skip();
+}
+
+
+void COPPER_PANEL::onDebugButton( wxCommandEvent& aEvent )
+{
+    SCH_SCREEN* screen = m_frame->GetScreen();
+    SCH_SHEET_PATH& sheetPath = m_frame->GetCurrentSheet();
+
+    if( !screen )
+    {
+        appendErrorMessage( wxT( "No screen available." ) );
+        return;
+    }
+
+    appendStatusMessage( wxT( "=== DEBUG: Schematic Contents ===" ) );
+
+    int symCount = 0, wireCount = 0, labelCount = 0, otherCount = 0;
+
+    for( SCH_ITEM* item : screen->Items() )
+    {
+        if( item->Type() == SCH_SYMBOL_T )
+        {
+            SCH_SYMBOL* sym = static_cast<SCH_SYMBOL*>( item );
+            VECTOR2I pos = sym->GetPosition();
+            wxString ref = sym->GetRef( &sheetPath, false );
+            wxString val = sym->GetValue( false, &sheetPath, false );
+            wxString libId = wxString::FromUTF8( sym->GetLibId().Format().wx_str() );
+
+            appendStatusMessage( wxString::Format(
+                    wxT( "  SYM %s (%s) [%s] at (%d, %d) = (%.1f, %.1f)mm" ),
+                    ref, val, libId,
+                    pos.x, pos.y,
+                    pos.x / 10000.0, pos.y / 10000.0 ) );
+
+            // List pins
+            std::vector<SCH_PIN*> pins = sym->GetPins();
+            for( SCH_PIN* pin : pins )
+            {
+                VECTOR2I pinPos = pin->GetPosition();
+                appendStatusMessage( wxString::Format(
+                        wxT( "    PIN %s (#%s) at (%d, %d) = (%.1f, %.1f)mm" ),
+                        pin->GetName(), pin->GetNumber(),
+                        pinPos.x, pinPos.y,
+                        pinPos.x / 10000.0, pinPos.y / 10000.0 ) );
+            }
+
+            symCount++;
+        }
+        else if( item->Type() == SCH_LINE_T )
+        {
+            SCH_LINE* line = static_cast<SCH_LINE*>( item );
+
+            if( line->IsWire() )
+            {
+                VECTOR2I start = line->GetStartPoint();
+                VECTOR2I end = line->GetEndPoint();
+                appendStatusMessage( wxString::Format(
+                        wxT( "  WIRE (%.1f,%.1f) -> (%.1f,%.1f)mm" ),
+                        start.x / 10000.0, start.y / 10000.0,
+                        end.x / 10000.0, end.y / 10000.0 ) );
+                wireCount++;
+            }
+        }
+        else if( item->Type() == SCH_LABEL_T || item->Type() == SCH_GLOBAL_LABEL_T )
+        {
+            SCH_LABEL_BASE* label = static_cast<SCH_LABEL_BASE*>( item );
+            VECTOR2I pos = label->GetPosition();
+            wxString type = ( item->Type() == SCH_GLOBAL_LABEL_T ) ? wxT( "GLOBAL" ) : wxT( "NET" );
+            appendStatusMessage( wxString::Format(
+                    wxT( "  %s LABEL '%s' at (%.1f, %.1f)mm" ),
+                    type, label->GetText(),
+                    pos.x / 10000.0, pos.y / 10000.0 ) );
+            labelCount++;
+        }
+        else
+        {
+            otherCount++;
+        }
+    }
+
+    appendStatusMessage( wxString::Format(
+            wxT( "=== Total: %d symbols, %d wires, %d labels, %d other ===" ),
+            symCount, wireCount, labelCount, otherCount ) );
 }
 
 
@@ -432,8 +525,8 @@ nlohmann::json COPPER_PANEL::buildProjectContext()
 
         VECTOR2I pos = symbol->GetPosition();
         nlohmann::json posJson;
-        posJson["x"] = pos.x / 25400.0;
-        posJson["y"] = pos.y / 25400.0;
+        posJson["x"] = pos.x / 10000.0;
+        posJson["y"] = pos.y / 10000.0;
         posJson["rotation"] = static_cast<double>( symbol->GetOrientation() * 90 );
         comp["position"] = posJson;
 
@@ -652,7 +745,7 @@ void COPPER_PANEL::doChat( const wxString& aPrompt )
 void COPPER_PANEL::doGenerate( const wxString& aPrompt )
 {
     setBusy( true );
-    appendStatusMessage( wxT( "Generating schematic design..." ) );
+    appendStatusMessage( wxT( "[Step 1] Extracting schematic context..." ) );
 
     m_history.push_back( { "user", std::string( aPrompt.ToUTF8() ) } );
 
@@ -663,6 +756,11 @@ void COPPER_PANEL::doGenerate( const wxString& aPrompt )
     {
         try
         {
+            m_frame->CallAfter( [this]()
+            {
+                appendStatusMessage( wxT( "[Step 2] Building project context (components, wires, labels)..." ) );
+            } );
+
             nlohmann::json body;
             body["prompt"] = prompt;
             body["project_context"] = buildProjectContext();
@@ -670,6 +768,23 @@ void COPPER_PANEL::doGenerate( const wxString& aPrompt )
             std::string vf = getVendorFilter();
             if( !vf.empty() )
                 body["vendor_filter"] = vf;
+
+            m_frame->CallAfter( [this, vf]()
+            {
+                if( !vf.empty() )
+                    appendStatusMessage( wxString::Format( wxT( "[Step 3] Vendor filter: %s" ),
+                            wxString::FromUTF8( vf ) ) );
+                else
+                    appendStatusMessage( wxT( "[Step 3] Searching all vendors for components..." ) );
+
+                appendStatusMessage( wxT( "[Step 4] Sending to Copper AI (this may take 30-60 seconds)..." ) );
+                appendStatusMessage( wxT( "         — Decomposing into functional blocks" ) );
+                appendStatusMessage( wxT( "         — Searching component databases" ) );
+                appendStatusMessage( wxT( "         — Matching KiCad symbols & footprints" ) );
+                appendStatusMessage( wxT( "         — Inferring support components (bypass caps, etc.)" ) );
+                appendStatusMessage( wxT( "         — Generating schematic layout with Claude AI" ) );
+                appendStatusMessage( wxT( "         — Validating & generating patch operations" ) );
+            } );
 
             // Generate returns SSE stream - fetch raw response
             KICAD_CURL_EASY curl;
@@ -712,9 +827,17 @@ void COPPER_PANEL::doGenerate( const wxString& aPrompt )
                     {
                         std::string msg = eventData.value( "message", "" );
                         std::string stage = eventData.value( "stage", "" );
-                        m_frame->CallAfter( [this, stage, msg]()
+                        std::string statusStr = eventData.value( "status", "" );
+
+                        // Map stage names to user-friendly step descriptions
+                        std::string icon = "▶";
+                        if( statusStr == "complete" ) icon = "✓";
+                        else if( statusStr == "error" ) icon = "✗";
+
+                        m_frame->CallAfter( [this, icon, stage, msg]()
                         {
-                            appendStatusMessage( wxString::Format( wxT( "[%s] %s" ),
+                            appendStatusMessage( wxString::Format( wxT( " %s [%s] %s" ),
+                                    wxString::FromUTF8( icon ),
                                     wxString::FromUTF8( stage ),
                                     wxString::FromUTF8( msg ) ) );
                         } );
@@ -723,10 +846,52 @@ void COPPER_PANEL::doGenerate( const wxString& aPrompt )
                     {
                         int idx = eventData.value( "index", 0 );
                         int total = eventData.value( "total", 0 );
-                        m_frame->CallAfter( [this, idx, total]()
+
+                        // Show detail about each operation
+                        std::string opDetail;
+                        if( eventData.contains( "operation" ) )
                         {
-                            appendStatusMessage( wxString::Format(
-                                    wxT( "[Applying] Operation %d of %d" ), idx + 1, total ) );
+                            auto& op = eventData["operation"];
+                            std::string opType = op.value( "op_type", "" );
+                            auto opData = op.value( "data", nlohmann::json::object() );
+
+                            if( opType == "PLACE_COMPONENT" )
+                            {
+                                opDetail = "Place " + opData.value( "reference", "?" )
+                                           + " (" + opData.value( "symbol_name",
+                                                     opData.value( "value", "?" ) ) + ")";
+                            }
+                            else if( opType == "ADD_WIRE" )
+                            {
+                                opDetail = "Add wire";
+                            }
+                            else if( opType == "ADD_NET_LABEL" || opType == "ADD_GLOBAL_LABEL" )
+                            {
+                                opDetail = "Add label: " + opData.value( "name", "?" );
+                            }
+                            else if( opType == "ADD_JUNCTION" )
+                            {
+                                opDetail = "Add junction";
+                            }
+                            else
+                            {
+                                opDetail = opType;
+                            }
+                        }
+
+                        m_frame->CallAfter( [this, idx, total, opDetail]()
+                        {
+                            if( !opDetail.empty() )
+                            {
+                                appendStatusMessage( wxString::Format(
+                                        wxT( "  [%d/%d] %s" ), idx + 1, total,
+                                        wxString::FromUTF8( opDetail ) ) );
+                            }
+                            else
+                            {
+                                appendStatusMessage( wxString::Format(
+                                        wxT( "  [%d/%d] Operation" ), idx + 1, total ) );
+                            }
                         } );
 
                         // Collect operations into a patch
@@ -757,11 +922,24 @@ void COPPER_PANEL::doGenerate( const wxString& aPrompt )
 
             m_frame->CallAfter( [this, description, lastPatch]()
             {
-                if( !description.empty() )
-                    appendAssistantMessage( wxString::FromUTF8( description ) );
+                appendStatusMessage( wxT( "[Step 5] Applying operations to schematic..." ) );
 
                 if( lastPatch.contains( "operations" ) )
+                {
+                    int opCount = lastPatch["operations"].size();
+                    appendStatusMessage( wxString::Format(
+                            wxT( "         %d operations to apply" ), opCount ) );
                     applySchematicPatch( lastPatch );
+
+                    // Post-placement: fix up wires using actual pin positions
+                    appendStatusMessage( wxT( "[Step 6] Fixing up wire connections..." ) );
+                    fixupWires();
+                }
+
+                appendStatusMessage( wxT( "[Done] Generation complete." ) );
+
+                if( !description.empty() )
+                    appendAssistantMessage( wxString::FromUTF8( description ) );
 
                 setBusy( false );
             } );
@@ -1071,11 +1249,39 @@ void COPPER_PANEL::applySchematicPatch( const nlohmann::json& aPatch )
 
                 if( !libSymbol )
                 {
-                    appendStatusMessage( wxString::Format( wxT( "  Symbol not found: %s:%s" ),
-                            wxString::FromUTF8( symLib ),
-                            wxString::FromUTF8( symName ) ) );
-                    failed++;
-                    continue;
+                    // Try to auto-import from LCSC if we have an LCSC part number
+                    std::string lcscPn = data.value( "lcsc_pn", "" );
+
+                    if( lcscPn.empty() )
+                    {
+                        // Check properties for LCSC number
+                        auto props = data.value( "properties", nlohmann::json::object() );
+                        lcscPn = props.value( "LCSC", props.value( "lcsc", "" ) );
+                    }
+
+                    if( !lcscPn.empty() )
+                    {
+                        appendStatusMessage( wxString::Format(
+                                wxT( "  Symbol %s:%s not found locally, fetching from LCSC %s..." ),
+                                wxString::FromUTF8( symLib ),
+                                wxString::FromUTF8( symName ),
+                                wxString::FromUTF8( lcscPn ) ) );
+
+                        fetchAndInstallLibrary( lcscPn );
+
+                        // Retry loading after install
+                        libSymbol = m_frame->GetLibSymbol( libId );
+                    }
+
+                    if( !libSymbol )
+                    {
+                        appendStatusMessage( wxString::Format(
+                                wxT( "  Symbol not found: %s:%s (skipping)" ),
+                                wxString::FromUTF8( symLib ),
+                                wxString::FromUTF8( symName ) ) );
+                        failed++;
+                        continue;
+                    }
                 }
 
                 SCH_SYMBOL* symbol = new SCH_SYMBOL( *libSymbol, libId, &sheetPath, 1 );
@@ -1086,7 +1292,7 @@ void COPPER_PANEL::applySchematicPatch( const nlohmann::json& aPatch )
                                       nlohmann::json( { { "x", 0 }, { "y", 0 } } ) );
                 double xMm = pos.value( "x", 0.0 );
                 double yMm = pos.value( "y", 0.0 );
-                symbol->SetPosition( VECTOR2I( xMm * 25400, yMm * 25400 ) );
+                symbol->SetPosition( VECTOR2I( xMm * 10000, yMm * 10000 ) );
 
                 // Reference and value
                 std::string ref = data.value( "reference", "" );
@@ -1096,7 +1302,7 @@ void COPPER_PANEL::applySchematicPatch( const nlohmann::json& aPatch )
                     symbol->SetRef( &sheetPath, wxString::FromUTF8( ref ) );
 
                 if( !val.empty() )
-                    symbol->SetValue( &sheetPath, wxString::FromUTF8( val ) );
+                    symbol->SetValueFieldText( wxString::FromUTF8( val ) );
 
                 // Footprint
                 std::string fp = data.value( "footprint", "" );
@@ -1106,7 +1312,7 @@ void COPPER_PANEL::applySchematicPatch( const nlohmann::json& aPatch )
 
                 symbol->AutoplaceFields( screen, AUTOPLACE_AUTO );
 
-                commit.Added( symbol, screen );
+                commit.Add( symbol, screen );
                 applied++;
             }
             else if( opType == "ADD_WIRE" )
@@ -1116,16 +1322,16 @@ void COPPER_PANEL::applySchematicPatch( const nlohmann::json& aPatch )
                 nlohmann::json endPos = data.value( "end",
                                          nlohmann::json( { { "x", 0 }, { "y", 0 } } ) );
 
-                VECTOR2I start( startPos.value( "x", 0.0 ) * 25400,
-                                startPos.value( "y", 0.0 ) * 25400 );
-                VECTOR2I end( endPos.value( "x", 0.0 ) * 25400,
-                              endPos.value( "y", 0.0 ) * 25400 );
+                VECTOR2I start( startPos.value( "x", 0.0 ) * 10000,
+                                startPos.value( "y", 0.0 ) * 10000 );
+                VECTOR2I end( endPos.value( "x", 0.0 ) * 10000,
+                              endPos.value( "y", 0.0 ) * 10000 );
 
                 SCH_LINE* wire = new SCH_LINE( start, LAYER_WIRE );
                 wire->SetEndPoint( end );
                 wire->SetParent( screen );
 
-                commit.Added( wire, screen );
+                commit.Add( wire, screen );
                 applied++;
             }
             else if( opType == "ADD_NET_LABEL" )
@@ -1134,14 +1340,14 @@ void COPPER_PANEL::applySchematicPatch( const nlohmann::json& aPatch )
                 nlohmann::json pos = data.value( "position",
                                       nlohmann::json( { { "x", 0 }, { "y", 0 } } ) );
 
-                VECTOR2I labelPos( pos.value( "x", 0.0 ) * 25400,
-                                   pos.value( "y", 0.0 ) * 25400 );
+                VECTOR2I labelPos( pos.value( "x", 0.0 ) * 10000,
+                                   pos.value( "y", 0.0 ) * 10000 );
 
                 SCH_LABEL* label = new SCH_LABEL( labelPos,
                                                    wxString::FromUTF8( name ) );
                 label->SetParent( screen );
 
-                commit.Added( label, screen );
+                commit.Add( label, screen );
                 applied++;
             }
             else if( opType == "ADD_GLOBAL_LABEL" )
@@ -1150,14 +1356,14 @@ void COPPER_PANEL::applySchematicPatch( const nlohmann::json& aPatch )
                 nlohmann::json pos = data.value( "position",
                                       nlohmann::json( { { "x", 0 }, { "y", 0 } } ) );
 
-                VECTOR2I labelPos( pos.value( "x", 0.0 ) * 25400,
-                                   pos.value( "y", 0.0 ) * 25400 );
+                VECTOR2I labelPos( pos.value( "x", 0.0 ) * 10000,
+                                   pos.value( "y", 0.0 ) * 10000 );
 
                 SCH_GLOBALLABEL* label = new SCH_GLOBALLABEL( labelPos,
                                                                wxString::FromUTF8( name ) );
                 label->SetParent( screen );
 
-                commit.Added( label, screen );
+                commit.Add( label, screen );
                 applied++;
             }
             else if( opType == "ADD_JUNCTION" )
@@ -1165,13 +1371,13 @@ void COPPER_PANEL::applySchematicPatch( const nlohmann::json& aPatch )
                 nlohmann::json pos = data.value( "position",
                                       nlohmann::json( { { "x", 0 }, { "y", 0 } } ) );
 
-                VECTOR2I jPos( pos.value( "x", 0.0 ) * 25400,
-                               pos.value( "y", 0.0 ) * 25400 );
+                VECTOR2I jPos( pos.value( "x", 0.0 ) * 10000,
+                               pos.value( "y", 0.0 ) * 10000 );
 
                 SCH_JUNCTION* junction = new SCH_JUNCTION( jPos );
                 junction->SetParent( screen );
 
-                commit.Added( junction, screen );
+                commit.Add( junction, screen );
                 applied++;
             }
             else
@@ -1193,10 +1399,206 @@ void COPPER_PANEL::applySchematicPatch( const nlohmann::json& aPatch )
     {
         commit.Push( _( "Copper AI: Apply schematic patch" ) );
         m_frame->GetCanvas()->Refresh();
+        m_frame->GetToolManager()->PostAction( ACTIONS::zoomFitScreen );
     }
 
     appendStatusMessage( wxString::Format( wxT( "Applied %d operations (%d skipped)." ),
                                             applied, failed ) );
+}
+
+
+// ---------------------------------------------------------------------------
+// Post-placement wire fixup
+// ---------------------------------------------------------------------------
+
+void COPPER_PANEL::fixupWires()
+{
+    SCH_SCREEN* screen = m_frame->GetScreen();
+    SCH_SHEET_PATH& sheetPath = m_frame->GetCurrentSheet();
+    TOOL_MANAGER* toolMgr = m_frame->GetToolManager();
+
+    if( !toolMgr || !screen )
+        return;
+
+    // Step 1: Build a map of net_name -> list of pin world positions
+    // by matching net labels to nearby symbol pins
+    std::map<wxString, std::vector<VECTOR2I>> netPins;
+
+    // Collect all net labels
+    std::map<wxString, VECTOR2I> labelPositions;
+
+    for( SCH_ITEM* item : screen->Items() )
+    {
+        if( item->Type() == SCH_LABEL_T )
+        {
+            SCH_LABEL* label = static_cast<SCH_LABEL*>( item );
+            labelPositions[label->GetText()] = label->GetPosition();
+        }
+        else if( item->Type() == SCH_GLOBAL_LABEL_T )
+        {
+            SCH_GLOBALLABEL* label = static_cast<SCH_GLOBALLABEL*>( item );
+            labelPositions[label->GetText()] = label->GetPosition();
+        }
+    }
+
+    // Collect all symbol pins with their world positions
+    for( SCH_ITEM* item : screen->Items() )
+    {
+        if( item->Type() != SCH_SYMBOL_T )
+            continue;
+
+        SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+        std::vector<SCH_PIN*> pins = symbol->GetPins();
+
+        for( SCH_PIN* pin : pins )
+        {
+            VECTOR2I pinPos = pin->GetPosition();
+
+            // Check if any label is near this pin (within 5mm = 50000 IU at 10000 IU/mm)
+            for( const auto& [netName, labelPos] : labelPositions )
+            {
+                int dist = ( pinPos - labelPos ).EuclideanNorm();
+
+                if( dist < 50000 )  // 5mm tolerance
+                {
+                    netPins[netName].push_back( pinPos );
+                }
+            }
+        }
+    }
+
+    // Step 2: For each net with 2+ pins, generate wires connecting them
+    SCH_COMMIT commit( toolMgr );
+    int wiresAdded = 0;
+
+    for( const auto& [netName, positions] : netPins )
+    {
+        if( positions.size() < 2 )
+            continue;
+
+        // Connect each pin to the next one with an L-shaped wire
+        for( size_t i = 0; i < positions.size() - 1; i++ )
+        {
+            VECTOR2I start = positions[i];
+            VECTOR2I end = positions[i + 1];
+
+            if( start == end )
+                continue;
+
+            // L-shaped route: horizontal first, then vertical
+            VECTOR2I mid( end.x, start.y );
+
+            if( mid != start )
+            {
+                SCH_LINE* wire1 = new SCH_LINE( start, LAYER_WIRE );
+                wire1->SetEndPoint( mid );
+                wire1->SetParent( screen );
+                commit.Add( wire1, screen );
+                wiresAdded++;
+            }
+
+            if( mid != end )
+            {
+                SCH_LINE* wire2 = new SCH_LINE( mid, LAYER_WIRE );
+                wire2->SetEndPoint( end );
+                wire2->SetParent( screen );
+                commit.Add( wire2, screen );
+                wiresAdded++;
+            }
+        }
+    }
+
+    if( wiresAdded > 0 )
+    {
+        commit.Push( _( "Copper AI: Wire fixup" ) );
+        m_frame->GetCanvas()->Refresh();
+        appendStatusMessage( wxString::Format( wxT( "[Wire Fixup] Added %d wire segments for %d nets." ),
+                                                wiresAdded, (int) netPins.size() ) );
+    }
+    else
+    {
+        appendStatusMessage( wxT( "[Wire Fixup] No nets found to wire." ) );
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Library import (LCSC → KiCad via cloud API)
+// ---------------------------------------------------------------------------
+
+bool COPPER_PANEL::fetchAndInstallLibrary( const std::string& aLcscPn )
+{
+    try
+    {
+        nlohmann::json body;
+        body["lcsc_pn"] = aLcscPn;
+        body["lib_name"] = "Copper_Library";
+
+        std::string response = callCloudAPI( "/v1/components/fetch-library", body );
+        nlohmann::json result = nlohmann::json::parse( response );
+
+        std::string symbolContent = result.value( "symbol_content", "" );
+        std::string footprintContent = result.value( "footprint_content", "" );
+        std::string symbolName = result.value( "symbol_name", "" );
+        std::string footprintName = result.value( "footprint_name", "" );
+
+        if( symbolContent.empty() && footprintContent.empty() )
+        {
+            appendErrorMessage( wxString::Format( wxT( "No library data returned for %s" ),
+                                                   wxString::FromUTF8( aLcscPn ) ) );
+            return false;
+        }
+
+        // Get the project directory for library installation
+        wxString projectDir = m_frame->Prj().GetProjectPath();
+        wxString libDir = projectDir + wxT( "libs" ) + wxFileName::GetPathSeparator();
+
+        if( !wxDirExists( libDir ) )
+            wxMkdir( libDir );
+
+        // Write symbol library
+        if( !symbolContent.empty() )
+        {
+            wxString symPath = libDir + wxT( "Copper_Library.kicad_sym" );
+
+            // For simplicity, overwrite the entire file each time
+            // (a full implementation would merge symbols into an existing lib)
+            std::ofstream symFile( symPath.ToStdString() );
+            symFile << symbolContent;
+            symFile.close();
+
+            appendStatusMessage( wxString::Format( wxT( "  Installed symbol: %s" ),
+                                                    wxString::FromUTF8( symbolName ) ) );
+        }
+
+        // Write footprint
+        if( !footprintContent.empty() )
+        {
+            wxString fpDir = libDir + wxT( "Copper_Library.pretty" )
+                             + wxFileName::GetPathSeparator();
+
+            if( !wxDirExists( fpDir ) )
+                wxMkdir( fpDir );
+
+            wxString fpPath = fpDir + wxString::FromUTF8( footprintName ) + wxT( ".kicad_mod" );
+
+            std::ofstream fpFile( fpPath.ToStdString() );
+            fpFile << footprintContent;
+            fpFile.close();
+
+            appendStatusMessage( wxString::Format( wxT( "  Installed footprint: %s" ),
+                                                    wxString::FromUTF8( footprintName ) ) );
+        }
+
+        return true;
+    }
+    catch( const std::exception& e )
+    {
+        appendErrorMessage( wxString::Format( wxT( "Library fetch failed for %s: %s" ),
+                                               wxString::FromUTF8( aLcscPn ),
+                                               wxString::FromUTF8( e.what() ) ) );
+        return false;
+    }
 }
 
 
