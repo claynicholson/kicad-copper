@@ -87,6 +87,9 @@ private:
     // Post-placement wire fixup: read actual pin positions and re-route
     void fixupWires();
 
+    // Check for unconnected pins and attempt to wire them
+    void ensureFullConnectivity();
+
     // Library import (LCSC → KiCad via cloud API)
     bool fetchAndInstallLibrary( const std::string& aLcscPn );
 
