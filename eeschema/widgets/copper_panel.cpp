@@ -31,8 +31,10 @@
 #include <sch_line.h>
 #include <sch_label.h>
 #include <sch_junction.h>
+#include <sch_no_connect.h>
 #include <sch_pin.h>
 #include <sch_sheet.h>
+#include <pin_type.h>
 #include <sch_commit.h>
 #include <lib_symbol.h>
 #include <layer_ids.h>
@@ -934,6 +936,10 @@ void COPPER_PANEL::doGenerate( const wxString& aPrompt )
                     // Post-placement: fix up wires using actual pin positions
                     appendStatusMessage( wxT( "[Step 6] Fixing up wire connections..." ) );
                     fixupWires();
+
+                    // Ensure every pin is connected
+                    appendStatusMessage( wxT( "[Step 7] Ensuring full connectivity..." ) );
+                    ensureFullConnectivity();
                 }
 
                 appendStatusMessage( wxT( "[Done] Generation complete." ) );
@@ -1420,28 +1426,169 @@ void COPPER_PANEL::fixupWires()
     if( !toolMgr || !screen )
         return;
 
-    // Step 1: Build a map of net_name -> list of pin world positions
-    // by matching net labels to nearby symbol pins
-    std::map<wxString, std::vector<VECTOR2I>> netPins;
-
-    // Collect all net labels
-    std::map<wxString, VECTOR2I> labelPositions;
+    // Step 1: Collect all global/net labels and their positions
+    std::map<wxString, std::vector<VECTOR2I>> labelsByNet;
 
     for( SCH_ITEM* item : screen->Items() )
     {
         if( item->Type() == SCH_LABEL_T )
         {
             SCH_LABEL* label = static_cast<SCH_LABEL*>( item );
-            labelPositions[label->GetText()] = label->GetPosition();
+            labelsByNet[label->GetText()].push_back( label->GetPosition() );
         }
         else if( item->Type() == SCH_GLOBAL_LABEL_T )
         {
             SCH_GLOBALLABEL* label = static_cast<SCH_GLOBALLABEL*>( item );
-            labelPositions[label->GetText()] = label->GetPosition();
+            labelsByNet[label->GetText()].push_back( label->GetPosition() );
         }
     }
 
-    // Collect all symbol pins with their world positions
+    // Step 2: For each symbol pin, find matching labels by pin NAME
+    // and add the pin position to that net's position list
+    std::map<wxString, std::vector<VECTOR2I>> netPinPositions;
+
+    for( SCH_ITEM* item : screen->Items() )
+    {
+        if( item->Type() != SCH_SYMBOL_T )
+            continue;
+
+        SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+        std::vector<SCH_PIN*> pins = symbol->GetPins();
+
+        for( SCH_PIN* pin : pins )
+        {
+            wxString pinName = pin->GetName();
+
+            // Check if there's a label with this pin's name
+            if( labelsByNet.count( pinName ) )
+            {
+                netPinPositions[pinName].push_back( pin->GetPosition() );
+            }
+        }
+    }
+
+    // Step 3: For each net, wire labels to their matching pins
+    SCH_COMMIT commit( toolMgr );
+    int wiresAdded = 0;
+    int netsWired = 0;
+
+    for( const auto& [netName, labelPositions] : labelsByNet )
+    {
+        auto it = netPinPositions.find( netName );
+        if( it == netPinPositions.end() )
+            continue;
+
+        const auto& pinPositions = it->second;
+
+        // Wire each label to the nearest pin on this net
+        for( const VECTOR2I& labelPos : labelPositions )
+        {
+            // Find closest pin
+            VECTOR2I closestPin = pinPositions[0];
+            int closestDist = ( labelPos - closestPin ).EuclideanNorm();
+
+            for( size_t i = 1; i < pinPositions.size(); i++ )
+            {
+                int dist = ( labelPos - pinPositions[i] ).EuclideanNorm();
+                if( dist < closestDist )
+                {
+                    closestDist = dist;
+                    closestPin = pinPositions[i];
+                }
+            }
+
+            if( labelPos == closestPin )
+                continue;
+
+            // L-shaped wire from label to pin (horizontal then vertical)
+            VECTOR2I mid( closestPin.x, labelPos.y );
+
+            if( mid != labelPos )
+            {
+                SCH_LINE* wire1 = new SCH_LINE( labelPos, LAYER_WIRE );
+                wire1->SetEndPoint( mid );
+                wire1->SetParent( screen );
+                commit.Add( wire1, screen );
+                wiresAdded++;
+            }
+
+            if( mid != closestPin )
+            {
+                SCH_LINE* wire2 = new SCH_LINE( mid, LAYER_WIRE );
+                wire2->SetEndPoint( closestPin );
+                wire2->SetParent( screen );
+                commit.Add( wire2, screen );
+                wiresAdded++;
+            }
+        }
+
+        netsWired++;
+    }
+
+    if( wiresAdded > 0 )
+    {
+        commit.Push( _( "Copper AI: Wire fixup" ) );
+        m_frame->GetCanvas()->Refresh();
+        appendStatusMessage( wxString::Format(
+                wxT( "[Wire Fixup] Added %d wire segments across %d nets." ),
+                wiresAdded, netsWired ) );
+    }
+    else
+    {
+        appendStatusMessage( wxT( "[Wire Fixup] No matching label-to-pin connections found." ) );
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Full connectivity solver: wire every unconnected pin
+// ---------------------------------------------------------------------------
+
+void COPPER_PANEL::ensureFullConnectivity()
+{
+    SCH_SCREEN* screen = m_frame->GetScreen();
+    TOOL_MANAGER* toolMgr = m_frame->GetToolManager();
+
+    if( !toolMgr || !screen )
+        return;
+
+    // Step 1: Build a set of all wire endpoints (positions that have a connection)
+    std::set<std::pair<int,int>> connectedPositions;
+
+    for( SCH_ITEM* item : screen->Items() )
+    {
+        if( item->Type() == SCH_LINE_T )
+        {
+            SCH_LINE* line = static_cast<SCH_LINE*>( item );
+            if( line->IsWire() )
+            {
+                connectedPositions.insert( { line->GetStartPoint().x, line->GetStartPoint().y } );
+                connectedPositions.insert( { line->GetEndPoint().x, line->GetEndPoint().y } );
+            }
+        }
+        else if( item->Type() == SCH_LABEL_T || item->Type() == SCH_GLOBAL_LABEL_T )
+        {
+            VECTOR2I pos = item->GetPosition();
+            connectedPositions.insert( { pos.x, pos.y } );
+        }
+        else if( item->Type() == SCH_NO_CONNECT_T )
+        {
+            VECTOR2I pos = item->GetPosition();
+            connectedPositions.insert( { pos.x, pos.y } );
+        }
+    }
+
+    // Step 2: Find all unconnected pins
+    struct UnconnectedPin
+    {
+        SCH_PIN* pin;
+        VECTOR2I pos;
+        wxString name;
+        ELECTRICAL_PINTYPE type;
+    };
+
+    std::vector<UnconnectedPin> unconnected;
+
     for( SCH_ITEM* item : screen->Items() )
     {
         if( item->Type() != SCH_SYMBOL_T )
@@ -1453,71 +1600,96 @@ void COPPER_PANEL::fixupWires()
         for( SCH_PIN* pin : pins )
         {
             VECTOR2I pinPos = pin->GetPosition();
+            auto key = std::make_pair( pinPos.x, pinPos.y );
 
-            // Check if any label is near this pin (within 5mm = 50000 IU at 10000 IU/mm)
-            for( const auto& [netName, labelPos] : labelPositions )
+            if( connectedPositions.find( key ) == connectedPositions.end() )
             {
-                int dist = ( pinPos - labelPos ).EuclideanNorm();
+                // This pin has nothing at its position
+                unconnected.push_back( {
+                    pin, pinPos, pin->GetName(), pin->GetType()
+                } );
+            }
+        }
+    }
 
-                if( dist < 50000 )  // 5mm tolerance
+    if( unconnected.empty() )
+    {
+        appendStatusMessage( wxT( "[Connectivity] All pins are connected." ) );
+        return;
+    }
+
+    appendStatusMessage( wxString::Format( wxT( "[Connectivity] Found %d unconnected pins. Fixing..." ),
+                                            (int) unconnected.size() ) );
+
+    SCH_COMMIT commit( toolMgr );
+    int wiresAdded = 0;
+    int noConnectsAdded = 0;
+    int labelsAdded = 0;
+
+    for( const auto& upin : unconnected )
+    {
+        // NC pins get a no-connect flag
+        if( upin.type == ELECTRICAL_PINTYPE::PT_NC )
+        {
+            SCH_NO_CONNECT* nc = new SCH_NO_CONNECT( upin.pos );
+            nc->SetParent( screen );
+            commit.Add( nc, screen );
+            noConnectsAdded++;
+            continue;
+        }
+
+        // Hidden power pins (like duplicate IOVDD on RP2040) — skip
+        // They're internally connected by KiCad
+        if( upin.pin->IsGlobalPower() )
+            continue;
+
+        // For signal pins — add a label with the pin's name + short wire stub
+        wxString netName = upin.name;
+
+        if( netName.IsEmpty() )
+            continue;
+
+        // Check if a label with this name already exists somewhere
+        bool labelExists = false;
+        for( SCH_ITEM* item : screen->Items() )
+        {
+            if( item->Type() == SCH_LABEL_T || item->Type() == SCH_GLOBAL_LABEL_T )
+            {
+                SCH_LABEL_BASE* lbl = static_cast<SCH_LABEL_BASE*>( item );
+                if( lbl->GetText() == netName )
                 {
-                    netPins[netName].push_back( pinPos );
+                    labelExists = true;
+                    break;
                 }
             }
         }
-    }
 
-    // Step 2: For each net with 2+ pins, generate wires connecting them
-    SCH_COMMIT commit( toolMgr );
-    int wiresAdded = 0;
+        // Add a global label at the pin position with a short wire stub
+        VECTOR2I labelPos( upin.pos.x - 10160, upin.pos.y );  // 1 grid unit left (10160 = 1.016mm * 10000)
 
-    for( const auto& [netName, positions] : netPins )
-    {
-        if( positions.size() < 2 )
-            continue;
+        // Short wire from pin to label
+        SCH_LINE* stub = new SCH_LINE( upin.pos, LAYER_WIRE );
+        stub->SetEndPoint( labelPos );
+        stub->SetParent( screen );
+        commit.Add( stub, screen );
+        wiresAdded++;
 
-        // Connect each pin to the next one with an L-shaped wire
-        for( size_t i = 0; i < positions.size() - 1; i++ )
+        if( !labelExists )
         {
-            VECTOR2I start = positions[i];
-            VECTOR2I end = positions[i + 1];
-
-            if( start == end )
-                continue;
-
-            // L-shaped route: horizontal first, then vertical
-            VECTOR2I mid( end.x, start.y );
-
-            if( mid != start )
-            {
-                SCH_LINE* wire1 = new SCH_LINE( start, LAYER_WIRE );
-                wire1->SetEndPoint( mid );
-                wire1->SetParent( screen );
-                commit.Add( wire1, screen );
-                wiresAdded++;
-            }
-
-            if( mid != end )
-            {
-                SCH_LINE* wire2 = new SCH_LINE( mid, LAYER_WIRE );
-                wire2->SetEndPoint( end );
-                wire2->SetParent( screen );
-                commit.Add( wire2, screen );
-                wiresAdded++;
-            }
+            SCH_GLOBALLABEL* label = new SCH_GLOBALLABEL( labelPos, netName );
+            label->SetParent( screen );
+            commit.Add( label, screen );
+            labelsAdded++;
         }
     }
 
-    if( wiresAdded > 0 )
+    if( wiresAdded > 0 || noConnectsAdded > 0 || labelsAdded > 0 )
     {
-        commit.Push( _( "Copper AI: Wire fixup" ) );
+        commit.Push( _( "Copper AI: Ensure connectivity" ) );
         m_frame->GetCanvas()->Refresh();
-        appendStatusMessage( wxString::Format( wxT( "[Wire Fixup] Added %d wire segments for %d nets." ),
-                                                wiresAdded, (int) netPins.size() ) );
-    }
-    else
-    {
-        appendStatusMessage( wxT( "[Wire Fixup] No nets found to wire." ) );
+        appendStatusMessage( wxString::Format(
+                wxT( "[Connectivity] Added %d wires, %d labels, %d no-connect flags." ),
+                wiresAdded, labelsAdded, noConnectsAdded ) );
     }
 }
 
