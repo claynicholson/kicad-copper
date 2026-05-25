@@ -490,6 +490,14 @@ set( EESCHEMA_SRCS
     tools/symbol_editor_edit_tool.cpp
     tools/symbol_editor_move_tool.cpp
     tools/symbol_editor_pin_tool.cpp
+
+    # ── Copper AI integration (kicad-copper) ──
+    # See docs/FORK_SURFACE.md and docs/ARCHITECTURE.md for the layering.
+    copper/copper_auth.cpp
+    copper/copper_client.cpp
+    widgets/copper_chat_widgets.cpp
+    widgets/copper_chat_panel.cpp
+    api/http_bridge.cpp
     )
 
 if( KICAD_IPC_API )

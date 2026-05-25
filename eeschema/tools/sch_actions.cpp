@@ -131,6 +131,13 @@ TOOL_ACTION SCH_ACTIONS::showRemoteSymbolPanel( TOOL_ACTION_ARGS()
         .Tooltip( _( "Show/hide the remote symbol panel" ) )
         .Icon( BITMAPS::library_browser ) );
 
+TOOL_ACTION SCH_ACTIONS::showCopperPanel( TOOL_ACTION_ARGS()
+        .Name( "eeschema.Copper.showPanel" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Copper AI" ) )
+        .Tooltip( _( "Show/hide the Copper AI assistant panel" ) )
+        .Icon( BITMAPS::info ) );
+
 TOOL_ACTION SCH_ACTIONS::saveSheetAsDesignBlock( TOOL_ACTION_ARGS()
         .Name( "eeschema.SchDesignBlockControl.saveSheetAsDesignBlock" )
         .Scope( AS_GLOBAL )

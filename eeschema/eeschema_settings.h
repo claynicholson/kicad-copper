@@ -266,6 +266,19 @@ public:
         int  sort_mode;
     };
 
+    /**
+     * Copper AI integration settings (kicad-copper).
+     * See ../docs/PROTOCOL.md and ../docs/DECISIONS.md ADR-005 for the
+     * env > settings > default resolution rule applied at request time.
+     */
+    struct COPPER_AI
+    {
+        wxString api_url;                ///< default: https://api.copper.dev
+        bool     show_panel_on_startup;  ///< auto-open the panel
+        int      stream_idle_timeout_s;  ///< SSE idle timeout
+        int      request_timeout_s;      ///< non-streaming timeout
+    };
+
     struct DIALOG_ERC
     {
         bool crossprobe;
@@ -353,6 +366,8 @@ public:
     DIALOG_CHANGE_SYMBOLS     m_ChangeSymbols;
 
     SIMULATOR                 m_Simulator;
+
+    COPPER_AI                 m_Copper;
 
     bool                      m_RescueNeverShow;
 

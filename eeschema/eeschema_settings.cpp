@@ -644,6 +644,20 @@ EESCHEMA_SETTINGS::EESCHEMA_SETTINGS() :
     m_params.emplace_back( new PARAM<bool>( "system.never_show_rescue_dialog",
             &m_RescueNeverShow, false ) );
 
+    // ── Copper AI integration ──
+    // ADR-005: env COPPER_API_URL overrides this at resolve time.
+    m_params.emplace_back( new PARAM<wxString>( "copper.api_url",
+            &m_Copper.api_url, wxT( "https://api.copper.dev" ) ) );
+
+    m_params.emplace_back( new PARAM<bool>( "copper.show_panel_on_startup",
+            &m_Copper.show_panel_on_startup, false ) );
+
+    m_params.emplace_back( new PARAM<int>( "copper.stream_idle_timeout_s",
+            &m_Copper.stream_idle_timeout_s, 120 ) );
+
+    m_params.emplace_back( new PARAM<int>( "copper.request_timeout_s",
+            &m_Copper.request_timeout_s, 60 ) );
+
     addParamsForWindow( &m_LibViewPanel.window, "lib_view.window", 500, 400 );
 
     m_params.emplace_back( new PARAM<int>( "lib_view.lib_list_width",
