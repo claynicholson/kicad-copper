@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-05-24T23:45:25Z",
+  "timestamp": "2026-05-25T03:44:57Z",
   "total_score": 100.0,
   "polished": true,
   "hard_gate_passes": 7,
@@ -91,6 +91,17 @@
       "score_weighted": 8.0,
       "skipped": false,
       "details": "25 tests, 0 failed, 0 errored",
+      "failures": []
+    },
+    {
+      "id": 9,
+      "name": "Cross-repo lockstep",
+      "weight": 0,
+      "hard_gate": false,
+      "score_unit": 1.0,
+      "score_weighted": 0.0,
+      "skipped": false,
+      "details": "4 tests, 0 failed, 0 errored, 0 skipped",
       "failures": []
     }
   ]
