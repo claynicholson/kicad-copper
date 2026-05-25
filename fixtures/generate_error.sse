@@ -1,0 +1,9 @@
+event: stage
+data: {"name":"choosing_parts","status":"active"}
+
+event: stage
+data: {"name":"choosing_parts","status":"error"}
+
+event: error
+data: {"message":"Couldn't find a suitable part for 'flux capacitor'.","code":"part_not_found"}
+

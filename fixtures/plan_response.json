@@ -1,0 +1,15 @@
+{
+  "protocol_version": 1,
+  "success": true,
+  "intent": "plan",
+  "message": "Here's what I'd do.",
+  "operations": [],
+  "plan": {
+    "steps": [
+      {"index": 0, "description": "Add an LM1117-3.3 LDO."},
+      {"index": 1, "description": "Add 10 µF input bulk cap, 22 µF output."},
+      {"index": 2, "description": "Connect VIN, VOUT, GND."}
+    ],
+    "placement_info": "vertically stacked on the left"
+  }
+}
