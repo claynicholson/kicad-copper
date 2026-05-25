@@ -1,0 +1,9 @@
+event: stage
+data: {"name":"choosing_parts","status":"active"}
+
+event: stage
+data: {"name":"choosing_parts","status":"complete"}
+
+event: message
+data: {"text":"Working on it..."}
+

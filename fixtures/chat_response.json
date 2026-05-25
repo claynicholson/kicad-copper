@@ -1,0 +1,8 @@
+{
+  "protocol_version": 1,
+  "success": true,
+  "intent": "chat",
+  "message": "A bypass capacitor lives close to the power pin of each IC. Typical value: 100 nF ceramic. Add a larger 1–10 µF bulk cap nearby for the whole rail.",
+  "operations": [],
+  "error": ""
+}

@@ -1,0 +1,30 @@
+event: stage
+data: {"name":"choosing_parts","status":"active"}
+
+event: message
+data: {"text":"Picked an RP2040 and an LSM6DSO IMU."}
+
+event: stage
+data: {"name":"choosing_parts","status":"complete"}
+
+event: stage
+data: {"name":"expanding_reference_circuits","status":"active"}
+
+event: stage
+data: {"name":"expanding_reference_circuits","status":"complete"}
+
+event: stage
+data: {"name":"placement","status":"active"}
+
+event: stage
+data: {"name":"placement","status":"complete"}
+
+event: plan
+data: {"steps":[{"index":0,"description":"Place RP2040 at (12.7mm,12.7mm)"},{"index":1,"description":"Place LSM6DSO at (25.4mm,12.7mm)"},{"index":2,"description":"Add I2C nets SDA/SCL"}],"placement_info":"top-left of free area"}
+
+event: stage
+data: {"name":"verifying","status":"complete"}
+
+event: done
+data: {"protocol_version":1,"success":true,"intent":"generate","message":"Designed an RP2040 + IMU board.","operations":[{"type":"PLACE_COMPONENT","data":{"lib_id":"MCU_RaspberryPi:RP2040","reference":"U1","value":"RP2040","x":12700000,"y":12700000,"rotation":0.0}},{"type":"PLACE_COMPONENT","data":{"lib_id":"Sensor_Motion:LSM6DSO","reference":"U2","value":"LSM6DSO","x":25400000,"y":12700000,"rotation":0.0}},{"type":"ADD_POWER_SYMBOL","data":{"net_name":"+3V3","x":15240000,"y":10160000}},{"type":"ADD_POWER_SYMBOL","data":{"net_name":"GND","x":15240000,"y":17780000}},{"type":"ADD_LABEL","data":{"name":"SDA","x":17780000,"y":12700000,"label_type":"local"}},{"type":"ADD_LABEL","data":{"name":"SCL","x":17780000,"y":15240000,"label_type":"local"}},{"type":"ADD_WIRE","data":{"start_x":17780000,"start_y":12700000,"end_x":22860000,"end_y":12700000}},{"type":"ADD_WIRE","data":{"start_x":17780000,"start_y":15240000,"end_x":22860000,"end_y":15240000}},{"type":"ADD_JUNCTION","data":{"x":22860000,"y":12700000}},{"type":"ADD_JUNCTION","data":{"x":22860000,"y":15240000}}],"plan":{"steps":[{"index":0,"description":"Place RP2040"},{"index":1,"description":"Place LSM6DSO"},{"index":2,"description":"I2C nets"}],"placement_info":"top-left"},"erc":{"errors":0,"warnings":1,"messages":[{"severity":"warning","code":"no_decoupling","text":"no decoupling cap near U1","refs":["U1"]}]}}
+

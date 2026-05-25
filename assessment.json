@@ -1,0 +1,97 @@
+{
+  "timestamp": "2026-05-24T23:45:25Z",
+  "total_score": 100.0,
+  "polished": true,
+  "hard_gate_passes": 7,
+  "hard_gate_total": 7,
+  "checks": [
+    {
+      "id": 1,
+      "name": "Imports/loads",
+      "weight": 8,
+      "hard_gate": true,
+      "score_unit": 1.0,
+      "score_weighted": 8.0,
+      "skipped": false,
+      "details": "py modules: 9 ok\nC++ wiring: 5 files in CMake checked",
+      "failures": []
+    },
+    {
+      "id": 2,
+      "name": "Lint/format",
+      "weight": 6,
+      "hard_gate": false,
+      "score_unit": 1.0,
+      "score_weighted": 6.0,
+      "skipped": true,
+      "details": "ruff not installed; skipped (no penalty)",
+      "failures": []
+    },
+    {
+      "id": 3,
+      "name": "BackendClient unit",
+      "weight": 16,
+      "hard_gate": true,
+      "score_unit": 1.0,
+      "score_weighted": 16.0,
+      "skipped": false,
+      "details": "31 tests, 0 failed, 0 errored",
+      "failures": []
+    },
+    {
+      "id": 4,
+      "name": "Response validation",
+      "weight": 14,
+      "hard_gate": true,
+      "score_unit": 1.0,
+      "score_weighted": 14.0,
+      "skipped": false,
+      "details": "40 tests, 0 failed, 0 errored",
+      "failures": []
+    },
+    {
+      "id": 5,
+      "name": "Apply correctness",
+      "weight": 18,
+      "hard_gate": true,
+      "score_unit": 1.0,
+      "score_weighted": 18.0,
+      "skipped": false,
+      "details": "7 tests, 0 failed, 0 errored",
+      "failures": []
+    },
+    {
+      "id": 6,
+      "name": "Atomic rollback",
+      "weight": 16,
+      "hard_gate": true,
+      "score_unit": 1.0,
+      "score_weighted": 16.0,
+      "skipped": false,
+      "details": "12 tests, 0 failed, 0 errored",
+      "failures": []
+    },
+    {
+      "id": 7,
+      "name": "Applied-board quality",
+      "weight": 14,
+      "hard_gate": true,
+      "score_unit": 1.0,
+      "score_weighted": 14.0,
+      "skipped": false,
+      "details": "8 tests, 0 failed, 0 errored",
+      "failures": []
+    },
+    {
+      "id": 8,
+      "name": "State handling",
+      "weight": 8,
+      "hard_gate": true,
+      "score_unit": 1.0,
+      "score_weighted": 8.0,
+      "skipped": false,
+      "details": "25 tests, 0 failed, 0 errored",
+      "failures": []
+    }
+  ]
+}

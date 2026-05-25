@@ -1,0 +1,6 @@
+event: stage
+data: {"name":"placement","status":"complete"}
+
+event: done
+data: {"protocol_version":1,"success":true,"intent":"generate","operations":[{"type":"PLACE_COMPONENT","data":{"lib_id":"","reference":"U1","value":"x","x":0,"y":0}}]}
+

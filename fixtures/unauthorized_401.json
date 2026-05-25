@@ -1,0 +1,4 @@
+{
+  "error": "Invalid or expired access token.",
+  "code": "auth_required"
+}
