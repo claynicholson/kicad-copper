@@ -7,3 +7,7 @@ Per-check unit scores (0–100%). H = hard-gate-only. T = total weighted score (
 | 2026-05-24T19:21:36Z | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100.0 | yes |  |
 | 2026-05-24T19:23:15Z | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100.0 | yes | final M6 acceptance run |
 | 2026-05-24T23:45:25Z | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100.0 | yes | post-merge with origin/master |
+| 2026-05-25T03:40:54Z | 100 | 100 | 0 | 0 | 0 | 0 | 0 | 0 | 14.0 | no | Phase 1 L0/L1/L2 — protocol shared with copper-2 |
+| 2026-05-25T03:41:37Z | 100 | 100 | 0 | 0 | 0 | 0 | 0 | 0 | 14.0 | no |  |
+| 2026-05-25T03:42:57Z | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100.0 | yes | Phase 1 L0/L1/L2 — protocol shared with copper-2 |
+| 2026-05-25T03:44:57Z | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100.0 | yes | Phase 1 complete: L0/L1/L2/L5 |

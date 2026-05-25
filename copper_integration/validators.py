@@ -1,10 +1,21 @@
-"""
-Response + operation validation. Implements the "Hard rejects" list from
-docs/PROTOCOL.md.
+"""validators.py — backward-compat shim over copper.protocol (Phase 1 L2).
 
-The C++ side does the same checks in CopperResponse::fromJson +
-COPPER_CHAT_PANEL::ExecuteOperations (after M3). This module is the
-canonical reference — both sides must stay in sync.
+Before Phase 1 this file owned the validation rules in ~280 lines of hand-
+rolled checks. After Phase 1 the source of truth is copper-2's Pydantic
+models. We expose the same names so existing tests / code don't need to
+change import paths.
+
+Why a shim instead of full deletion: existing tests + ApplyEngine import
+`validate_response` / `validate_operation` / `ValidationError` /
+`check_no_symbol_overlap` / the rotation + label-type constants. Pydantic
+gives equivalent validation but with different exception types and a
+different success object. The shim adapts:
+
+    raw dict   → validate_response → ValidatedResponse (mirror of old shape)
+    raw op     → validate_operation → ValidatedOperation
+    Pydantic ValidationError → our ValidationError (with .path + .code)
+
+Same semantics, same hard-rejects (PROTOCOL.md), one source of truth.
 """
 
 from __future__ import annotations
@@ -12,36 +23,46 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-PROTOCOL_VERSION = 1
-COORD_MIN = -1_000_000_000
-COORD_MAX = 1_000_000_000
-
-KNOWN_OP_TYPES = (
-    "PLACE_COMPONENT",
-    "ADD_WIRE",
-    "ADD_LABEL",
-    "ADD_JUNCTION",
-    "ADD_POWER_SYMBOL",
+# Pull canonical names from the protocol package. The path injection runs
+# at `copper_integration.__init__` import time.
+from copper.protocol import (  # noqa: E402
+    ALLOWED_ROTATIONS as _ALLOWED_ROTATIONS_TUPLE,
+    COORD_MAX,
+    COORD_MIN,
+    OP_TYPE_NAMES as KNOWN_OP_TYPES,
+    PROTOCOL_VERSION,
 )
+from copper.protocol.apply_plan import (  # noqa: E402
+    ApplyPlan as _PydApplyPlan,
+    AddJunction as _PydAddJunction,
+    AddLabel as _PydAddLabel,
+    AddPowerSymbol as _PydAddPowerSymbol,
+    AddWire as _PydAddWire,
+    PlaceComponent as _PydPlaceComponent,
+)
+from pydantic import ValidationError as _PydValidationError  # noqa: E402
 
+
+# Compat: tests reference both the tuple and the literal sequence.
+KNOWN_ROTATIONS = _ALLOWED_ROTATIONS_TUPLE
 KNOWN_LABEL_TYPES = ("local", "global", "hierarchical")
-KNOWN_ROTATIONS = (0.0, 90.0, 180.0, 270.0)
 
 
 class ValidationError(Exception):
-    """Raised when a backend response or operation fails PROTOCOL.md checks.
-
-    Carries .path to point at the offending field, and .code for
-    machine-friendly identifying.
-    """
+    """Same shape as the pre-Phase-1 exception so existing tests pass.
+    `.path` points at the offending JSON Pointer-ish location; `.code` is
+    a stable identifier the harness matches on."""
 
     def __init__(self, message: str, *, path: str = "", code: str = ""):
         super().__init__(message)
         self.path = path
         self.code = code
 
-    def __repr__(self) -> str:  # pragma: no cover — debug aid
-        return f"ValidationError(code={self.code!r}, path={self.path!r}, msg={self.args[0]!r})"
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"ValidationError(code={self.code!r}, path={self.path!r}, "
+            f"msg={self.args[0]!r})"
+        )
 
 
 @dataclass
@@ -52,6 +73,7 @@ class ValidatedOperation:
 
 @dataclass
 class ValidatedResponse:
+    """Same shape the legacy harness exposed — drives ApplyEngine and tests."""
     protocol_version: int
     success: bool
     intent: str
@@ -61,26 +83,167 @@ class ValidatedResponse:
     placement_info: str
     error: str
     erc: Optional[Dict[str, Any]]
-    raw: Dict[str, Any]  # the original parsed dict, for diagnostics
+    raw: Dict[str, Any]
 
 
-# ── public entrypoints ─────────────────────────────────────────────────────
+# ── op-type → Pydantic model for single-op validation ──────────────────────
+
+_PYD_BY_TYPE = {
+    "PLACE_COMPONENT": _PydPlaceComponent,
+    "ADD_WIRE": _PydAddWire,
+    "ADD_LABEL": _PydAddLabel,
+    "ADD_JUNCTION": _PydAddJunction,
+    "ADD_POWER_SYMBOL": _PydAddPowerSymbol,
+}
+
+
+def _normalize_op_for_pydantic(op: Any) -> Dict[str, Any]:
+    """The wire shape is `{type, data}` with op-specific fields under `data`.
+    Pydantic models are flat (type + fields at the top level). Flatten."""
+    if not isinstance(op, dict):
+        raise ValidationError(
+            f"operation must be an object, got {type(op).__name__}",
+            code="op_not_object",
+        )
+    t = op.get("type")
+    if not isinstance(t, str) or not t:
+        raise ValidationError(
+            "operation.type must be non-empty string",
+            code="op_no_type",
+        )
+    if t not in KNOWN_OP_TYPES:
+        raise ValidationError(
+            f"unknown operation type {t!r}",
+            code="op_unknown_type",
+        )
+    data = op.get("data", {})
+    if not isinstance(data, dict):
+        raise ValidationError(
+            "operation.data must be an object",
+            code="op_bad_data",
+        )
+    flat = {"type": t}
+    flat.update(data)
+    return flat
+
+
+# ── exception translation: Pydantic → our ValidationError with stable codes ─
+
+# Map (op_type, pydantic_loc_tail, pydantic_error_type) → (.code, friendly msg).
+# loc_tail is the LAST element of the pydantic-reported location. Add cases
+# here as new validation rules land in copper.protocol. Default is
+# code="schema" with the raw pydantic message.
+# Pydantic int-related error types: 'int_type' (wrong type), 'int_from_float'
+# (float passed, has fractional part). Both map to the legacy bad_coord_type
+# code so existing tests don't have to know the distinction.
+_INT_TYPE_ERRORS = ("int_type", "int_from_float", "int_parsing")
+_RANGE_ERRORS = ("less_than_equal", "greater_than_equal")
+
+_CODE_FROM_PYD: Dict[Tuple[str, str, str], str] = {
+    # PLACE_COMPONENT
+    ("PLACE_COMPONENT", "lib_id", "string_too_short"): "place_no_lib_id",
+    ("PLACE_COMPONENT", "lib_id", "value_error"): "place_bad_lib_id",
+    ("PLACE_COMPONENT", "reference", "string_too_short"): "place_no_ref",
+    ("PLACE_COMPONENT", "rotation", "value_error"): "place_bad_rot_value",
+    # ADD_LABEL
+    ("ADD_LABEL", "name", "string_too_short"): "label_no_name",
+    ("ADD_LABEL", "name", "string_too_long"): "label_long_name",
+    ("ADD_LABEL", "label_type", "literal_error"): "label_bad_type",
+    # ADD_POWER_SYMBOL
+    ("ADD_POWER_SYMBOL", "net_name", "string_too_short"): "power_no_net",
+}
+
+# Coord errors are op-agnostic — same code regardless of op type.
+_COORD_FIELDS = {"x", "y", "start_x", "start_y", "end_x", "end_y"}
+
+
+def _convert_pyd_error(pyd_err: _PydValidationError, *, op_type: str, op_index: int) -> ValidationError:
+    """Pick the first error from a pydantic ValidationError and translate."""
+    errs = pyd_err.errors()
+    first = errs[0] if errs else {}
+    loc = first.get("loc", ())
+    msg = first.get("msg", str(pyd_err))
+    etype = first.get("type", "")
+    tail = str(loc[-1]) if loc else ""
+
+    # Whole-model wire validation (zero-length): pydantic raises with loc=()
+    # and msg containing "zero length"
+    if op_type == "ADD_WIRE" and "zero length" in msg.lower():
+        return ValidationError(
+            f"ADD_WIRE: zero-length wire",
+            path=f"$.operations[{op_index}].data",
+            code="wire_zero_length",
+        )
+
+    if op_type == "PLACE_COMPONENT" and tail == "rotation":
+        code = "place_bad_rot_value"
+    elif op_type == "PLACE_COMPONENT" and "must be 'lib:symbol'" in msg:
+        code = "place_bad_lib_id"
+    elif op_type == "PLACE_COMPONENT" and tail == "lib_id" and "non-empty" in msg:
+        code = "place_no_lib_id"
+    elif tail in _COORD_FIELDS and etype in _INT_TYPE_ERRORS:
+        code = "bad_coord_type"
+    elif tail in _COORD_FIELDS and etype in _RANGE_ERRORS:
+        code = "coord_out_of_range"
+    else:
+        code = _CODE_FROM_PYD.get((op_type, tail, etype), "schema")
+
+    return ValidationError(
+        f"{op_type}: {msg}",
+        path=f"$.operations[{op_index}].data.{tail}" if tail else f"$.operations[{op_index}].data",
+        code=code,
+    )
+
+
+def validate_operation(
+    op: Any,
+    *,
+    path: str = "$",
+    _seen_refs: Optional[List[str]] = None,
+) -> ValidatedOperation:
+    """Validate one op against the canonical Pydantic model for its type.
+    Enforces PLACE_COMPONENT reference uniqueness when _seen_refs is passed."""
+    flat = _normalize_op_for_pydantic(op)
+    t = flat["type"]
+    model = _PYD_BY_TYPE[t]
+    try:
+        model.model_validate(flat)
+    except _PydValidationError as e:
+        # We don't know the index here; the caller's path arg is purely
+        # cosmetic. Use a dummy index 0.
+        raise _convert_pyd_error(e, op_type=t, op_index=0) from e
+
+    if t == "PLACE_COMPONENT" and _seen_refs is not None:
+        ref = flat.get("reference", "")
+        if ref in _seen_refs:
+            raise ValidationError(
+                f"PLACE_COMPONENT: duplicate reference {ref!r}",
+                path=f"{path}.data.reference",
+                code="place_dup_ref",
+            )
+        _seen_refs.append(ref)
+
+    return ValidatedOperation(type=t, data=op.get("data", {}))
 
 
 def validate_response(obj: Any) -> ValidatedResponse:
-    """Validate a CopperResponse-shaped dict. Returns a ValidatedResponse on
-    success; raises ValidationError on the first failure."""
-
+    """Validate the full response against Pydantic ApplyPlan, then re-shape
+    into the legacy ValidatedResponse dataclass so existing callers don't
+    change."""
     if not isinstance(obj, dict):
         raise ValidationError(
             f"response must be a JSON object, got {type(obj).__name__}",
             code="not_object",
         )
 
+    # PROTOCOL.md specifies `protocol_version` is required. Pydantic's Literal
+    # type lets missing field default to PROTOCOL_VERSION, which would mask
+    # the missing-version case from the existing test suite. Pre-check.
     pv = obj.get("protocol_version")
     if pv is None:
         raise ValidationError(
-            "missing protocol_version", path="$.protocol_version", code="no_version",
+            "missing protocol_version", path="$.protocol_version",
+            code="no_version",
         )
     if not isinstance(pv, int) or isinstance(pv, bool):
         raise ValidationError(
@@ -98,35 +261,21 @@ def validate_response(obj: Any) -> ValidatedResponse:
             path="$.protocol_version", code="past_version",
         )
 
-    success = obj.get("success", True)
-    if not isinstance(success, bool):
-        raise ValidationError(
-            f"success must be bool, got {type(success).__name__}",
-            path="$.success", code="bad_success_type",
-        )
+    # Other pre-checks the legacy validator had — Pydantic's reports are less
+    # specific so we keep these for stable test codes.
+    for field, want_type, code in (
+        ("success", bool, "bad_success_type"),
+        ("intent", str, "bad_intent_type"),
+        ("message", str, "bad_message_type"),
+        ("error", str, "bad_error_type"),
+    ):
+        if field in obj and not isinstance(obj[field], want_type):
+            raise ValidationError(
+                f"{field} must be {want_type.__name__}, "
+                f"got {type(obj[field]).__name__}",
+                path=f"$.{field}", code=code,
+            )
 
-    intent = obj.get("intent", "")
-    if not isinstance(intent, str):
-        raise ValidationError(
-            f"intent must be string, got {type(intent).__name__}",
-            path="$.intent", code="bad_intent_type",
-        )
-
-    message = obj.get("message", "")
-    if not isinstance(message, str):
-        raise ValidationError(
-            f"message must be string, got {type(message).__name__}",
-            path="$.message", code="bad_message_type",
-        )
-
-    error = obj.get("error", "")
-    if not isinstance(error, str):
-        raise ValidationError(
-            f"error must be string, got {type(error).__name__}",
-            path="$.error", code="bad_error_type",
-        )
-
-    # operations must be array if present
     ops_raw = obj.get("operations", [])
     if not isinstance(ops_raw, list):
         raise ValidationError(
@@ -134,252 +283,69 @@ def validate_response(obj: Any) -> ValidatedResponse:
             path="$.operations", code="ops_not_array",
         )
 
-    # Each op validates individually.
+    # Per-op validation with cross-op reference tracking.
     ops: List[ValidatedOperation] = []
     seen_refs: List[str] = []
     for i, op in enumerate(ops_raw):
-        v = validate_operation(op, path=f"$.operations[{i}]", _seen_refs=seen_refs)
+        try:
+            v = validate_operation(op, path=f"$.operations[{i}]",
+                                   _seen_refs=seen_refs)
+        except ValidationError as ve:
+            # Preserve the path with the real index.
+            ve.path = ve.path.replace("operations[0]", f"operations[{i}]") if ve.path else f"$.operations[{i}]"
+            raise
         ops.append(v)
 
-    # Plan (optional)
-    plan_steps: List[Dict[str, Any]] = []
-    placement_info = ""
-    plan_obj = obj.get("plan")
-    if plan_obj is not None:
-        if not isinstance(plan_obj, dict):
-            raise ValidationError(
-                "plan must be an object",
-                path="$.plan", code="plan_not_object",
-            )
-        ps = plan_obj.get("steps", [])
-        if not isinstance(ps, list):
-            raise ValidationError(
-                "plan.steps must be an array",
-                path="$.plan.steps", code="plan_steps_not_array",
-            )
-        for j, s in enumerate(ps):
-            if not isinstance(s, dict):
-                raise ValidationError(
-                    "plan step must be an object",
-                    path=f"$.plan.steps[{j}]", code="plan_step_not_object",
-                )
-            idx = s.get("index", 0)
-            if not isinstance(idx, int) or isinstance(idx, bool):
-                raise ValidationError(
-                    "plan step index must be int",
-                    path=f"$.plan.steps[{j}].index", code="plan_step_bad_index",
-                )
-            desc = s.get("description", "")
-            if not isinstance(desc, str):
-                raise ValidationError(
-                    "plan step description must be string",
-                    path=f"$.plan.steps[{j}].description",
-                    code="plan_step_bad_desc",
-                )
-            plan_steps.append({"index": idx, "description": desc})
-        pi = plan_obj.get("placement_info", "")
-        if not isinstance(pi, str):
-            raise ValidationError(
-                "plan.placement_info must be string",
-                path="$.plan.placement_info",
-                code="plan_placement_bad_type",
-            )
-        placement_info = pi
+    # Now run the whole-plan Pydantic validation — catches anything we missed
+    # (e.g. the duplicate-reference root validator on ApplyPlan, plan-step
+    # type checks, etc.).
+    try:
+        full = _PydApplyPlan.model_validate(obj)
+    except _PydValidationError as e:
+        first = e.errors()[0] if e.errors() else {}
+        msg = first.get("msg", str(e))
+        loc = first.get("loc", ())
+        etype = first.get("type", "")
 
-    erc = obj.get("erc")
-    if erc is not None and not isinstance(erc, dict):
-        raise ValidationError(
-            "erc must be an object",
-            path="$.erc", code="erc_not_object",
-        )
+        # Translate common whole-plan errors to stable .code values so tests
+        # can match on them. Pydantic's loc is a tuple — match on prefixes.
+        code = "schema"
+        if len(loc) >= 4 and loc[0] == "plan" and loc[1] == "steps":
+            field = loc[3] if len(loc) > 3 else ""
+            if field == "index" and etype in _INT_TYPE_ERRORS:
+                code = "plan_step_bad_index"
+            elif field == "description":
+                code = "plan_step_bad_desc"
+            else:
+                code = "plan_step_not_object"
+        elif len(loc) >= 1 and loc[0] == "operations":
+            code = "schema"  # per-op problems already caught upstream
+        elif "Value error" in msg and "duplicate reference" in msg:
+            code = "place_dup_ref"
 
-    # success=False is allowed (failure response) but only if validations pass.
+        path = "$." + ".".join(str(x) for x in loc) if loc else "$"
+        raise ValidationError(f"schema: {msg}", path=path, code=code) from e
+
+    # Re-shape into the legacy dataclass.
+    plan_steps = [{"index": s.index, "description": s.description}
+                  for s in full.plan.steps]
+    erc = full.erc.model_dump() if full.erc is not None else None
+
     return ValidatedResponse(
-        protocol_version=pv,
-        success=success,
-        intent=intent,
-        message=message,
+        protocol_version=full.protocol_version,
+        success=full.success,
+        intent=full.intent,
+        message=full.message,
         operations=ops,
         plan_steps=plan_steps,
-        placement_info=placement_info,
-        error=error,
+        placement_info=full.plan.placement_info,
+        error=full.error,
         erc=erc,
         raw=obj,
     )
 
 
-def validate_operation(
-    op: Any,
-    *,
-    path: str = "$",
-    _seen_refs: Optional[List[str]] = None,
-) -> ValidatedOperation:
-    """Validate a single op. _seen_refs is shared across a plan to enforce
-    uniqueness; pass [] when validating one op standalone."""
-
-    if not isinstance(op, dict):
-        raise ValidationError(
-            f"operation must be an object, got {type(op).__name__}",
-            path=path, code="op_not_object",
-        )
-    t = op.get("type")
-    if not isinstance(t, str) or not t:
-        raise ValidationError(
-            "operation.type must be non-empty string",
-            path=f"{path}.type", code="op_no_type",
-        )
-    if t not in KNOWN_OP_TYPES:
-        raise ValidationError(
-            f"unknown operation type {t!r}",
-            path=f"{path}.type", code="op_unknown_type",
-        )
-    data = op.get("data", {})
-    if not isinstance(data, dict):
-        raise ValidationError(
-            "operation.data must be an object",
-            path=f"{path}.data", code="op_bad_data",
-        )
-
-    if t == "PLACE_COMPONENT":
-        _validate_place(data, path, _seen_refs)
-    elif t == "ADD_WIRE":
-        _validate_wire(data, path)
-    elif t == "ADD_LABEL":
-        _validate_label(data, path)
-    elif t == "ADD_JUNCTION":
-        _validate_junction(data, path)
-    elif t == "ADD_POWER_SYMBOL":
-        _validate_power(data, path)
-
-    return ValidatedOperation(type=t, data=data)
-
-
-# ── per-type validators ───────────────────────────────────────────────────
-
-
-def _validate_coord(v: Any, *, name: str, path: str) -> None:
-    if not isinstance(v, int) or isinstance(v, bool):
-        raise ValidationError(
-            f"{name} must be int, got {type(v).__name__}",
-            path=f"{path}.{name}", code="bad_coord_type",
-        )
-    if v < COORD_MIN or v > COORD_MAX:
-        raise ValidationError(
-            f"{name}={v} out of range [{COORD_MIN}, {COORD_MAX}]",
-            path=f"{path}.{name}", code="coord_out_of_range",
-        )
-
-
-def _validate_place(data: Dict[str, Any], path: str, seen_refs: Optional[List[str]]) -> None:
-    lib_id = data.get("lib_id", "")
-    if not isinstance(lib_id, str) or not lib_id:
-        raise ValidationError(
-            "PLACE_COMPONENT: lib_id missing or empty",
-            path=f"{path}.data.lib_id", code="place_no_lib_id",
-        )
-    if ":" not in lib_id:
-        raise ValidationError(
-            f"PLACE_COMPONENT: lib_id must be 'lib:symbol', got {lib_id!r}",
-            path=f"{path}.data.lib_id", code="place_bad_lib_id",
-        )
-
-    ref = data.get("reference", "")
-    if not isinstance(ref, str) or not ref:
-        raise ValidationError(
-            "PLACE_COMPONENT: reference missing or empty",
-            path=f"{path}.data.reference", code="place_no_ref",
-        )
-
-    if seen_refs is not None:
-        if ref in seen_refs:
-            raise ValidationError(
-                f"PLACE_COMPONENT: duplicate reference {ref!r}",
-                path=f"{path}.data.reference", code="place_dup_ref",
-            )
-        seen_refs.append(ref)
-
-    val = data.get("value", "")
-    if not isinstance(val, str):
-        raise ValidationError(
-            "PLACE_COMPONENT: value must be string",
-            path=f"{path}.data.value", code="place_bad_value",
-        )
-
-    _validate_coord(data.get("x", 0), name="x", path=f"{path}.data")
-    _validate_coord(data.get("y", 0), name="y", path=f"{path}.data")
-
-    rot = data.get("rotation", 0.0)
-    # Accept int 0/90/180/270 too — coerce to float for compare
-    if isinstance(rot, bool):
-        raise ValidationError(
-            "PLACE_COMPONENT: rotation must be number",
-            path=f"{path}.data.rotation", code="place_bad_rot",
-        )
-    if not isinstance(rot, (int, float)):
-        raise ValidationError(
-            f"PLACE_COMPONENT: rotation must be number, got {type(rot).__name__}",
-            path=f"{path}.data.rotation", code="place_bad_rot",
-        )
-    if float(rot) not in KNOWN_ROTATIONS:
-        raise ValidationError(
-            f"PLACE_COMPONENT: rotation {rot} not in {KNOWN_ROTATIONS}",
-            path=f"{path}.data.rotation", code="place_bad_rot_value",
-        )
-
-
-def _validate_wire(data: Dict[str, Any], path: str) -> None:
-    _validate_coord(data.get("start_x", 0), name="start_x", path=f"{path}.data")
-    _validate_coord(data.get("start_y", 0), name="start_y", path=f"{path}.data")
-    _validate_coord(data.get("end_x", 0), name="end_x", path=f"{path}.data")
-    _validate_coord(data.get("end_y", 0), name="end_y", path=f"{path}.data")
-    sx, sy = data.get("start_x", 0), data.get("start_y", 0)
-    ex, ey = data.get("end_x", 0), data.get("end_y", 0)
-    if (sx, sy) == (ex, ey):
-        raise ValidationError(
-            f"ADD_WIRE: zero-length wire at ({sx},{sy})",
-            path=f"{path}.data", code="wire_zero_length",
-        )
-
-
-def _validate_label(data: Dict[str, Any], path: str) -> None:
-    name = data.get("name", "")
-    if not isinstance(name, str) or not name:
-        raise ValidationError(
-            "ADD_LABEL: name missing or empty",
-            path=f"{path}.data.name", code="label_no_name",
-        )
-    if len(name) > 64:
-        raise ValidationError(
-            f"ADD_LABEL: name longer than 64 chars ({len(name)})",
-            path=f"{path}.data.name", code="label_long_name",
-        )
-    _validate_coord(data.get("x", 0), name="x", path=f"{path}.data")
-    _validate_coord(data.get("y", 0), name="y", path=f"{path}.data")
-    kind = data.get("label_type", "local")
-    if kind not in KNOWN_LABEL_TYPES:
-        raise ValidationError(
-            f"ADD_LABEL: label_type {kind!r} not in {KNOWN_LABEL_TYPES}",
-            path=f"{path}.data.label_type", code="label_bad_type",
-        )
-
-
-def _validate_junction(data: Dict[str, Any], path: str) -> None:
-    _validate_coord(data.get("x", 0), name="x", path=f"{path}.data")
-    _validate_coord(data.get("y", 0), name="y", path=f"{path}.data")
-
-
-def _validate_power(data: Dict[str, Any], path: str) -> None:
-    net = data.get("net_name", "")
-    if not isinstance(net, str) or not net:
-        raise ValidationError(
-            "ADD_POWER_SYMBOL: net_name missing or empty",
-            path=f"{path}.data.net_name", code="power_no_net",
-        )
-    _validate_coord(data.get("x", 0), name="x", path=f"{path}.data")
-    _validate_coord(data.get("y", 0), name="y", path=f"{path}.data")
-
-
-# ── geometry checks used by Check 7 (applied-board quality) ────────────────
+# ── geometry helper retained from the legacy file (no copper.protocol equiv) ─
 
 
 def check_no_symbol_overlap(symbols: List["Tuple[str, int, int]"]) -> List[Tuple[str, str]]:

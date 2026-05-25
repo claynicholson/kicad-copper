@@ -1,6 +1,6 @@
 # SELF_ASSESSMENT
 
-Generated at **2026-05-24T23:45:25Z** by `scripts/assess.py`.
+Generated at **2026-05-25T03:44:57Z** by `scripts/assess.py`.
 
 ## Verdict: **polished**
 
@@ -19,6 +19,7 @@ Generated at **2026-05-24T23:45:25Z** by `scripts/assess.py`.
 | 6 | Atomic rollback | YES | 100.0 | 16 | 16.0 | 12 tests, 0 failed, 0 errored |
 | 7 | Applied-board quality | YES | 100.0 | 14 | 14.0 | 8 tests, 0 failed, 0 errored |
 | 8 | State handling | YES | 100.0 | 8 | 8.0 | 25 tests, 0 failed, 0 errored |
+| 9 | Cross-repo lockstep | no | 100.0 | 0 | 0.0 | 4 tests, 0 failed, 0 errored, 0 skipped |
 
 
 ---

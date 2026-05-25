@@ -353,6 +353,29 @@ def _check_state_handling(ctx: RunContext) -> CheckResult:
     )
 
 
+# ── check 9: cross-repo lockstep (added in Phase 1) ───────────────────────
+
+
+def _check_protocol_lockstep(ctx: RunContext) -> CheckResult:
+    """Run the contract test that proves kicad-copper and copper-2 agree on
+    the protocol. Skips gracefully if copper-2 isn't available — soft gate."""
+    suite = _load_tests("tests.test_protocol_lockstep")
+    result, captured = _run_suite(suite, verbose=ctx.verbose)
+    # If every test was skipped (copper-2 absent), count as skipped.
+    skipped = len(result.skipped) == result.testsRun and result.testsRun > 0
+    return CheckResult(
+        score=_suite_score(result),
+        details=(
+            "copper-2 not available; check skipped (no penalty)"
+            if skipped
+            else f"{result.testsRun} tests, {len(result.failures)} failed, "
+                 f"{len(result.errors)} errored, {len(result.skipped)} skipped"
+        ),
+        failures=_list_failures(result),
+        skipped=skipped,
+    )
+
+
 # ── registry ───────────────────────────────────────────────────────────────
 
 
@@ -365,6 +388,9 @@ CHECKS: List[CheckSpec] = [
     CheckSpec(6, "Atomic rollback",          weight=16, hard_gate=True,  fn=_check_atomic_rollback),
     CheckSpec(7, "Applied-board quality",    weight=14, hard_gate=True,  fn=_check_board_quality),
     CheckSpec(8, "State handling",           weight=8,  hard_gate=True,  fn=_check_state_handling),
+    # Phase 1 addition: cross-repo lockstep. Soft gate so CI without
+    # copper-2 still passes — but when copper-2 IS present, any drift fails.
+    CheckSpec(9, "Cross-repo lockstep",      weight=0,  hard_gate=False, fn=_check_protocol_lockstep),
 ]
 TOTAL_WEIGHT = sum(c.weight for c in CHECKS)
 assert TOTAL_WEIGHT == 100, f"weights sum to {TOTAL_WEIGHT}, expected 100"
