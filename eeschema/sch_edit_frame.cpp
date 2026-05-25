@@ -34,6 +34,10 @@
 #include <dialogs/dialog_symbol_fields_table.h>
 #include <widgets/sch_design_block_pane.h>
 #include <widgets/panel_remote_symbol.h>
+// NOTE: COPPER_PANEL was the incoming v1; we use COPPER_CHAT_PANEL instead.
+// See docs/INTEGRATION_V1_AUDIT.md and docs/DECISIONS.md.
+#include <widgets/copper_chat_panel.h>
+#include <api/http_bridge.h>
 #include <wx/srchctrl.h>
 #include <mail_type.h>
 #include <wx/clntdata.h>
@@ -236,6 +240,9 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_propertiesPanel = new SCH_PROPERTIES_PANEL( this, this );
     m_remoteSymbolPane = new PANEL_REMOTE_SYMBOL( this );
 
+    // Copper AI chat panel — see docs/FORK_SURFACE.md §1.
+    m_copperPanel = new COPPER_CHAT_PANEL( this, this );
+
     m_propertiesPanel->SetSplitterProportion( eeconfig()->m_AuiPanels.properties_splitter );
 
     m_selectionFilterPanel = new PANEL_SCH_SELECTION_FILTER( this );
@@ -275,6 +282,19 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     m_auimgr.AddPane( m_designBlocksPane, defaultDesignBlocksPaneInfo( this ) );
     m_auimgr.AddPane( m_remoteSymbolPane, defaultRemoteSymbolPaneInfo( this ) );
+
+    // Copper AI chat panel — right-dock, like Properties.
+    // Pane name "CopperChat" matched by SCH_EDIT_FRAME::ToggleCopperPanel().
+    m_auimgr.AddPane( m_copperPanel, EDA_PANE().Palette().Name( wxS( "CopperChat" ) )
+                      .Caption( _( "Copper AI" ) )
+                      .Right().Layer( 3 ).Position( 2 )
+                      .TopDockable( false )
+                      .BottomDockable( false )
+                      .CloseButton( true )
+                      .MinSize( FromDIP( wxSize( 280, 200 ) ) )
+                      .BestSize( FromDIP( wxSize( 380, 600 ) ) )
+                      .FloatingSize( FromDIP( wxSize( 380, 600 ) ) )
+                      .Show( eeconfig()->m_Copper.show_panel_on_startup ) );
 
     m_auimgr.AddPane( createHighlightedNetNavigator(), defaultNetNavigatorPaneInfo() );
 
@@ -2993,6 +3013,21 @@ void SCH_EDIT_FRAME::ToggleRemoteSymbolPanel()
 
         m_auimgr.Update();
     }
+}
+
+
+void SCH_EDIT_FRAME::ToggleCopperPanel()
+{
+    // The pane name "CopperChat" is registered in the ctor by the stash-popped
+    // M4 work. If it isn't there (panel disabled at build time), Show() is a
+    // no-op on a default-constructed wxAuiPaneInfo.
+    wxAuiPaneInfo& copperPane = m_auimgr.GetPane( wxS( "CopperChat" ) );
+
+    if( !copperPane.IsOk() )
+        return;
+
+    copperPane.Show( !copperPane.IsShown() );
+    m_auimgr.Update();
 }
 
 

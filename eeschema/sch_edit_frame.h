@@ -67,6 +67,8 @@ class RESCUER;
 class HIERARCHY_PANE;
 class API_HANDLER_SCH;
 class DIALOG_SCHEMATIC_SETUP;
+class COPPER_CHAT_PANEL;
+class HTTP_BRIDGE;
 class PROGRESS_REPORTER;
 class wxSearchCtrl;
 class wxGenericTreeCtrl;
@@ -851,6 +853,8 @@ public:
 
     void ToggleRemoteSymbolPanel();
 
+    void ToggleCopperPanel();
+
 
     DIALOG_BOOK_REPORTER* GetSymbolDiffDialog();
 
@@ -1106,6 +1110,11 @@ private:
 #ifdef KICAD_IPC_API
     std::unique_ptr<API_HANDLER_SCH> m_apiHandler;
 #endif
+
+    // ── Copper AI integration (kicad-copper) ──
+    // See docs/FORK_SURFACE.md §1 + docs/ARCHITECTURE.md.
+    COPPER_CHAT_PANEL*           m_copperPanel = nullptr;
+    std::unique_ptr<HTTP_BRIDGE> m_copperHttpBridge;
 };
 
 
