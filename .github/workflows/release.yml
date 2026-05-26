@@ -113,6 +113,7 @@ jobs:
             mingw-w64-ucrt-x86_64-ngspice
             mingw-w64-ucrt-x86_64-opencascade
             mingw-w64-ucrt-x86_64-protobuf
+            mingw-w64-ucrt-x86_64-abseil-cpp
             mingw-w64-ucrt-x86_64-nng
             mingw-w64-ucrt-x86_64-poppler
             mingw-w64-ucrt-x86_64-unixodbc
@@ -157,7 +158,7 @@ jobs:
             -DKICAD_USE_OCC=ON \
             -DOCC_INCLUDE_DIR="${MSYS_PREFIX}/include/opencascade" \
             -DOCC_LIBRARY_DIR="${MSYS_PREFIX}/lib" \
-            -DKICAD_USE_CMAKE_FINDPROTOBUF=ON \
+            -DKICAD_USE_CMAKE_FINDPROTOBUF=OFF \
             -DKICAD_SPICE=ON \
             -DKICAD_BUILD_PNS_DEBUG_TOOL=OFF \
             ../../
