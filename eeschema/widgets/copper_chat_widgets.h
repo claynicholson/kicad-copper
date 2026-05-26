@@ -131,7 +131,10 @@ private:
 class COPPER_STAGE_INDICATOR : public wxPanel
 {
 public:
-    enum class State { PENDING, ACTIVE, COMPLETE, ERROR };
+    // NB: do NOT name an enumerator ERROR — windows.h defines it as a macro
+    // (0u from wingdi.h), which pre-processes our enumerator into garbage and
+    // breaks compilation on any TU that transitively includes <windows.h>.
+    enum class State { PENDING, ACTIVE, COMPLETE, FAILED };
 
     COPPER_STAGE_INDICATOR( wxWindow* aParent, const wxString& aName, State aState = State::PENDING );
 

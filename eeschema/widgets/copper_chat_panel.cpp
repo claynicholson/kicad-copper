@@ -738,7 +738,8 @@ COPPER::SchematicContext COPPER_CHAT_PANEL::ExtractContext()
             COPPER::ContextComponent comp;
             comp.reference = sym->GetRef( &schematic.CurrentSheet() ).ToStdString();
             comp.value = sym->GetField( FIELD_T::VALUE )->GetText().ToStdString();
-            comp.lib_id = sym->GetLibId().Format().ToStdString();
+            // UTF8 has implicit `operator const std::string&` — no ToStdString() needed.
+            comp.lib_id = sym->GetLibId().Format();
             comp.position = sym->GetPosition();
             comp.rotation = sym->GetOrientation() * 90.0;
             ctx.components.push_back( comp );
@@ -767,10 +768,11 @@ COPPER::SchematicContext COPPER_CHAT_PANEL::ExtractContext()
             {
                 if( subgraph->GetDriver() && subgraph->GetDriver()->Type() == SCH_PIN_T )
                 {
-                    // Check if the driver is a power pin
-                    SCH_CONNECTION* conn = subgraph->GetDriver()->Connection();
+                    // Power-net detection used to live on SCH_CONNECTION (IsPowerConnection);
+                    // in current KiCad it's an attribute of the SCH_PIN itself.
+                    const SCH_PIN* drvPin = static_cast<const SCH_PIN*>( subgraph->GetDriver() );
 
-                    if( conn && conn->IsPowerConnection() )
+                    if( drvPin && drvPin->IsPower() )
                         ctx.power_rails.push_back( net.name );
                 }
 
@@ -780,7 +782,10 @@ COPPER::SchematicContext COPPER_CHAT_PANEL::ExtractContext()
                     if( connItem->Type() == SCH_PIN_T )
                     {
                         SCH_PIN* pin = static_cast<SCH_PIN*>( connItem );
-                        SCH_SYMBOL* parentSym = pin->GetParentSymbol();
+                        // SCH_PIN::GetParentSymbol() returns the SYMBOL base class
+                        // (could be LIB_SYMBOL preview or SCH_SYMBOL); we only care
+                        // about placed schematic symbols here.
+                        SCH_SYMBOL* parentSym = dynamic_cast<SCH_SYMBOL*>( pin->GetParentSymbol() );
 
                         if( parentSym )
                         {
