@@ -15,7 +15,11 @@ endif()
 # Read VERSION file if present so a single source of truth drives the package
 # version, falling back to project() defaults if the file is absent (e.g. when
 # a contributor builds from a tarball without a VERSION file).
-set( COPPER_VERSION_FILE "${CMAKE_SOURCE_DIR}/VERSION" )
+# NOTE: this file is intentionally NOT named "VERSION" because the compiler's
+# include path covers the repo root on Windows (case-insensitive FS), so
+# `#include <version>` (C++20 std header) would otherwise resolve to it and
+# the build would fail with "too many decimal points in number".
+set( COPPER_VERSION_FILE "${CMAKE_SOURCE_DIR}/VERSION.txt" )
 if( EXISTS "${COPPER_VERSION_FILE}" )
     file( READ "${COPPER_VERSION_FILE}" COPPER_VERSION_RAW )
     string( STRIP "${COPPER_VERSION_RAW}" COPPER_VERSION )

@@ -85,7 +85,7 @@ try {
     Run "git fetch $Remote --tags --prune"
 
     Step "Update VERSION file"
-    $versionFile = Join-Path $repoRoot "VERSION"
+    $versionFile = Join-Path $repoRoot "VERSION.txt"
     $current = (Get-Content $versionFile -Raw).Trim()
     Write-Host "    Current: $current"
     Write-Host "    New:     $Version"
@@ -94,14 +94,14 @@ try {
     }
 
     Step "Commit + tag"
-    Run "git add VERSION"
+    Run "git add VERSION.txt"
 
     $alreadyClean = $false
     if (-not $DryRun) {
         $diff = & git diff --cached --quiet
         if ($LASTEXITCODE -eq 0) {
             $alreadyClean = $true
-            Write-Host "    VERSION unchanged from $current; skipping commit." -ForegroundColor Yellow
+            Write-Host "    VERSION.txt unchanged from $current; skipping commit." -ForegroundColor Yellow
         }
     }
     if (-not $alreadyClean) {

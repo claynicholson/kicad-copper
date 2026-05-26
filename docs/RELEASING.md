@@ -15,7 +15,7 @@ From a clean working tree on `master`:
 That's it. The script:
 
 1. Validates the version (semver: `X.Y.Z` or `X.Y.Z-prerelease`).
-2. Updates the [`VERSION`](../VERSION) file.
+2. Updates the [`VERSION.txt`](../VERSION.txt) file.
 3. Commits the bump as `Release v0.2.0`.
 4. Tags the commit `v0.2.0`.
 5. Pushes the commit and tag to `origin`.
@@ -58,10 +58,10 @@ itself.
   - `MAJOR` for breaking changes.
 - Pre-releases are allowed (`0.2.0-rc.1`). They still create a GitHub Release;
   flip the Release to "pre-release" in the UI if needed.
-- The version lives in [`VERSION`](../VERSION) and is read at CMake configure
+- The version lives in [`VERSION.txt`](../VERSION.txt) and is read at CMake configure
   time by [`cmake/CopperPackaging.cmake`](../cmake/CopperPackaging.cmake).
 - CI also overrides `COPPER_VERSION` from the tag, so the installer's embedded
-  version always matches the tag (even if someone forgot to bump `VERSION`).
+  version always matches the tag (even if someone forgot to bump `VERSION.txt`).
 
 ## Authentication
 
