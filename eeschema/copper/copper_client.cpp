@@ -21,6 +21,7 @@
 #include <copper/copper_auth.h>
 
 #include <kicad_curl/kicad_curl_easy.h>
+#include <curl/curl.h>     // CURLOPT_WRITEFUNCTION / curl_easy_setopt — not transitively exposed by kicad_curl_easy.h on all platforms
 #include <nlohmann/json.hpp>
 
 #include <wx/log.h>

@@ -328,7 +328,7 @@ void COPPER_STAGE_INDICATOR::OnPaint( wxPaintEvent& aEvent )
         icon = wxT( "[\xe2\x9c\x93]" );   // [✓]
         iconColor = COPPER_COLORS::STAGE_COMPLETE;
         break;
-    case State::ERROR:
+    case State::FAILED:
         icon = wxT( "[\xe2\x9c\x97]" );   // [✗]
         iconColor = wxColour( 200, 60, 60 );
         break;
