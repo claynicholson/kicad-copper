@@ -140,6 +140,9 @@ jobs:
         env:
           COPPER_VERSION: ${{ steps.version.outputs.version }}
         run: |
+          # MSYS2 UCRT64 prefix in the runner. Used to point cmake at deps whose
+          # default search paths (e.g. FindOCC) don't cover MSYS2 layouts.
+          MSYS_PREFIX="/ucrt64"
           mkdir -p build/release
           cd build/release
           cmake \
@@ -152,6 +155,8 @@ jobs:
             -DKICAD_BUILD_QA_TESTS=OFF \
             -DKICAD_BUILD_I18N=OFF \
             -DKICAD_USE_OCC=ON \
+            -DOCC_INCLUDE_DIR="${MSYS_PREFIX}/include/opencascade" \
+            -DOCC_LIBRARY_DIR="${MSYS_PREFIX}/lib" \
             -DKICAD_USE_CMAKE_FINDPROTOBUF=ON \
             -DKICAD_SPICE=ON \
             -DKICAD_BUILD_PNS_DEBUG_TOOL=OFF \
