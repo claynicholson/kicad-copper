@@ -1272,3 +1272,6 @@ if( APPLE )
 
     add_subdirectory( signing )
 endif()
+
+# kicad-copper Windows packaging (CPack / NSIS / ZIP). No-op off Windows.
+include( ${CMAKE_SOURCE_DIR}/cmake/CopperPackaging.cmake OPTIONAL )

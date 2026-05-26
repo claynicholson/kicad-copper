@@ -1,0 +1,210 @@
+name: Release Windows .exe
+
+# Builds kicad-copper on Windows via MSYS2/UCRT64 (mirrors the proven local
+# toolchain) and publishes the resulting NSIS installer + ZIP to a GitHub
+# Release.
+#
+# Triggers:
+#   - Push of a tag matching v*  -> build + create a Release named after the tag.
+#   - Manual workflow_dispatch   -> build + upload artifacts only (no Release).
+#
+# Notes:
+#   - First run is slow (~1-2h). msys2/setup-msys2 caches its package install
+#     across runs; CMake build is cached via ccache stored in actions/cache.
+#   - To debug a dep mismatch locally, install the same MSYS2 packages listed
+#     under `install:` below from a UCRT64 shell.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override (e.g. 0.1.0). Defaults to the contents of the VERSION file.'
+        required: false
+        type: string
+
+permissions:
+  contents: write   # needed by softprops/action-gh-release to create the release
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-build:
+    name: Build Windows installer
+    runs-on: windows-2022
+    timeout-minutes: 360
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # full history so the version tag is visible to git describe
+
+      - name: Resolve build version
+        id: version
+        shell: pwsh
+        run: |
+          $ref = "${{ github.ref }}"
+          $tag = $null
+          if ($ref -like "refs/tags/v*") {
+              $tag = $ref -replace '^refs/tags/v',''
+          }
+          $inputVersion = "${{ inputs.version }}"
+          if ($tag) {
+              $ver = $tag
+              $isRelease = "true"
+          } elseif ($inputVersion) {
+              $ver = $inputVersion
+              $isRelease = "false"
+          } else {
+              $ver = (Get-Content VERSION -Raw).Trim()
+              $isRelease = "false"
+          }
+          if ([string]::IsNullOrWhiteSpace($ver)) {
+              throw "Could not determine version (tag, input, or VERSION file)."
+          }
+          "version=$ver"        | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "is_release=$isRelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Build version: $ver (release=$isRelease)"
+
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          # Cache the pacman package downloads + install across runs. Massive
+          # speedup on warm runs (KiCad's deps total ~2GB).
+          cache: true
+          install: >-
+            git
+            base-devel
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-ccache
+            mingw-w64-ucrt-x86_64-nsis
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-wxwidgets3.2-msw
+            mingw-w64-ucrt-x86_64-wxwidgets3.2-msw-libs
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-six
+            mingw-w64-ucrt-x86_64-swig
+            mingw-w64-ucrt-x86_64-glew
+            mingw-w64-ucrt-x86_64-glm
+            mingw-w64-ucrt-x86_64-cairo
+            mingw-w64-ucrt-x86_64-pixman
+            mingw-w64-ucrt-x86_64-freetype
+            mingw-w64-ucrt-x86_64-harfbuzz
+            mingw-w64-ucrt-x86_64-fontconfig
+            mingw-w64-ucrt-x86_64-curl
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-zstd
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-libgit2
+            mingw-w64-ucrt-x86_64-ngspice
+            mingw-w64-ucrt-x86_64-opencascade
+            mingw-w64-ucrt-x86_64-protobuf
+            mingw-w64-ucrt-x86_64-nng
+            mingw-w64-ucrt-x86_64-poppler
+            mingw-w64-ucrt-x86_64-unixodbc
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-ucrt64-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-ucrt64-
+
+      - name: Configure ccache
+        run: |
+          # GITHUB_WORKSPACE comes in as a Windows path; translate for bash.
+          WS=$(cygpath -u "${GITHUB_WORKSPACE}")
+          mkdir -p "${WS}/.ccache"
+          export CCACHE_DIR="${WS}/.ccache"
+          echo "CCACHE_DIR=${CCACHE_DIR}" >> "${GITHUB_ENV}"
+          ccache --version
+          ccache --max-size=5G
+          ccache --show-stats
+
+      - name: Configure CMake
+        env:
+          COPPER_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p build/release
+          cd build/release
+          cmake \
+            -G "Ninja" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DKICAD_SCRIPTING_WXPYTHON=OFF \
+            -DKICAD_USE_3DCONNEXION=OFF \
+            -DKICAD_BUILD_QA_TESTS=OFF \
+            -DKICAD_BUILD_I18N=OFF \
+            -DKICAD_USE_OCC=ON \
+            -DKICAD_USE_CMAKE_FINDPROTOBUF=ON \
+            -DKICAD_SPICE=ON \
+            -DKICAD_BUILD_PNS_DEBUG_TOOL=OFF \
+            ../../
+
+      - name: Build
+        run: |
+          cd build/release
+          cmake --build . --parallel
+          ccache --show-stats
+
+      - name: Package (NSIS + ZIP)
+        env:
+          COPPER_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd build/release
+          cpack -V
+          ls -la *.exe *.zip 2>/dev/null || true
+
+      - name: Collect artifacts
+        id: artifacts
+        shell: pwsh
+        run: |
+          $artifactDir = "artifacts"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $files = Get-ChildItem -Path "build/release" -Filter "kicad-copper-*-win64.*" -File
+          if ($files.Count -eq 0) {
+              throw "No release artifacts found in build/release/. Did cpack run?"
+          }
+          foreach ($f in $files) {
+              Copy-Item $f.FullName $artifactDir
+              Write-Host "Collected: $($f.Name) ($([math]::Round($f.Length / 1MB, 1)) MB)"
+          }
+          $exe = Get-ChildItem -Path $artifactDir -Filter "*.exe" | Select-Object -First 1
+          $zip = Get-ChildItem -Path $artifactDir -Filter "*.zip" | Select-Object -First 1
+          if ($exe) { "exe_name=$($exe.Name)" | Out-File $env:GITHUB_OUTPUT -Append }
+          if ($zip) { "zip_name=$($zip.Name)" | Out-File $env:GITHUB_OUTPUT -Append }
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kicad-copper-${{ steps.version.outputs.version }}-win64
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.is_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/*
