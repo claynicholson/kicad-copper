@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version override (e.g. 0.1.0). Defaults to the contents of the VERSION file.'
+        description: 'Version override (e.g. 0.1.0). Defaults to the contents of the VERSION.txt file.'
         required: false
         type: string
 
@@ -65,11 +65,11 @@ jobs:
               $ver = $inputVersion
               $isRelease = "false"
           } else {
-              $ver = (Get-Content VERSION -Raw).Trim()
+              $ver = (Get-Content VERSION.txt -Raw).Trim()
               $isRelease = "false"
           }
           if ([string]::IsNullOrWhiteSpace($ver)) {
-              throw "Could not determine version (tag, input, or VERSION file)."
+              throw "Could not determine version (tag, input, or VERSION.txt file)."
           }
           "version=$ver"        | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "is_release=$isRelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
@@ -166,8 +166,22 @@ jobs:
       - name: Build
         run: |
           cd build/release
-          cmake --build . --parallel
+          cmake --build . --parallel 2>&1 | tee compilation_log.txt
+          # Preserve ninja's exit code through the pipe
+          test ${PIPESTATUS[0]} -eq 0
           ccache --show-stats
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-log
+          path: |
+            build/release/compilation_log.txt
+            build/release/CMakeFiles/CMakeOutput.log
+            build/release/CMakeFiles/CMakeError.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Package (NSIS + ZIP)
         env:
