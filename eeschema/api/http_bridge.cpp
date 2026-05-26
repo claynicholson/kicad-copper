@@ -30,8 +30,13 @@
 #include <sch_sheet.h>
 #include <sch_field.h>
 #include <sch_commit.h>
+#include <sch_pin.h>
 #include <connection_graph.h>
 #include <lib_symbol.h>
+
+// undo/redo + ToolManager glue (referenced via m_frame->GetToolManager()->RunAction)
+#include <tool/tool_manager.h>
+#include <tool/actions.h>
 
 #include <nlohmann/json.hpp>
 
@@ -190,8 +195,11 @@ std::string HTTP_BRIDGE::processRequest( const std::string& aMethod,
     if( aMethod == "GET" && aPath == "/api/schematic/info" )
     {
         json result;
-        result["sheet_count"] = (int)schematic.BuildSheetList().size();
-        result["paper_size"] = screen->GetPageSettings().GetType().ToStdString();
+        // BuildSheetList() was renamed; the new name returns the same SCH_SHEET_LIST.
+        result["sheet_count"] = (int)schematic.BuildUnorderedSheetList().size();
+        // PAGE_INFO::GetType() now returns the PAGE_SIZE_TYPE enum; use the
+        // string accessor that KiCad added for display purposes.
+        result["paper_size"] = screen->GetPageSettings().GetTypeAsString().ToStdString();
 
         const TITLE_BLOCK& tb = screen->GetTitleBlock();
         result["title_block"] = {
@@ -217,7 +225,8 @@ std::string HTTP_BRIDGE::processRequest( const std::string& aMethod,
                 comp["id"] = sym->m_Uuid.AsStdString();
                 comp["reference"] = sym->GetRef( &schematic.CurrentSheet() ).ToStdString();
                 comp["value"] = sym->GetField( FIELD_T::VALUE )->GetText().ToStdString();
-                comp["lib_id"] = sym->GetLibId().Format().ToStdString();
+                // UTF8 implicitly converts to const std::string&; no ToStdString().
+                comp["lib_id"] = (std::string) sym->GetLibId().Format();
                 comp["position"] = {
                     { "x", sym->GetPosition().x },
                     { "y", sym->GetPosition().y }
@@ -251,7 +260,9 @@ std::string HTTP_BRIDGE::processRequest( const std::string& aMethod,
                         if( connItem->Type() == SCH_PIN_T )
                         {
                             SCH_PIN* pin = static_cast<SCH_PIN*>( connItem );
-                            SCH_SYMBOL* parentSym = pin->GetParentSymbol();
+                            // GetParentSymbol() returns SYMBOL* base class now; only
+                            // SCH_SYMBOL (placed in the schematic) is interesting here.
+                            SCH_SYMBOL* parentSym = dynamic_cast<SCH_SYMBOL*>( pin->GetParentSymbol() );
 
                             if( parentSym )
                             {
@@ -284,11 +295,13 @@ std::string HTTP_BRIDGE::processRequest( const std::string& aMethod,
             {
                 for( const auto* subgraph : subgraphs )
                 {
-                    if( subgraph->GetDriver() )
+                    // Power-net detection moved off SCH_CONNECTION onto SCH_PIN.
+                    if( const SCH_ITEM* driver = subgraph->GetDriver();
+                        driver && driver->Type() == SCH_PIN_T )
                     {
-                        SCH_CONNECTION* conn = subgraph->GetDriver()->Connection();
+                        const SCH_PIN* drvPin = static_cast<const SCH_PIN*>( driver );
 
-                        if( conn && conn->IsPowerConnection() )
+                        if( drvPin->IsPower() )
                         {
                             rails.push_back( netKey.Name.ToStdString() );
                             break;
