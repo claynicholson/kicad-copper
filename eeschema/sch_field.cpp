@@ -42,8 +42,82 @@
 #include "sim/sim_lib_mgr.h"
 #include <properties/property.h>
 #include <properties/property_mgr.h>
+#include <google/protobuf/any.pb.h>
+#include <api/schematic/schematic_types.pb.h>
 
 static const std::vector<KICAD_T> labelTypes = { SCH_LABEL_LOCATE_ANY_T };
+
+
+/**
+ * Translations of "Net Class" extracted from KiCad's .po catalogs.
+ *
+ * The directive-label net class field used to be saved as `_( "Net Class" )` which embedded the
+ * UI-language translation into the .kicad_sch file. Files written by a non-English UI lost the
+ * canonical token when re-opened in another language, so the rule resolver could no longer locate
+ * the field. We now save the canonical name, but we still need to recognise the translated form
+ * when migrating older / cross-locale files.
+ */
+static const std::vector<wxString>& GetKnownNetclassFieldTranslations()
+{
+    static const std::vector<wxString> translations = {
+            wxString::FromUTF8( "Net Class" ),
+            wxString::FromUTF8( "صنف الشبكة" ),       // ar
+            wxString::FromUTF8( "Верига Клас" ),       // bg
+            wxString::FromUTF8( "Classe de xarxa" ),   // ca
+            wxString::FromUTF8( "Třídy spojů" ),       // cs
+            wxString::FromUTF8( "Netklasse" ),         // da, nl
+            wxString::FromUTF8( "Netzklasse" ),        // de
+            wxString::FromUTF8( "Κλάση Δικτύου" ),     // el
+            wxString::FromUTF8( "Clase de red" ),      // es, es_MX
+            wxString::FromUTF8( "Ühendusniidiklass" ), // et
+            wxString::FromUTF8( "Verkkoluokka" ),      // fi
+            wxString::FromUTF8( "Classe d'Equipot" ),  // fr
+            wxString::FromUTF8( "מחלקת רשת" ),         // he
+            wxString::FromUTF8( "नेट क्लास" ),            // hi
+            wxString::FromUTF8( "Hálózatosztály" ),    // hu
+            wxString::FromUTF8( "Kelas Net" ),         // id
+            wxString::FromUTF8( "Netclass" ),          // it, ro (same as canonical)
+            wxString::FromUTF8( "ネットクラス" ),          // ja
+            wxString::FromUTF8( "ქსელის კლასი" ),      // ka
+            wxString::FromUTF8( "네트 클래스" ),           // ko
+            wxString::FromUTF8( "Grandinių klasė" ),   // lt
+            wxString::FromUTF8( "Tīklu klase" ),       // lv
+            wxString::FromUTF8( "Nettklasse" ),        // no
+            wxString::FromUTF8( "Klasy sieci" ),       // pl
+            wxString::FromUTF8( "Classes da rede" ),   // pt_BR
+            wxString::FromUTF8( "Classe de Rede" ),    // pt
+            wxString::FromUTF8( "Класс цепей" ),       // ru
+            wxString::FromUTF8( "Triedy spojov" ),     // sk
+            wxString::FromUTF8( "Razred vozlišča" ),   // sl
+            wxString::FromUTF8( "Класа везе" ),        // sr
+            wxString::FromUTF8( "Nätklass" ),          // sv
+            wxString::FromUTF8( "நிகர வகுப்பு" ),       // ta
+            wxString::FromUTF8( "నెట్ క్లాస్" ),           // te
+            wxString::FromUTF8( "เน็ตคลาส" ),            // th
+            wxString::FromUTF8( "Ağ Sınıfı" ),         // tr
+            wxString::FromUTF8( "Клас зв'язків" ),     // uk
+            wxString::FromUTF8( "Lớp mạng" ),          // vi
+            wxString::FromUTF8( "网络类" ),               // zh_CN
+            wxString::FromUTF8( "網路類" )                // zh_TW
+    };
+
+    return translations;
+}
+
+
+bool SCH_FIELD::IsNetclassLabelFieldName( const wxString& aName )
+{
+    if( aName == wxT( "Netclass" ) )
+        return true;
+
+    for( const wxString& candidate : GetKnownNetclassFieldTranslations() )
+    {
+        if( aName == candidate )
+            return true;
+    }
+
+    return false;
+}
 
 
 SCH_FIELD::SCH_FIELD() :
@@ -118,6 +192,41 @@ SCH_FIELD::SCH_FIELD( const SCH_FIELD& aField ) :
     m_lastResolvedColor = aField.m_lastResolvedColor;
 
     m_renderCache.reset();
+}
+
+
+void SCH_FIELD::Serialize( google::protobuf::Any& aContainer ) const
+{
+    kiapi::schematic::types::SchematicField field;
+
+    field.set_name( GetName( false ).ToUTF8() );
+    field.set_visible( IsVisible() );
+    field.set_show_name( IsNameShown() );
+    field.set_allow_auto_place( CanAutoplace() );
+
+    google::protobuf::Any any;
+    EDA_TEXT::Serialize( any, schIUScale );
+    any.UnpackTo( field.mutable_text() );
+
+    aContainer.PackFrom( field );
+}
+
+
+bool SCH_FIELD::Deserialize( const google::protobuf::Any& aContainer )
+{
+    kiapi::schematic::types::SchematicField field;
+
+    if( !aContainer.UnpackTo( &field ) )
+        return false;
+
+    SetName( wxString::FromUTF8( field.name() ) );
+    SetVisible( field.visible() );
+    SetNameShown( field.show_name() );
+    SetCanAutoplace( field.allow_auto_place() );
+
+    google::protobuf::Any any;
+    any.PackFrom( field.text() );
+    return EDA_TEXT::Deserialize( any, schIUScale );
 }
 
 
@@ -216,7 +325,7 @@ wxString SCH_FIELD::GetFullText( int unit ) const
     text << wxT( "?" );
 
     if( GetParentSymbol() && GetParentSymbol()->IsMultiUnit() )
-        text << LIB_SYMBOL::LetterSubReference( unit, 'A' );
+        text << GetParentSymbol()->GetUnitDisplayName( unit, false );
 
     return text;
 }
@@ -678,7 +787,7 @@ void SCH_FIELD::OnScintillaCharAdded( SCINTILLA_TRICKS* aScintillaTricks, wxStyl
                 SCH_REFERENCE_LIST refs;
                 SCH_SYMBOL*        refSymbol = nullptr;
 
-                schematic->Hierarchy().GetSymbols( refs );
+                schematic->Hierarchy().GetSymbols( refs, SYMBOL_FILTER_ALL );
 
                 for( size_t jj = 0; jj < refs.GetCount(); jj++ )
                 {
@@ -732,6 +841,24 @@ bool SCH_FIELD::IsReplaceable() const
         return false;
 
     return true;
+}
+
+
+bool SCH_FIELD::IsLocked() const
+{
+    if( const SYMBOL* parentSymbol = GetParentSymbol() )
+    {
+        if( parentSymbol->IsLocked() )
+            return true;
+    }
+
+    if( const SCH_SHEET* parentSheet = dynamic_cast<const SCH_SHEET*>( m_parent ) )
+    {
+        if( parentSheet->IsLocked() )
+            return true;
+    }
+
+    return SCH_ITEM::IsLocked();
 }
 
 
@@ -1103,8 +1230,9 @@ wxString SCH_FIELD::GetCanonicalName() const
 {
     if( m_parent && m_parent->IsType( labelTypes ) )
     {
-        // These should be stored in canonical format, but just in case:
-        if( m_name == _( "Net Class" ) || m_name == wxT( "Net Class" ) )
+        // These should be stored in canonical format, but recover translated forms written by
+        // older versions or by cross-language collaboration via Git.
+        if( IsNetclassLabelFieldName( m_name ) )
             return wxT( "Netclass" );
     }
 
@@ -1414,11 +1542,17 @@ bool SCH_FIELD::operator==( const SCH_ITEM& aOther ) const
 
 bool SCH_FIELD::operator==( const SCH_FIELD& aOther ) const
 {
-    // Identical fields of different symbols are not equal.
-    if( !GetParentSymbol() || !aOther.GetParentSymbol()
-        || GetParentSymbol()->m_Uuid != aOther.GetParentSymbol()->m_Uuid )
+    // Identical fields owned by different items are not equal.
+    if( m_parent || aOther.m_parent )
     {
-        return false;
+        if( !m_parent || !aOther.m_parent )
+            return false;
+
+        if( m_parent->Type() != aOther.m_parent->Type() )
+            return false;
+
+        if( m_parent->m_Uuid != aOther.m_parent->m_Uuid )
+            return false;
     }
 
     if( IsMandatory() != aOther.IsMandatory() )
@@ -1655,6 +1789,9 @@ static struct SCH_FIELD_DESC
         propMgr.AddTypeCast( new TYPE_CAST<SCH_FIELD, EDA_TEXT> );
         propMgr.InheritsAfter( TYPE_HASH( SCH_FIELD ), TYPE_HASH( SCH_ITEM ) );
         propMgr.InheritsAfter( TYPE_HASH( SCH_FIELD ), TYPE_HASH( EDA_TEXT ) );
+
+        // Lock state is inherited from parent symbol (no independent locking of child items)
+        propMgr.Mask( TYPE_HASH( SCH_FIELD ), TYPE_HASH( SCH_ITEM ), _HKI( "Locked" ) );
 
         const wxString textProps = _HKI( "Text Properties" );
 

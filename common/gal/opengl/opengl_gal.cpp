@@ -45,6 +45,7 @@
 
 #include <wx/app.h>
 #include <wx/frame.h>
+#include <wx/image.h>
 
 #include <macros.h>
 #include <optional>
@@ -58,6 +59,7 @@
 #include <limits>
 #include <memory>
 #include <list>
+#include <vector>
 using namespace std::placeholders;
 using namespace KIGFX;
 
@@ -797,9 +799,65 @@ void OPENGL_GAL::EndDrawing()
 
     cntTotal.Stop();
 
-    KI_TRACE( traceGalProfile, "Timing: %s %s %s %s %s %s\n", cntTotal.to_string(),
+#ifdef KICAD_GAL_PROFILE
+    wxLogTrace( traceGalProfile, "Timing: %s %s %s %s %s %s", cntTotal.to_string(),
               cntEndCached.to_string(), cntEndNoncached.to_string(), cntEndOverlay.to_string(),
               cntComposite.to_string(), cntSwap.to_string() );
+#endif
+}
+
+
+bool OPENGL_GAL::GetScreenshot( wxImage& aDstImage )
+{
+    if( !IsInitialized() || !m_compositor )
+        return false;
+
+    GAL_CONTEXT_LOCKER locker( this );
+
+    m_compositor->SetBuffer( m_mainBuffer );
+
+    GLint viewport[4];
+    glGetIntegerv( GL_VIEWPORT, viewport );
+
+    const int w = viewport[2];
+    const int h = viewport[3];
+
+    GLint readBuffer = GL_COLOR_ATTACHMENT0;
+    glGetIntegerv( GL_DRAW_BUFFER, &readBuffer );
+
+    bool ok = false;
+
+    if( w > 0 && h > 0 )
+    {
+        std::vector<unsigned char> rgba( (size_t) w * h * 4 );
+
+        glFinish();
+        glPixelStorei( GL_PACK_ALIGNMENT, 1 );
+        glReadBuffer( (GLenum) readBuffer );
+        glReadPixels( 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data() );
+
+        // wxImage wants separate RGB and alpha buffers and takes ownership of them.
+        unsigned char* rgb = (unsigned char*) malloc( (size_t) w * h * 3 );
+        unsigned char* alpha = (unsigned char*) malloc( (size_t) w * h );
+
+        for( int i = 0; i < w * h; ++i )
+        {
+            rgb[i * 3 + 0] = rgba[i * 4 + 0];
+            rgb[i * 3 + 1] = rgba[i * 4 + 1];
+            rgb[i * 3 + 2] = rgba[i * 4 + 2];
+            alpha[i] = rgba[i * 4 + 3];
+        }
+
+        aDstImage.SetData( rgb, w, h, false );
+        aDstImage.SetAlpha( alpha, false );
+
+        aDstImage = aDstImage.Mirror( false );
+        ok = true;
+    }
+
+    m_compositor->SetBuffer( OPENGL_COMPOSITOR::DIRECT_RENDERING );
+
+    return ok;
 }
 
 
@@ -809,7 +867,12 @@ void OPENGL_GAL::LockContext( int aClientCookie )
     m_isContextLocked = true;
     m_lockClientCookie = aClientCookie;
 
-    Pgm().GetGLContextManager()->LockCtx( m_glPrivContext, this );
+    GL_CONTEXT_MANAGER* mgr = Pgm().GetGLContextManager();
+
+    if( !mgr )
+        return;
+
+    mgr->LockCtx( m_glPrivContext, this );
 }
 
 
@@ -824,7 +887,12 @@ void OPENGL_GAL::UnlockContext( int aClientCookie )
 
     m_isContextLocked = false;
 
-    Pgm().GetGLContextManager()->UnlockCtx( m_glPrivContext );
+    GL_CONTEXT_MANAGER* mgr = Pgm().GetGLContextManager();
+
+    if( !mgr )
+        return;
+
+    mgr->UnlockCtx( m_glPrivContext );
 }
 
 
@@ -1228,6 +1296,179 @@ void OPENGL_GAL::DrawArcSegment( const VECTOR2D& aCenterPoint, double aRadius,
         if( alpha != endAngle )
         {
             VECTOR2D p_last( cos( endAngle ) * aRadius, sin( endAngle ) * aRadius );
+            drawLineQuad( p, p_last, false );
+        }
+    }
+
+    Restore();
+}
+
+
+void OPENGL_GAL::DrawEllipse( const VECTOR2D& aCenterPoint, double aMajorRadius, double aMinorRadius,
+                              const EDA_ANGLE& aRotation )
+{
+    if( aMajorRadius <= 0 || aMinorRadius <= 0 )
+        return;
+
+    const double alphaIncrement = calcAngleStep( aMajorRadius );
+    const double cosPhi = std::cos( aRotation.AsRadians() );
+    const double sinPhi = std::sin( aRotation.AsRadians() );
+
+    auto eval = [&]( double theta ) -> VECTOR2D
+    {
+        const double lx = aMajorRadius * std::cos( theta );
+        const double ly = aMinorRadius * std::sin( theta );
+        return VECTOR2D( lx * cosPhi - ly * sinPhi, lx * sinPhi + ly * cosPhi );
+    };
+
+    Save();
+    m_currentManager->Translate( aCenterPoint.x, aCenterPoint.y, 0.0 );
+
+    if( m_isFillEnabled )
+    {
+        m_currentManager->Color( m_fillColor.r, m_fillColor.g, m_fillColor.b, m_fillColor.a );
+        m_currentManager->Shader( SHADER_NONE );
+
+        // Triangle fan from origin out to the ellipse boundary
+        double alpha;
+        for( alpha = 0.0; ( alpha + alphaIncrement ) < 2.0 * M_PI; )
+        {
+            const VECTOR2D p1 = eval( alpha );
+            alpha += alphaIncrement;
+            const VECTOR2D p2 = eval( alpha );
+
+            m_currentManager->Reserve( 3 );
+            m_currentManager->Vertex( 0.0, 0.0, m_layerDepth );
+            m_currentManager->Vertex( p1.x, p1.y, m_layerDepth );
+            m_currentManager->Vertex( p2.x, p2.y, m_layerDepth );
+        }
+
+        // Last wedge back to the start.
+        const VECTOR2D p1 = eval( alpha );
+        const VECTOR2D p2 = eval( 0.0 );
+
+        m_currentManager->Reserve( 3 );
+        m_currentManager->Vertex( 0.0, 0.0, m_layerDepth );
+        m_currentManager->Vertex( p1.x, p1.y, m_layerDepth );
+        m_currentManager->Vertex( p2.x, p2.y, m_layerDepth );
+    }
+
+    if( m_isStrokeEnabled )
+    {
+        m_currentManager->Color( m_strokeColor.r, m_strokeColor.g, m_strokeColor.b, m_strokeColor.a );
+
+        // Count quads for reservation.
+        unsigned int lineCount = 0;
+        double       countAlpha;
+
+        for( countAlpha = alphaIncrement; countAlpha < 2.0 * M_PI; countAlpha += alphaIncrement )
+            lineCount++;
+
+        lineCount++; // closing segment back to alpha = 0
+
+        reserveLineQuads( lineCount );
+
+        VECTOR2D p = eval( 0.0 );
+        double   alpha;
+
+        for( alpha = alphaIncrement; alpha < 2.0 * M_PI; alpha += alphaIncrement )
+        {
+            const VECTOR2D p_next = eval( alpha );
+            drawLineQuad( p, p_next, false );
+            p = p_next;
+        }
+
+        // Closing segment
+        drawLineQuad( p, eval( 0.0 ), false );
+    }
+
+    Restore();
+}
+
+
+void OPENGL_GAL::DrawEllipseArc( const VECTOR2D& aCenterPoint, double aMajorRadius, double aMinorRadius,
+                                 const EDA_ANGLE& aRotation, const EDA_ANGLE& aStartAngle, const EDA_ANGLE& aEndAngle )
+{
+    if( aMajorRadius <= 0 || aMinorRadius <= 0 )
+        return;
+
+    double startAngle = aStartAngle.AsRadians();
+    double endAngle = aEndAngle.AsRadians();
+    normalize( startAngle, endAngle );
+
+    const double alphaIncrement = calcAngleStep( aMajorRadius );
+    const double cosPhi = std::cos( aRotation.AsRadians() );
+    const double sinPhi = std::sin( aRotation.AsRadians() );
+
+    auto eval = [&]( double theta ) -> VECTOR2D
+    {
+        const double lx = aMajorRadius * std::cos( theta );
+        const double ly = aMinorRadius * std::sin( theta );
+        return VECTOR2D( lx * cosPhi - ly * sinPhi, lx * sinPhi + ly * cosPhi );
+    };
+
+    Save();
+    m_currentManager->Translate( aCenterPoint.x, aCenterPoint.y, 0.0 );
+
+    if( m_isFillEnabled )
+    {
+        m_currentManager->Color( m_fillColor.r, m_fillColor.g, m_fillColor.b, m_fillColor.a );
+        m_currentManager->Shader( SHADER_NONE );
+
+        // Pie slice fan from origin out to the arc curve.
+        double alpha;
+
+        for( alpha = startAngle; ( alpha + alphaIncrement ) < endAngle; )
+        {
+            const VECTOR2D p1 = eval( alpha );
+            alpha += alphaIncrement;
+            const VECTOR2D p2 = eval( alpha );
+
+            m_currentManager->Reserve( 3 );
+            m_currentManager->Vertex( 0.0, 0.0, m_layerDepth );
+            m_currentManager->Vertex( p1.x, p1.y, m_layerDepth );
+            m_currentManager->Vertex( p2.x, p2.y, m_layerDepth );
+        }
+
+        // Last wedge to endAngle.
+        const VECTOR2D p1 = eval( alpha );
+        const VECTOR2D p2 = eval( endAngle );
+
+        m_currentManager->Reserve( 3 );
+        m_currentManager->Vertex( 0.0, 0.0, m_layerDepth );
+        m_currentManager->Vertex( p1.x, p1.y, m_layerDepth );
+        m_currentManager->Vertex( p2.x, p2.y, m_layerDepth );
+    }
+
+    if( m_isStrokeEnabled )
+    {
+        m_currentManager->Color( m_strokeColor.r, m_strokeColor.g, m_strokeColor.b, m_strokeColor.a );
+
+        unsigned int lineCount = 0;
+        double       countAlpha;
+
+        for( countAlpha = startAngle + alphaIncrement; countAlpha <= endAngle; countAlpha += alphaIncrement )
+            lineCount++;
+
+        if( countAlpha != endAngle )
+            lineCount++; // trailing partial segment
+
+        reserveLineQuads( lineCount );
+
+        VECTOR2D p = eval( startAngle );
+        double   alpha;
+
+        for( alpha = startAngle + alphaIncrement; alpha <= endAngle; alpha += alphaIncrement )
+        {
+            const VECTOR2D p_next = eval( alpha );
+            drawLineQuad( p, p_next, false );
+            p = p_next;
+        }
+
+        // Trailing partial segment, if any
+        if( alpha != endAngle )
+        {
+            const VECTOR2D p_last = eval( endAngle );
             drawLineQuad( p, p_last, false );
         }
     }

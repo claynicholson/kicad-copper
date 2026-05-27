@@ -52,6 +52,8 @@
 
 #include <core/profile.h>
 
+#include <wx/display.h>
+
 #include <pgm_base.h>
 #include <confirm.h>
 
@@ -198,6 +200,53 @@ void EDA_DRAW_PANEL_GAL::onPaint( wxPaintEvent& WXUNUSED( aEvent ) )
 }
 
 
+bool EDA_DRAW_PANEL_GAL::recoverFromGalError( const std::exception& aError )
+{
+    try
+    {
+        // Sleep/wake and GPU resets can invalidate the entire GL context.
+        // Try a full reinit of the current backend before falling back.
+        if( !m_glRecoveryAttempted )
+        {
+            m_glRecoveryAttempted = true;
+            GAL_TYPE prevBackend = m_backend;
+            m_backend = GAL_TYPE_NONE;
+
+            if( SwitchBackend( prevBackend ) )
+            {
+                StartDrawing();
+                return true;
+            }
+        }
+
+        if( GAL_FALLBACK_AVAILABLE && GAL_FALLBACK != m_backend )
+        {
+            m_glRecoveryAttempted = false;
+            SwitchBackend( GAL_FALLBACK );
+
+            DisplayInfoMessage( m_parent, _( "Could not use OpenGL, falling back to software rendering" ),
+                                wxString( aError.what() ) );
+
+            StartDrawing();
+            return true;
+        }
+
+        DisplayErrorMessage( m_parent, _( "Graphics error" ), wxString( aError.what() ) );
+    }
+    catch( std::exception& recoveryErr )
+    {
+        DisplayErrorMessage( m_parent, _( "Graphics error during recovery" ), wxString( recoveryErr.what() ) );
+    }
+    catch( ... )
+    {
+        DisplayErrorMessage( m_parent, _( "Graphics error during recovery" ),
+                             _( "Unknown exception during backend switch" ) );
+    }
+
+    return false;
+}
+
+
 bool EDA_DRAW_PANEL_GAL::DoRePaint( bool aAllowSkip )
 {
     if( !m_refreshMutex.try_lock() )
@@ -228,6 +277,10 @@ bool EDA_DRAW_PANEL_GAL::DoRePaint( bool aAllowSkip )
     if( Pgm().GetCommonSettings()->m_Appearance.show_scrollbars )
         m_viewControls->UpdateScrollbars();
 
+#ifdef KICAD_GAL_PROFILE
+    latencyProbeZoomToRender.Checkpoint("do-repaint-start");
+#endif
+
     SCOPED_SET_RESET<bool> drawing( m_drawing, true );
 
     ( *m_PaintEventCounter )++;
@@ -237,11 +290,11 @@ bool EDA_DRAW_PANEL_GAL::DoRePaint( bool aAllowSkip )
     KIGFX::RENDER_SETTINGS* settings =
             static_cast<KIGFX::RENDER_SETTINGS*>( m_painter->GetSettings() );
 
-    PROF_TIMER cntUpd("view-upd-items");
-    PROF_TIMER cntTotal("view-total");
-    PROF_TIMER cntCtx("view-context-create");
-    PROF_TIMER cntCtxDestroy("view-context-destroy");
-    PROF_TIMER cntRedraw("view-redraw-rects");
+    PROF_TIMER cntUpd("view-upd-items", false);
+    PROF_TIMER cntTotal("view-total", false);
+    PROF_TIMER cntCtx("view-context-create", false);
+    PROF_TIMER cntCtxDestroy("view-context-destroy", false);
+    PROF_TIMER cntRedraw("view-redraw-rects", false);
 
     bool isDirty = false;
 
@@ -346,64 +399,59 @@ bool EDA_DRAW_PANEL_GAL::DoRePaint( bool aAllowSkip )
 
             m_gal->DrawCursor( cursorPos );
 
+	    #ifdef KICAD_GAL_PROFILE
+	    latencyProbeZoomToRender.Checkpoint("do-repaint-pre-ctx-destroy");
+	    #endif
+
+
             cntCtxDestroy.Start();
         }
 
         // ctx goes out of scope here so destructor would be called
         cntCtxDestroy.Stop();
 
+#ifdef KICAD_GAL_PROFILE
+    	latencyProbeZoomToRender.Checkpoint("do-repaint-ctx-done");
+#endif
+
         // OpenGL frame completed successfully, allow future recovery attempts
         m_glRecoveryAttempted = false;
     }
     catch( std::exception& err )
     {
-        if( GAL_FALLBACK != m_backend )
-        {
-            // Sleep/wake and GPU resets can invalidate the entire GL context. Try a
-            // full OpenGL reinit once before falling back to software rendering.
-            if( !m_glRecoveryAttempted )
-            {
-                m_glRecoveryAttempted = true;
-                GAL_TYPE prevBackend = m_backend;
-                m_backend = GAL_TYPE_NONE;
+        wxLogTrace( traceDrawPanel, wxS( "DoRePaint exception: %s" ), err.what() );
 
-                if( SwitchBackend( prevBackend ) )
-                {
-                    StartDrawing();
-                    return true;
-                }
-            }
+        if( recoverFromGalError( err ) )
+            return true;
 
-            m_glRecoveryAttempted = false;
-            SwitchBackend( GAL_FALLBACK );
-
-            DisplayInfoMessage( m_parent,
-                                _( "Could not use OpenGL, falling back to software rendering" ),
-                                wxString( err.what() ) );
-
-            StartDrawing();
-        }
-        else
-        {
-            // We're well and truly banjaxed if we get here without a fallback.
-            DisplayErrorMessage( m_parent, _( "Graphics error" ), wxString( err.what() ) );
-
-            StopDrawing();
-        }
+        StopDrawing();
+    }
+    catch( ... )
+    {
+        DisplayErrorMessage( m_parent, _( "Graphics error" ), _( "Unknown exception" ) );
+        StopDrawing();
     }
 
     if( isDirty )
     {
-        KI_TRACE( traceGalProfile, "View timing: %s %s %s %s %s\n",
+#ifdef KICAD_GAL_PROFILE
+        wxLogTrace( traceGalProfile, "View timing: %s %s %s %s %s",
             cntTotal.to_string(),
             cntUpd.to_string(),
             cntRedraw.to_string(),
             cntCtx.to_string(),
             cntCtxDestroy.to_string()
         );
+#endif
     }
 
     m_lastRepaintEnd = wxGetLocalTimeMillis();
+
+#ifdef KICAD_GAL_PROFILE
+    wxLogTrace( traceGalProfile, "%s", latencyProbeZoomToRender.to_string() );
+    latencyProbeRepaintToMotion.Reset();
+    latencyProbeRepaintToMotion.Checkpoint("repaint-done");
+#endif    
 
     return true;
 }
@@ -459,13 +507,30 @@ void EDA_DRAW_PANEL_GAL::Refresh( bool aEraseBackground, const wxRect* aRect )
     wxLongLong delta = now - m_lastRepaintEnd;
     bool galInitialized = m_gal && m_gal->IsInitialized();
 
+    // wxGetLocalTimeMillis is wall clock, so an NTP correction or manual
+    // clock change can make delta negative. Treat that as "long enough".
+    if( delta < 0 )
+        delta = 0;
+
     // When vsync is available the driver throttles SwapBuffers, so we only need
     // a small guard to avoid queueing work faster than the GPU can consume it.
-    // Without vsync, enforce a 60 FPS ceiling to prevent saturating the GPU.
+    // Without vsync, cap the render rate at the monitor refresh rate so the
+    // GPU is not saturated producing frames that will never be shown.
     int minPeriodMs = 3;
 
     if( galInitialized && m_gal->GetSwapInterval() == 0 )
-        minPeriodMs = 16;
+    {
+        // wxDisplay reports 0 on headless, some virtualized, and a few driver
+        // combinations. Clamp to a plausible monitor range before trusting it
+        // and fall back to 60 Hz otherwise.
+        int refreshHz = 60;
+        int reported = wxDisplay( this ).GetCurrentMode().refresh;
+
+        if( reported >= 24 && reported <= 1000 )
+            refreshHz = reported;
+
+        minPeriodMs = 1000 / refreshHz;
+    }
 
     if( delta >= minPeriodMs )
     {
@@ -474,7 +539,7 @@ void EDA_DRAW_PANEL_GAL::Refresh( bool aEraseBackground, const wxRect* aRect )
     }
     else if( !m_refreshTimer.IsRunning() )
     {
-        m_refreshTimer.StartOnce( ( minPeriodMs - delta ).GetValue() );
+        m_refreshTimer.StartOnce( static_cast<int>( ( minPeriodMs - delta ).GetValue() ) );
     }
 }
 
@@ -501,6 +566,17 @@ void EDA_DRAW_PANEL_GAL::ForceRefresh()
     }
 
     DoRePaint( false );
+}
+
+
+bool EDA_DRAW_PANEL_GAL::GetScreenshot( wxImage& aDstImage )
+{
+    if( m_backend != GAL_TYPE_OPENGL || !m_gal )
+        return false;
+
+    DoRePaint( false );
+
+    return static_cast<KIGFX::OPENGL_GAL*>( m_gal )->GetScreenshot( aDstImage );
 }
 
 

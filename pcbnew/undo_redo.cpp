@@ -508,7 +508,7 @@ void PCB_BASE_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList, bool
                 }
 
                 view->Remove( item );
-                parent->Remove( item );
+                parent->Remove( item, REMOVE_MODE::BULK );
 
                 item->SwapItemData( image );
 
@@ -518,7 +518,7 @@ void PCB_BASE_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList, bool
 
                 view->Add( item );
                 view->Hide( item, false );
-                parent->Add( item );
+                parent->Add( item, ADD_MODE::BULK_INSERT );
 
                 if( item->Type() == PCB_ZONE_T && static_cast<ZONE*>( item )->GetIsRuleArea() )
                 {
@@ -534,8 +534,15 @@ void PCB_BASE_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList, bool
         case UNDO_REDO::NEWITEM:        /* new items are deleted */
             if( eda_item->IsBOARD_ITEM() )
             {
+                BOARD_ITEM* boardItem = static_cast<BOARD_ITEM*>( eda_item );
+
                 aList->SetPickedItemStatus( UNDO_REDO::DELETED, ii );
-                GetModel()->Remove( static_cast<BOARD_ITEM*>( eda_item ), REMOVE_MODE::BULK );
+
+                if( FOOTPRINT* parentFP = boardItem->GetParentFootprint() )
+                    parentFP->Remove( boardItem );
+                else
+                    GetModel()->Remove( boardItem, REMOVE_MODE::BULK );
+
                 update_item_change_state( eda_item, ITEM_CHANGE_TYPE::DELETED );
 
                 if( eda_item->Type() != PCB_NETINFO_T )
@@ -552,12 +559,18 @@ void PCB_BASE_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList, bool
         case UNDO_REDO::DELETED:    /* deleted items are put in List, as new items */
             if( eda_item->IsBOARD_ITEM() )
             {
+                BOARD_ITEM* boardItem = static_cast<BOARD_ITEM*>( eda_item );
+
                 aList->SetPickedItemStatus( UNDO_REDO::NEWITEM, ii );
 
                 clear_local_ratsnest_flags( eda_item );
                 eda_item->ClearFlags( UR_TRANSIENT );
 
-                GetModel()->Add( static_cast<BOARD_ITEM*>( eda_item ), ADD_MODE::BULK_APPEND );
+                if( FOOTPRINT* parentFP = boardItem->GetParentFootprint() )
+                    parentFP->Add( boardItem );
+                else
+                    GetModel()->Add( boardItem, ADD_MODE::BULK_APPEND );
+
                 update_item_change_state( eda_item, ITEM_CHANGE_TYPE::ADDED );
 
                 if( eda_item->Type() != PCB_NETINFO_T )

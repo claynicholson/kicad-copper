@@ -46,6 +46,7 @@ class PCB_BASE_FRAME;
 class BOARD_ITEM;
 class GENERAL_COLLECTOR;
 class PCB_TABLE;
+class PCB_TABLECELL;
 
 namespace KIGFX
 {
@@ -225,6 +226,13 @@ public:
     void FilterCollectorForLockedItems( GENERAL_COLLECTOR& aCollector );
 
     /**
+     * If the most recent FilterCollectorForLockedItems call removed at least one item,
+     * show an InfoBar warning prompting the user to enable Override Locks.  No-op
+     * otherwise.
+     */
+    void ReportFilteredLockedItems();
+
+    /**
      * In general we don't want to select both a parent and any of it's children.  This includes
      * both footprints and their items, and groups and their members.
      */
@@ -327,6 +335,29 @@ private:
     bool selectTableCells( PCB_TABLE* aTable );
 
     /**
+     * Mark the existing selection state of table cells so that drag- and
+     * shift-click range selection can preserve previously-selected cells.
+     */
+    void initializeTableCellSelectionState( PCB_TABLE* aTable );
+
+    /**
+     * Select table cells contained within the rectangle defined by two corner points,
+     * combining the result with the prior selection state (recorded by
+     * initializeTableCellSelectionState) according to the current modifier keys.
+     */
+    void selectCellsBetween( const VECTOR2D& aStart, const VECTOR2D& aEnd, PCB_TABLE* aTable );
+
+    /**
+     * If the current selection holds one or more cells from a single PCB_TABLE and the
+     * cursor is over another cell in that same table, extend the selection to cover the
+     * rectangular range between the original anchor cell and the cell under @p aPosition.
+     *
+     * @return true if a range selection was performed; false if the caller should fall
+     *         back to a normal point selection.
+     */
+    bool extendTableCellSelectionTo( const VECTOR2I& aPosition );
+
+    /**
      * Handle disambiguation actions including displaying the menu.
      */
     int disambiguateCursor( const TOOL_EVENT& aEvent );
@@ -350,6 +381,11 @@ private:
      * Select all copper connections belonging to the same net(s) as the items in the selection.
      */
     int selectNet( const TOOL_EVENT& aEvent );
+
+    /**
+     * Select all copper connections belonging to every net in the selected item's net chain.
+     */
+    int selectNetChain( const TOOL_EVENT& aEvent );
 
     /**
      * Select nearest unconnected footprints on same net as selected items.
@@ -494,6 +530,11 @@ private:
     KIGFX::VIEW_GROUP        m_enteredGroupOverlay;  // Overlay for the entered group's frame.
 
     SELECTION_MODE           m_selectionMode;        // Current selection mode
+
+    bool                     m_lockedItemsFiltered;
+
+    // Anchor cell for shift+click range selection in a PCB_TABLE
+    PCB_TABLECELL*           m_previousFirstCell;
 
     /// Private state (opaque pointer/compilation firewall)
     class PRIV;

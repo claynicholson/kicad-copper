@@ -32,6 +32,7 @@
 #include <base_units.h>
 #include <board.h>
 #include <board_design_settings.h>
+#include <project/net_settings.h>
 #include <component_classes/component_class.h>
 #include <component_classes/component_class_manager.h>
 #include <netinfo.h>
@@ -41,6 +42,7 @@
 #include <pcb_track.h>
 #include <zone.h>
 #include <string_utils.h>
+#include <limits>
 #include <pcbnew_settings.h>
 #include <pcb_edit_frame.h>
 #include <netlist_reader/pcb_netlist.h>
@@ -75,6 +77,38 @@ BOARD_NETLIST_UPDATER::BOARD_NETLIST_UPDATER( PCB_EDIT_FRAME* aFrame, BOARD* aBo
 
 BOARD_NETLIST_UPDATER::~BOARD_NETLIST_UPDATER()
 {
+}
+
+
+void BOARD_NETLIST_UPDATER::ApplyChainAssignments( BOARD* aBoard, const NETLIST& aNetlist,
+                                                   REPORTER* aReporter, bool aDryRun )
+{
+    for( NETINFO_ITEM* net : aBoard->GetNetInfo() )
+    {
+        const wxString previous = net->GetNetChain();
+        wxString       next = aNetlist.GetNetChainFor( net->GetNetname() );
+
+        if( !previous.IsEmpty() && next.IsEmpty() && aReporter && !aDryRun )
+        {
+            aReporter->Report(
+                    wxString::Format(
+                            _( "Net chain assignment '%s' on net '%s' cleared by netlist "
+                               "update." ),
+                            previous, net->GetNetname() ),
+                    RPT_SEVERITY_WARNING );
+        }
+
+        if( !aDryRun )
+        {
+            net->SetNetChain( next );
+
+            if( previous != next )
+            {
+                for( int i = 0; i < 2; ++i )
+                    net->ClearTerminalPad( i );
+            }
+        }
+    }
 }
 
 
@@ -999,7 +1033,7 @@ bool BOARD_NETLIST_UPDATER::updateFootprintGroup( FOOTPRINT* aPcbFootprint,
             if( newGroup == nullptr )
             {
                 newGroup = new PCB_GROUP( m_board );
-                const_cast<KIID&>( newGroup->m_Uuid ) = newGroupKIID;
+                newGroup->SetUuid( newGroupKIID );
                 newGroup->SetName( aNetlistComponent->GetGroup()->name );
 
                 // Add the group to the board manually so we can find it by checking
@@ -1154,7 +1188,9 @@ bool BOARD_NETLIST_UPDATER::updateComponentPadConnections( FOOTPRINT* aFootprint
             {
                 netName = wxString::Format( wxS( "%s" ), net.GetNetName() );
 
-                for( int jj = 1; !padNetnames.insert( netName ).second; jj++ )
+                for( int jj = 1; !padNetnames.insert( netName ).second
+                                 || ( netName != net.GetNetName() && m_schematicNetNames.count( netName ) );
+                     jj++ )
                 {
                     netName = wxString::Format( wxS( "%s_%d" ), net.GetNetName(), jj );
                 }
@@ -1322,9 +1358,6 @@ void BOARD_NETLIST_UPDATER::applyComponentVariants( COMPONENT* aComponent,
 {
     wxString    msg;
     const auto& variants = aComponent->GetVariants();
-
-    if( variants.empty() )
-        return;
 
     if( aBaseFpid.empty() )
         return;
@@ -1984,6 +2017,15 @@ bool BOARD_NETLIST_UPDATER::UpdateNetlist( NETLIST& aNetlist )
         m_board->GetComponentClassManager().InitNetlistUpdate();
     }
 
+    // Collect all schematic net names so NC pad deduplication can avoid collisions
+    for( unsigned ii = 0; ii < aNetlist.GetCount(); ii++ )
+    {
+        COMPONENT* comp = aNetlist.GetComponent( ii );
+
+        for( unsigned jj = 0; jj < comp->GetNetCount(); jj++ )
+            m_schematicNetNames.insert( comp->GetNet( jj ).GetNetName() );
+    }
+
     // Next go through the netlist updating all board footprints which have matching component
     // entries and adding new footprints for those that don't.
     //
@@ -2172,7 +2214,7 @@ bool BOARD_NETLIST_UPDATER::UpdateNetlist( NETLIST& aNetlist )
             }
         }
 
-        if( !baseFootprint && hasBaseFpid )
+        if( !baseFootprint && ( hasBaseFpid || expectedFpids.empty() ) )
             baseFootprint = addNewFootprint( component, baseFpid );
 
         if( baseFootprint )
@@ -2425,9 +2467,125 @@ bool BOARD_NETLIST_UPDATER::UpdateNetlist( NETLIST& aNetlist )
         // * it is useless because zones will be refilled after placing new footprints
         m_commit.Push( _( "Update Netlist" ), m_newFootprintsCount ? ZONE_FILL_OP  : 0 );
 
-        // Update net, netcode and netclass data after commiting the netlist
-        m_board->SynchronizeNetsAndNetClasses( true );
         m_board->GetConnectivity()->RefreshNetcodeMap( m_board );
+
+        // Netlist is authoritative for chain assignment, so the terminal-pin reapplication
+        // below starts from a clean slate.
+        ApplyChainAssignments( m_board, aNetlist, m_reporter, m_isDryRun );
+
+        // Net chains may specify a display colour override; lift that into the
+        // board-side lookup so the PCB painter can use it when highlighting.
+        for( const auto& [chain, colorStr] : aNetlist.GetNetChainColors() )
+        {
+            if( !colorStr.IsEmpty() )
+            {
+                KIGFX::COLOR4D color;
+
+                if( color.SetFromHexString( colorStr ) )
+                    m_board->SetNetChainColor( chain, color );
+            }
+        }
+
+        // Net chain class assignments stored in the netlist are mirrored into
+        // the project-level NET_SETTINGS map so the inNetChainClass() rule
+        // function can resolve them at DRC time.  Both the chain->class map and the
+        // chain-derived pattern assignments are rebuilt from scratch on each netlist
+        // update so that removed or renamed chains do not leave stale entries.
+        std::shared_ptr<NET_SETTINGS>& netSettings = m_board->GetDesignSettings().m_NetSettings;
+
+        if( netSettings )
+        {
+            netSettings->ClearNetChainClasses();
+            netSettings->ClearChainPatternAssignments();
+
+            for( const auto& [chain, className] : aNetlist.GetSignalChainClasses() )
+                netSettings->SetNetChainClass( chain, className );
+
+            // Net chains may specify a netclass that applies to every member net.
+            // Push that assignment into the board's netclass map before resyncing.
+            const std::map<wxString, wxString>& chainClasses = aNetlist.GetNetChainNetClasses();
+
+            for( NETINFO_ITEM* net : m_board->GetNetInfo() )
+            {
+                const wxString& chainName = net->GetNetChain();
+
+                if( chainName.IsEmpty() )
+                    continue;
+
+                auto it = chainClasses.find( chainName );
+
+                if( it == chainClasses.end() || it->second.IsEmpty() )
+                    continue;
+
+                if( netSettings->HasNetclass( it->second ) )
+                    netSettings->SetChainPatternAssignment( net->GetNetname(), it->second );
+            }
+
+            // Always resync after chain cleanup so existing NETINFO_ITEM effective-netclass
+            // pointers pick up cleared/changed chain entries even when chainClasses is empty.
+            m_board->SynchronizeNetsAndNetClasses( true );
+        }
+        else
+        {
+            m_board->SynchronizeNetsAndNetClasses( true );
+        }
+
+        for( const auto& sig : aNetlist.GetNetChainTerminalPins() )
+        {
+            PAD* pads[2] = { nullptr, nullptr };
+
+            for( size_t i = 0; i < sig.second.size() && i < 2; ++i )
+            {
+                const wxString& ref = sig.second[i].first;
+                const wxString& pin = sig.second[i].second;
+                FOOTPRINT* fp = m_board->FindFootprintByReference( ref );
+
+                if( !fp )
+                    continue;
+
+                PAD* candidate = nullptr;
+                PAD* best = nullptr;
+                int bestDist = std::numeric_limits<int>::max();
+                BOX2I bbox = fp->GetBoundingBox();
+
+                while( ( candidate = fp->FindPadByNumber( pin, candidate ) ) )
+                {
+                    VECTOR2I pos = candidate->GetPosition();
+                    int dist = std::min( { pos.x - bbox.GetLeft(), bbox.GetRight() - pos.x,
+                                            pos.y - bbox.GetTop(), bbox.GetBottom() - pos.y } );
+
+                    if( !best || dist < bestDist || ( dist == bestDist && candidate->m_Uuid < best->m_Uuid ) )
+                    {
+                        best = candidate;
+                        bestDist = dist;
+                    }
+                }
+
+                pads[i] = best;
+            }
+
+            for( int i = 0; i < 2; ++i )
+            {
+                if( !pads[i] )
+                    continue;
+
+                NETINFO_ITEM* termNet = pads[i]->GetNet();
+
+                if( !termNet || termNet->GetNetChain() != sig.first )
+                    continue;
+
+                for( NETINFO_ITEM* net : m_board->GetNetInfo() )
+                {
+                    if( net != termNet && net->GetNetChain() == sig.first
+                        && net->GetTerminalPad( i ) )
+                    {
+                        net->ClearTerminalPad( i );
+                    }
+                }
+
+                termNet->SetTerminal( i, pads[i] );
+            }
+        }
 
         // Although m_commit will probably also set this, it's not guaranteed, and we need to make
         // sure any modification to netclasses gets persisted to project settings through a save.

@@ -38,6 +38,7 @@
 #include <string_utils.h>
 #include <launch_ext.h>
 #include "wx/tokenzr.h"
+#include <richio.h>
 #include <sexpr/sexpr.h>
 #include <sexpr/sexpr_parser.h>
 
@@ -73,6 +74,14 @@ wxString FindKicadFile( const wxString& shortname )
     if( wxGetEnv( wxT( "KICAD_RUN_FROM_BUILD_DIR" ), nullptr ) )
     {
         wxFileName buildDir( Pgm().GetExecutablePath(), shortname );
+
+#ifdef __WXMAC__
+        if( !buildDir.GetDirs().IsEmpty()
+            && buildDir.GetDirs().Last().Lower().EndsWith( wxT( ".app" ) ) )
+        {
+            buildDir.RemoveLastDir();
+        }
+#endif
         buildDir.RemoveLastDir();
 #ifndef __WXMSW__
         buildDir.AppendDir( shortname );
@@ -85,6 +94,12 @@ wxString FindKicadFile( const wxString& shortname )
             buildDir.RemoveLastDir();
             buildDir.AppendDir( "pagelayout_editor" );
         }
+
+#ifdef __WXMAC__
+        buildDir.AppendDir( shortname + wxT( ".app" ) );
+        buildDir.AppendDir( wxT( "Contents" ) );
+        buildDir.AppendDir( wxT( "MacOS" ) );
+#endif
 
         if( wxFileExists( buildDir.GetFullPath() ) )
             return buildDir.GetFullPath();
@@ -353,12 +368,14 @@ void CopySexprFile( const wxString& aSrcPath, const wxString& aDestPath,
                     }
                 } );
 
-        wxFFile destFile( aDestPath, "wb" );
 
-        if( destFile.IsOpened() )
-            success = destFile.Write( sexpr->AsString( 0 ) );
+        // Pass through the pretifier to ensure format is the same as when a file is saved by a frame
+        PRETTIFIED_FILE_OUTPUTFORMATTER formatter( aDestPath );
 
-        // wxFFile dtor will close the file
+        // Format as a string to prevent format string attacks
+        formatter.Print( "%s",  sexpr->AsString( 0 ).c_str() );
+
+        success = formatter.Finish();
     }
     catch( ... )
     {

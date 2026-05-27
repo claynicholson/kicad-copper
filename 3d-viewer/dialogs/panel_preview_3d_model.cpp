@@ -26,6 +26,8 @@
 
 #include <3d_rendering/opengl/render_3d_opengl.h> // Must be included before any GL header
 
+#include <cmath>
+
 #include "panel_preview_3d_model.h"
 #include <dialogs/dialog_unit_entry.h>
 #include <libeval/numeric_evaluator.h>
@@ -77,26 +79,32 @@ static wxString evaluateTextCtrl( const wxString& aValue )
 
 
 /**
- * Ensure -MAX_ROTATION <= rotation <= MAX_ROTATION.
+ * Normalize a rotation in degrees to the half-open range (-MAX_ROTATION, MAX_ROTATION].
  *
- * @param \a aRotation will be normalized between -MAX_ROTATION and MAX_ROTATION.
+ * Matches the convention used by EDA_ANGLE::Normalize180(), so 198 maps to -162
+ * and 540 maps to 180.
  */
+static double normalizeRotation( double aRotation )
+{
+    double normalized = std::fmod( aRotation, 2.0 * MAX_ROTATION );
+
+    if( normalized <= -MAX_ROTATION )
+        normalized += 2.0 * MAX_ROTATION;
+    else if( normalized > MAX_ROTATION )
+        normalized -= 2.0 * MAX_ROTATION;
+
+    if( normalized == -0.0 )
+        normalized = 0.0;
+
+    return normalized;
+}
+
+
 static double rotationFromString( const wxString& aValue )
 {
     double rotation = EDA_UNIT_UTILS::UI::DoubleValueFromString( unityScale, EDA_UNITS::DEGREES, aValue );
 
-    if( rotation > MAX_ROTATION )
-    {
-        int n = KiROUND( rotation / MAX_ROTATION );
-        rotation -= MAX_ROTATION * n;
-    }
-    else if( rotation < -MAX_ROTATION )
-    {
-        int n = KiROUND( -rotation / MAX_ROTATION );
-        rotation += MAX_ROTATION * n;
-    }
-
-    return rotation;
+    return normalizeRotation( rotation );
 }
 
 
@@ -220,6 +228,10 @@ PANEL_PREVIEW_3D_MODEL::PANEL_PREVIEW_3D_MODEL( wxWindow* aParent, PCB_BASE_FRAM
     m_boardAdapter.m_IsPreviewer = true;
 
     loadSettings();
+
+    // Don't show placeholder models in the footprint properties 3D preview
+    if( m_boardAdapter.m_Cfg )
+        m_boardAdapter.m_Cfg->m_Render.show_missing_models = false;
 
     // Create the manager
     m_toolManager = new TOOL_MANAGER;
@@ -378,9 +390,63 @@ void PANEL_PREVIEW_3D_MODEL::SetSelectedModel( int idx )
 }
 
 
+void PANEL_PREVIEW_3D_MODEL::SetExtrusionTransformMode( EXTRUDED_3D_BODY* aBody )
+{
+    m_extrudedBody = aBody;
+
+    if( aBody )
+    {
+        xscale->ChangeValue( formatScaleValue( aBody->m_scale.x ) );
+        yscale->ChangeValue( formatScaleValue( aBody->m_scale.y ) );
+        zscale->ChangeValue( formatScaleValue( aBody->m_scale.z ) );
+
+        xrot->ChangeValue( formatRotationValue( -aBody->m_rotation.x ) );
+        yrot->ChangeValue( formatRotationValue( -aBody->m_rotation.y ) );
+        zrot->ChangeValue( formatRotationValue( -aBody->m_rotation.z ) );
+
+        xoff->ChangeValue( formatOffsetValue( aBody->m_offset.x ) );
+        yoff->ChangeValue( formatOffsetValue( aBody->m_offset.y ) );
+        zoff->ChangeValue( formatOffsetValue( aBody->m_offset.z ) );
+
+        m_opacity->SetValue( 100 );
+        m_opacity->Enable( false );
+    }
+    else
+    {
+        m_opacity->Enable( true );
+    }
+}
+
+
 void PANEL_PREVIEW_3D_MODEL::updateOrientation( wxCommandEvent &event )
 {
-    if( m_parentModelList && m_selected >= 0 && m_selected < (int) m_parentModelList->size() )
+    if( m_extrudedBody )
+    {
+        m_extrudedBody->m_scale.x = EDA_UNIT_UTILS::UI::DoubleValueFromString( unityScale, EDA_UNITS::UNSCALED,
+                                                                               evaluateTextCtrl( xscale->GetValue() ) );
+        m_extrudedBody->m_scale.y = EDA_UNIT_UTILS::UI::DoubleValueFromString( unityScale, EDA_UNITS::UNSCALED,
+                                                                               evaluateTextCtrl( yscale->GetValue() ) );
+        m_extrudedBody->m_scale.z = EDA_UNIT_UTILS::UI::DoubleValueFromString( unityScale, EDA_UNITS::UNSCALED,
+                                                                               evaluateTextCtrl( zscale->GetValue() ) );
+
+        m_extrudedBody->m_rotation.x = -rotationFromString( evaluateTextCtrl( xrot->GetValue() ) );
+        m_extrudedBody->m_rotation.y = -rotationFromString( evaluateTextCtrl( yrot->GetValue() ) );
+        m_extrudedBody->m_rotation.z = -rotationFromString( evaluateTextCtrl( zrot->GetValue() ) );
+
+        m_extrudedBody->m_offset.x = EDA_UNIT_UTILS::UI::DoubleValueFromString( pcbIUScale, m_userUnits,
+                                                                                evaluateTextCtrl( xoff->GetValue() ) )
+                                     / pcbIUScale.IU_PER_MM;
+        m_extrudedBody->m_offset.y = EDA_UNIT_UTILS::UI::DoubleValueFromString( pcbIUScale, m_userUnits,
+                                                                                evaluateTextCtrl( yoff->GetValue() ) )
+                                     / pcbIUScale.IU_PER_MM;
+        m_extrudedBody->m_offset.z = EDA_UNIT_UTILS::UI::DoubleValueFromString( pcbIUScale, m_userUnits,
+                                                                                evaluateTextCtrl( zoff->GetValue() ) )
+                                     / pcbIUScale.IU_PER_MM;
+
+        UpdateDummyFootprint( true );
+        onModify();
+    }
+    else if( m_parentModelList && m_selected >= 0 && m_selected < (int) m_parentModelList->size() )
     {
         // Write settings back to the parent
         FP_3DMODEL* modelInfo = &m_parentModelList->at( (unsigned) m_selected );
@@ -518,7 +584,7 @@ void PANEL_PREVIEW_3D_MODEL::doIncrementRotation( wxSpinEvent& aEvent, double aS
 
     double value = rotationFromString( textCtrl->GetValue() );
 
-    value += ( step * aSign );
+    value = normalizeRotation( value + step * aSign );
 
     textCtrl->SetValue( formatRotationValue( value ) );
 }
@@ -601,7 +667,7 @@ void PANEL_PREVIEW_3D_MODEL::onMouseWheelRot( wxMouseEvent& event )
 
     double value = rotationFromString( textCtrl->GetValue() );
 
-    value += step;
+    value = normalizeRotation( value + step );
 
     textCtrl->SetValue( formatRotationValue( value ) );
 }
@@ -681,6 +747,11 @@ void PANEL_PREVIEW_3D_MODEL::UpdateDummyFootprint( bool aReloadRequired )
             m_dummyFootprint->Models().push_back( model );
     }
 
+    syncLocalEmbeddedFiles();
+
+    if( m_extrudedBody && !m_dummyFootprint->HasExtrudedBody() )
+        m_extrudedBody = nullptr;
+
     if( aReloadRequired )
         m_previewPane->ReloadRequest();
 
@@ -690,7 +761,23 @@ void PANEL_PREVIEW_3D_MODEL::UpdateDummyFootprint( bool aReloadRequired )
 
 void PANEL_PREVIEW_3D_MODEL::SetEmbeddedFilesDelegate( EMBEDDED_FILES* aDelegate )
 {
-    m_dummyBoard->SetEmbeddedFilesDelegate( aDelegate );
+    m_localEmbeddedFiles = aDelegate;
+    syncLocalEmbeddedFiles();
+}
+
+
+void PANEL_PREVIEW_3D_MODEL::syncLocalEmbeddedFiles()
+{
+    m_dummyFootprint->ClearEmbeddedFiles();
+
+    if( m_localEmbeddedFiles )
+    {
+        for( const auto& [name, file] : m_localEmbeddedFiles->EmbeddedFileMap() )
+        {
+            m_dummyFootprint->AddFile(
+                    new EMBEDDED_FILES::EMBEDDED_FILE( *file ) );
+        }
+    }
 }
 
 

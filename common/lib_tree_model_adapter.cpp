@@ -28,6 +28,7 @@
 #include <project/project_file.h>
 #include <settings/app_settings.h>
 #include <widgets/ui_common.h>
+#include <widgets/wx_dataviewctrl.h>
 #include <wx/tokenzr.h>
 #include <wx/wupdlock.h>
 #include <wx/settings.h>
@@ -311,6 +312,10 @@ void LIB_TREE_MODEL_ADAPTER::UpdateSearchString( const wxString& aSearch, bool a
                 m_widget->Collapse( wxDataViewItem( &*child ) );
         }
 
+        // Drop any pending scroll target before BeforeReset/AfterReset tears down the rows
+        // it points at.  See KIPLATFORM::UI::CancelPendingScroll and #24433.
+        KIPLATFORM::UI::CancelPendingScroll( m_widget );
+
         // DO NOT REMOVE THE FREEZE/THAW. This freeze/thaw is a flag for this model adapter
         // that tells it when it shouldn't trust any of the data in the model. When set, it will
         // not return invalid data to the UI, since this invalid data can cause crashes.
@@ -368,14 +373,8 @@ void LIB_TREE_MODEL_ADAPTER::UpdateSearchString( const wxString& aSearch, bool a
         //
         // This also happens to circumvent https://bugs.launchpad.net/kicad/+bug/1804400 which
         // appears to be a GTK+3 bug.
-        {
-            wxDataViewItem parent = GetParent( item );
-
-            if( parent.IsOk() )
-                m_widget->EnsureVisible( parent );
-        }
-
-        m_widget->EnsureVisible( item );
+        EnsureVisibleIfEnabled( m_widget, GetParent( item ) );
+        EnsureVisibleIfEnabled( m_widget, item );
     }
 }
 
@@ -415,6 +414,10 @@ void LIB_TREE_MODEL_ADAPTER::createMissingColumns()
 
 void LIB_TREE_MODEL_ADAPTER::resortTree()
 {
+    // See UpdateSearchString -- the resort tears down rows that any queued GtkTreeView
+    // scroll target may still reference (#24433).
+    KIPLATFORM::UI::CancelPendingScroll( m_widget );
+
     Freeze();
     BeforeReset();
 
@@ -431,7 +434,7 @@ void LIB_TREE_MODEL_ADAPTER::PinLibrary( LIB_TREE_NODE* aTreeNode )
     aTreeNode->m_Pinned = true;
 
     resortTree();
-    m_widget->EnsureVisible( ToItem( aTreeNode ) );
+    EnsureVisibleIfEnabled( m_widget, ToItem( aTreeNode ) );
 }
 
 
@@ -806,9 +809,14 @@ const LIB_TREE_NODE* LIB_TREE_MODEL_ADAPTER::showResults()
             {
                 if( n->m_Type == LIB_TREE_NODE::TYPE::ITEM && n->m_Score > 1 )
                 {
+                    // Mirror the sort order (see LIB_TREE_NODE::Compare): an exact match
+                    // outranks any score, otherwise the higher score wins.  Otherwise the
+                    // view would scroll to a high-scoring item that isn't at the top.
                     if( !firstMatch )
                         firstMatch = n;
-                    else if( n->m_Score > firstMatch->m_Score )
+                    else if( n->m_ExactMatch && !firstMatch->m_ExactMatch )
+                        firstMatch = n;
+                    else if( n->m_ExactMatch == firstMatch->m_ExactMatch && n->m_Score > firstMatch->m_Score )
                         firstMatch = n;
 
                     m_widget->ExpandAncestors( ToItem( n ) );

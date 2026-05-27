@@ -45,7 +45,10 @@ public:
                          const wxString& aAuthorName,
                          const wxString& aAuthorEmail ) override;
 
-    PushResult Push( GIT_PUSH_HANDLER* aHandler ) override;
+    CommitResult Amend( GIT_COMMIT_HANDLER* aHandler, const std::vector<wxString>& aFiles, const wxString& aMessage,
+                        const wxString& aAuthorName, const wxString& aAuthorEmail ) override;
+
+    PushResult Push( GIT_PUSH_HANDLER* aHandler, bool aForce = false ) override;
 
     bool HasChangedFiles( GIT_STATUS_HANDLER* aHandler ) override;
 
@@ -74,6 +77,8 @@ public:
 
     bool PerformFetch( GIT_PULL_HANDLER* aHandler, bool aSkipLock ) override;
     PullResult PerformPull( GIT_PULL_HANDLER* aHandler ) override;
+    bool       ResetToUpstream( GIT_PULL_HANDLER* aHandler ) override;
+    PullResult RebaseOntoUpstream( GIT_PULL_HANDLER* aHandler ) override;
 
     void PerformRevert( GIT_REVERT_HANDLER* aHandler ) override;
 

@@ -186,7 +186,7 @@ protected:
     void openTable( const LIBRARY_TABLE_ROW& aRow ) override
     {
         wxFileName fn( LIBRARY_MANAGER::ExpandURI( aRow.URI(), Pgm().GetSettingsManager().Prj() ) );
-        std::shared_ptr<LIBRARY_TABLE> child = std::make_shared<LIBRARY_TABLE>( fn, LIBRARY_TABLE_SCOPE::GLOBAL );
+        std::shared_ptr<LIBRARY_TABLE> child = std::make_shared<LIBRARY_TABLE>( fn, LIBRARY_TABLE_SCOPE::GLOBAL, LIBRARY_TABLE_TYPE::FOOTPRINT );
 
         m_panel->OpenTable( child, aRow.Nickname() );
     }
@@ -264,6 +264,16 @@ void PANEL_FP_LIB_TABLE::AddTable( LIBRARY_TABLE* aTable, const wxString& aTitle
     }
 
     static_cast<LIB_TABLE_GRID_DATA_MODEL*>( grid->GetTable() )->RecheckRows();
+
+    LIB_TABLE_NOTEBOOK_PANEL* notebookPanel =
+            static_cast<LIB_TABLE_NOTEBOOK_PANEL*>( m_notebook->GetPage( m_notebook->GetPageCount() - 1 ) );
+
+    static_cast<LIB_TABLE_GRID_DATA_MODEL*>( grid->GetTable() )
+            ->SetChangeCallback(
+                    [notebookPanel]()
+                    {
+                        notebookPanel->MarkDirty();
+                    } );
 
     // add Cut, Copy, and Paste to wxGrids
     grid->PushEventHandler( new FP_GRID_TRICKS( this, grid,
@@ -374,6 +384,32 @@ PANEL_FP_LIB_TABLE::PANEL_FP_LIB_TABLE( DIALOG_EDIT_LIBRARY_TABLES* aParent, PRO
     m_notebook->Bind( wxEVT_AUINOTEBOOK_PAGE_CHANGING, &PANEL_FP_LIB_TABLE::onNotebookPageChangeRequest, this );
     // This is the button only press for the browse button instead of the menu
     m_browseButton->Bind( wxEVT_BUTTON, &PANEL_FP_LIB_TABLE::browseLibrariesHandler, this );
+
+    m_parent->SetCanCloseCheck(
+            [this]()
+            {
+                for( int ii = 0; ii < (int) m_notebook->GetPageCount(); ++ii )
+                {
+                    LIB_TABLE_NOTEBOOK_PANEL* panel =
+                            static_cast<LIB_TABLE_NOTEBOOK_PANEL*>( m_notebook->GetPage( ii ) );
+
+                    if( panel->GetClosable() )
+                    {
+                        bool wasDirty = panel->TableModified();
+
+                        if( !panel->GetCanClose() )
+                            return false;
+
+                        if( wasDirty && !panel->TableModified() )
+                        {
+                            m_parent->m_GlobalTableChanged = true;
+                            m_parent->m_ProjectTableChanged = true;
+                        }
+                    }
+                }
+
+                return true;
+            } );
 }
 
 
@@ -879,18 +915,6 @@ bool PANEL_FP_LIB_TABLE::TransferDataFromWindow()
                         wxMessageBox( _( "Error saving project library table:\n\n" ) + aError.message,
                                       _( "File Save Error" ), wxOK | wxICON_ERROR );
                     } );
-        }
-    }
-
-    for( int ii = 0; ii < (int) m_notebook->GetPageCount(); ++ii )
-    {
-        LIB_TABLE_NOTEBOOK_PANEL* panel = static_cast<LIB_TABLE_NOTEBOOK_PANEL*>( m_notebook->GetPage( ii ) );
-
-        if( panel->GetClosable() && panel->TableModified() )
-        {
-            panel->SaveTable();
-            m_parent->m_GlobalTableChanged = true;
-            m_parent->m_ProjectTableChanged = true;
         }
     }
 

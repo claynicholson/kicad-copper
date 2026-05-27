@@ -160,6 +160,7 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
     KIGFX::VIEW*        view = m_toolMgr->GetView();
 
     SCH_EDIT_FRAME*     frame = static_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+    SCH_SCREEN*         currentScreen = frame ? frame->GetScreen() : nullptr;
     SCH_SELECTION_TOOL* selTool = m_toolMgr->GetTool<SCH_SELECTION_TOOL>();
     SCH_GROUP*          enteredGroup = selTool ? selTool->GetEnteredGroup() : nullptr;
     bool                itemsDeselected = false;
@@ -270,12 +271,14 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
                 if( !screen->CheckIfOnDrawList( schItem ) )  // don't want a loop!
                     screen->Append( schItem );
 
-                if( view )
+                if( view && screen == currentScreen )
                     view->Add( schItem );
             }
 
-            if( frame )
+            if( frame && screen == currentScreen )
                 frame->UpdateItem( schItem, true, true );
+            else if( screen )
+                screen->Update( schItem );
 
             bulkAddedItems.push_back( schItem );
 
@@ -318,12 +321,14 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
             {
                 screen->Remove( schItem );
 
-                if( view )
+                if( view && screen == currentScreen )
                     view->Remove( schItem );
             }
 
-            if( frame )
+            if( frame && screen == currentScreen )
                 frame->UpdateItem( schItem, true, true );
+            else if( screen )
+                screen->Update( schItem );
 
             if( schItem->Type() == SCH_SHEET_T )
                 refreshHierarchy = true;
@@ -344,6 +349,15 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
                 || ( itemCopy->Type() == SCH_RULE_AREA_T ) )
             {
                 updateConnectivityFlag( schItem );
+            }
+
+            if( schItem->Type() == SCH_SYMBOL_T )
+            {
+                const SCH_SYMBOL* origSymbol = static_cast<const SCH_SYMBOL*>( itemCopy );
+                const SCH_SYMBOL* modSymbol = static_cast<const SCH_SYMBOL*>( schItem );
+
+                if( origSymbol->GetPins().size() != modSymbol->GetPins().size() )
+                    connectivityCleanUp = GLOBAL_CLEANUP;
             }
 
             if( !( aCommitFlags & SKIP_UNDO ) )
@@ -377,8 +391,10 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
                     refreshHierarchy = true;
             }
 
-            if( frame )
+            if( frame && screen == currentScreen )
                 frame->UpdateItem( schItem, false, true );
+            else if( screen )
+                screen->Update( schItem );
 
             itemsChanged.push_back( schItem );
             break;

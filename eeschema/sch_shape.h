@@ -41,6 +41,9 @@ public:
 
     virtual ~SCH_SHAPE() override {}
 
+    void Serialize( google::protobuf::Any& aContainer ) const override;
+    bool Deserialize( const google::protobuf::Any& aContainer ) override;
+
     wxString GetClass() const override
     {
         return wxT( "SCH_SHAPE" );
@@ -84,6 +87,11 @@ public:
 
     VECTOR2I GetPosition() const override                   { return getPosition(); }
     void     SetPosition( const VECTOR2I& aPos ) override   { setPosition( aPos ); }
+
+    int  GetPositionX() const { return GetPosition().x; }
+    int  GetPositionY() const { return GetPosition().y; }
+    void SetPositionX( int aX ) { SetPosition( VECTOR2I( aX, GetPosition().y ) ); }
+    void SetPositionY( int aY ) { SetPosition( VECTOR2I( GetPosition().x, aY ) ); }
 
     VECTOR2I GetCenter() const { return getCenter(); }
 

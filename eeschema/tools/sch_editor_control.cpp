@@ -40,6 +40,7 @@
 #include <dialogs/dialog_update_from_pcb.h>
 #include <dialogs/hotkey_cycle_popup.h>
 #include <dialogs/dialog_increment_annotations_base.h>
+#include <dialogs/dialog_create_net_chain.h>
 #include <project_rescue.h>
 #include <erc/erc.h>
 #include <invoke_sch_dialog.h>
@@ -65,9 +66,11 @@
 #include <sch_bus_entry.h>
 #include <sch_shape.h>
 #include <sch_painter.h>
+#include <wx/log.h>
 #include <sch_sheet_pin.h>
 #include <sch_table.h>
 #include <sch_tablecell.h>
+#include <sch_label.h>
 #include <sch_commit.h>
 #include <sim/simulator_frame.h>
 #include <symbol_library_manager.h>
@@ -89,6 +92,7 @@
 #include <wx/log.h>
 #include <wx/treectrl.h>
 #include <wx/msgdlg.h>
+#include <wx/textdlg.h>
 #include <io/kicad/kicad_io_utils.h>
 #include <libraries/symbol_library_adapter.h>
 #include <printing/dialog_print.h>
@@ -231,7 +235,7 @@ bool plotSelectionToSvg( SCH_EDIT_FRAME* aFrame, const SCH_SELECTION& aSelection
 
     LOCALE_IO     toggle;
     SCH_PLOT_OPTS plotOpts;
-    plotOpts.m_plotHopOver = aFrame->Schematic().Settings().m_HopOverScale > 0.0;
+    plotOpts.m_plotHopOver = aFrame->Schematic().Settings().GetHopOverScale() > 0.0;
 
     plotter->StartPlot( wxT( "1" ) );
     aFrame->GetScreen()->Plot( plotter.get(), plotOpts, collectSelectionItems( aSelection ) );
@@ -668,7 +672,7 @@ int SCH_EDITOR_CONTROL::ExportSymbolsToLibrary( const TOOL_EVENT& aEvent )
 
     SCH_SHEET_LIST     sheets = m_frame->Schematic().BuildSheetListSortedByPageNumbers();
     SCH_REFERENCE_LIST symbols;
-    sheets.GetSymbols( symbols, savePowerSymbols );
+    sheets.GetSymbols( symbols, savePowerSymbols ? SYMBOL_FILTER_ALL : SYMBOL_FILTER_NON_POWER );
 
     std::map<LIB_ID, LIB_SYMBOL*>              libSymbols;
     std::map<LIB_ID, std::vector<SCH_SYMBOL*>> symbolMap;
@@ -1053,6 +1057,8 @@ static VECTOR2D CLEAR;
 
 static bool highlightNet( TOOL_MANAGER* aToolMgr, const VECTOR2D& aPosition )
 {
+    wxLogTrace( "KICAD_SCH_HIGHLIGHT", "highlightNet: pos=(%f,%f) clear=%d", aPosition.x, aPosition.y,
+                ( aPosition == CLEAR ) );
     SCH_EDIT_FRAME*     editFrame     = static_cast<SCH_EDIT_FRAME*>( aToolMgr->GetToolHolder() );
     SCH_SELECTION_TOOL* selTool       = aToolMgr->GetTool<SCH_SELECTION_TOOL>();
     SCH_EDITOR_CONTROL* editorControl = aToolMgr->GetTool<SCH_EDITOR_CONTROL>();
@@ -1072,6 +1078,8 @@ static bool highlightNet( TOOL_MANAGER* aToolMgr, const VECTOR2D& aPosition )
         else
         {
             item = static_cast<SCH_ITEM*>( selTool->GetNode( aPosition ) );
+            wxLogTrace( "KICAD_SCH_HIGHLIGHT", "highlightNet: item=%p type=%d", (void*) item,
+                        item ? (int) item->Type() : -1 );
             SCH_SYMBOL* symbol = dynamic_cast<SCH_SYMBOL*>( item );
 
             if( item )
@@ -1092,6 +1100,8 @@ static bool highlightNet( TOOL_MANAGER* aToolMgr, const VECTOR2D& aPosition )
                 else
                 {
                     conn = item->Connection();
+                    wxLogTrace( "KICAD_SCH_HIGHLIGHT", "highlightNet: conn=%p name=%s",
+                                (void*) conn, conn ? conn->Name() : wxString( "" ) );
                 }
             }
         }
@@ -1101,9 +1111,12 @@ static bool highlightNet( TOOL_MANAGER* aToolMgr, const VECTOR2D& aPosition )
 
     if( !conn )
     {
+        wxLogTrace( "KICAD_SCH_HIGHLIGHT", "highlightNet: no connection under cursor" );
         editFrame->SetStatusText( wxT( "" ) );
         editFrame->SendCrossProbeClearHighlight();
         editFrame->SetHighlightedConnection( wxEmptyString );
+        // Also clear any highlighted net chain so ESC or clicking empty space clears both modes
+        editFrame->SetHighlightedNetChain( wxEmptyString );
         editorControl->SetHighlightBusMembers( false );
     }
     else
@@ -1112,16 +1125,59 @@ static bool highlightNet( TOOL_MANAGER* aToolMgr, const VECTOR2D& aPosition )
 
         if( connName != editFrame->GetHighlightedConnection() )
         {
+            wxLogTrace( "KICAD_SCH_HIGHLIGHT", "highlightNet: setting highlighted connection to %s",
+                        connName );
             editorControl->SetHighlightBusMembers( false );
+            // Clear any previous chain highlight when switching to net highlight
+            editFrame->SetHighlightedNetChain( wxEmptyString );
             editFrame->SetCrossProbeConnection( conn );
             editFrame->SetHighlightedConnection( connName, &itemData );
         }
         else
         {
-            editorControl->SetHighlightBusMembers( !editorControl->GetHighlightBusMembers() );
+            // Same net requested again. Try to expand to the containing chain if available.
+            wxLogTrace( "KICAD_SCH_HIGHLIGHT", "highlightNet: same net re-invoked; trying to expand to chain" );
+            CONNECTION_GRAPH* graph = editFrame ? editFrame->Schematic().ConnectionGraph() : nullptr;
 
-            if( item != editFrame->GetSelectedNetNavigatorItem() )
-                editFrame->SelectNetNavigatorItem( &itemData );
+            if( graph )
+            {
+                // An empty chain list is valid; rely on the explicit built flag.
+                if( !graph->NetChainsBuilt() )
+                {
+                    wxLogTrace( "KICAD_SCH_HIGHLIGHT", "highlightNet: chains not built; rebuilding before expand" );
+                    SCH_SHEET_LIST sheets = editFrame->Schematic().Hierarchy();
+                    graph->Recalculate( sheets, /*aUnconditional=*/true );
+                }
+
+                if( SCH_NETCHAIN* sig = graph->GetNetChainForNet( connName ) )
+                {
+                    // Only switch if this net is indeed part of a multi-net chain or any chain
+                    wxString chainName = sig->GetName();
+                    wxLogTrace( "KICAD_SCH_HIGHLIGHT", "highlightNet: expanding to chain '%s' (nets=%zu)",
+                                chainName, sig->GetNets().size() );
+                    editFrame->SetHighlightedConnection( wxEmptyString );
+                    editFrame->SetHighlightedNetChain( chainName );
+                    editorControl->SetHighlightBusMembers( false );
+                }
+                else
+                {
+                    // Fallback to previous behavior: toggle bus members
+                    wxLogTrace( "KICAD_SCH_HIGHLIGHT", "highlightNet: no chain found; toggling bus members" );
+                    editorControl->SetHighlightBusMembers( !editorControl->GetHighlightBusMembers() );
+
+                    if( item != editFrame->GetSelectedNetNavigatorItem() )
+                        editFrame->SelectNetNavigatorItem( &itemData );
+                }
+            }
+            else
+            {
+                // No graph; fallback to toggling bus members
+                wxLogTrace( "KICAD_SCH_HIGHLIGHT", "highlightNet: no graph; toggling bus members" );
+                editorControl->SetHighlightBusMembers( !editorControl->GetHighlightBusMembers() );
+
+                if( item != editFrame->GetSelectedNetNavigatorItem() )
+                    editFrame->SelectNetNavigatorItem( &itemData );
+            }
         }
     }
 
@@ -1129,6 +1185,7 @@ static bool highlightNet( TOOL_MANAGER* aToolMgr, const VECTOR2D& aPosition )
 
     TOOL_EVENT dummy;
     editorControl->UpdateNetHighlighting( dummy );
+    wxLogTrace( "KICAD_SCH_HIGHLIGHT", "highlightNet: done" );
 
     return retVal;
 }
@@ -1145,9 +1202,164 @@ int SCH_EDITOR_CONTROL::HighlightNet( const TOOL_EVENT& aEvent )
 }
 
 
+int SCH_EDITOR_CONTROL::HighlightNetChain( const TOOL_EVENT& aEvent )
+{
+    KIGFX::VIEW_CONTROLS* controls = getViewControls();
+    VECTOR2D              cursorPos = controls->GetCursorPosition( !aEvent.DisableGridSnapping() );
+    SCH_EDIT_FRAME*       editFrame = static_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+    SCH_SELECTION_TOOL*   selTool   = m_toolMgr->GetTool<SCH_SELECTION_TOOL>();
+    SCH_ITEM*             item      = static_cast<SCH_ITEM*>( selTool->GetNode( cursorPos ) );
+    wxString              netChainName;
+    CONNECTION_GRAPH*     graph     = editFrame ? editFrame->Schematic().ConnectionGraph() : nullptr;
+
+    wxLogTrace( "KICAD_SCH_HIGHLIGHT", "HighlightNetChain: cursor=(%f,%f) gridSnap=%d",
+                cursorPos.x, cursorPos.y, !aEvent.DisableGridSnapping() );
+    wxLogTrace( "KICAD_SCH_HIGHLIGHT", "HighlightNetChain: item=%p type=%d",
+                (void*) item, item ? (int) item->Type() : -1 );
+
+    if( graph && !graph->NetChainsBuilt() )
+    {
+        wxLogTrace( "KICAD_SCH_HIGHLIGHT", "HighlightNetChain: chains not built; calling Recalculate(unconditional=true)" );
+        SCH_SHEET_LIST sheets = editFrame->Schematic().Hierarchy();
+        graph->Recalculate( sheets, /*aUnconditional=*/true );
+    }
+
+    if( item )
+    {
+        SCH_CONNECTION* conn = item->Connection();
+        wxLogTrace( "KICAD_SCH_HIGHLIGHT", "HighlightNetChain: conn=%p name=%s",
+                    (void*) conn, conn ? conn->Name() : wxString( "" ) );
+
+        if( conn )
+        {
+            SCH_NETCHAIN* sig = graph ? graph->GetNetChainForNet( conn->Name() ) : nullptr;
+
+            if( sig )
+            {
+                netChainName = sig->GetName();
+                wxLogTrace( "KICAD_SCH_HIGHLIGHT", "HighlightNetChain: found chain=%s", netChainName );
+            }
+            else
+            {
+                wxLogTrace( "KICAD_SCH_HIGHLIGHT", "HighlightNetChain: no chain for net=%s; falling back to net highlight", conn->Name() );
+                editFrame->SetHighlightedNetChain( wxEmptyString );
+                editFrame->SetHighlightedConnection( conn->Name() );
+            }
+        }
+    }
+
+    if( !netChainName.IsEmpty() )
+    {
+        wxLogTrace( "KICAD_SCH_HIGHLIGHT", "HighlightNetChain: SetHighlightedNetChain(%s)", netChainName );
+        editFrame->SetHighlightedConnection( wxEmptyString );
+        editFrame->SetHighlightedNetChain( netChainName );
+
+        // Cross-probe the chain's member nets to the PCB so the chain highlights there too.
+        // The PCB side interprets the first member as the net to highlight; in a chain-aware
+        // PCB build, all members will be included in a single highlight event.
+        if( graph )
+        {
+            if( SCH_NETCHAIN* chain = graph->GetNetChainByName( netChainName ) )
+            {
+                const auto& nets = chain->GetNets();
+
+                if( !nets.empty() )
+                    editFrame->SendCrossProbeNetName( *nets.begin() );
+            }
+        }
+    }
+    editFrame->UpdateNetHighlightStatus();
+    TOOL_EVENT dummy;
+    UpdateNetHighlighting( dummy );
+    wxLogTrace( "KICAD_SCH_HIGHLIGHT", "HighlightNetChain: UpdateNetHighlighting done" );
+
+    return 0;
+}
+
+int SCH_EDITOR_CONTROL::RemoveFromNetChain( const TOOL_EVENT& aEvent )
+{
+    SCH_EDIT_FRAME*       editFrame = static_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+    if( !editFrame )
+        return 0;
+
+    SCH_SELECTION_TOOL*   selTool   = m_toolMgr->GetTool<SCH_SELECTION_TOOL>();
+    KIGFX::VIEW_CONTROLS* controls  = getViewControls();
+    VECTOR2D              cursorPos = controls->GetCursorPosition( !aEvent.DisableGridSnapping() );
+
+    SCH_ITEM* target = nullptr;
+
+    // Prefer current selection; otherwise, use item under cursor
+    if( selTool && selTool->GetSelection().GetSize() == 1 )
+        target = static_cast<SCH_ITEM*>( selTool->GetSelection().Front() );
+    else if( selTool )
+        target = static_cast<SCH_ITEM*>( selTool->GetNode( cursorPos ) );
+
+    if( !target )
+        return 0;
+
+    SCH_CONNECTION* conn = target->Connection();
+    if( !conn )
+        return 0;
+
+    SCHEMATIC& schematic = editFrame->Schematic();
+    SCH_SCREEN* screen = editFrame->GetCurrentSheet().LastScreen();
+
+    // Find any 2-pin symbols that bridge this connection's net into another net and disable propagation
+    int disabled = 0;
+
+    for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+    {
+        SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+        std::vector<SCH_PIN*> pins = symbol->GetPins( &schematic.CurrentSheet() );
+
+        if( pins.size() != 2 )
+            continue;
+
+        SCH_PIN* pa = pins[0];
+        SCH_PIN* pb = pins[1];
+
+        SCH_CONNECTION* ca = pa->Connection();
+        SCH_CONNECTION* cb = pb->Connection();
+
+        if( !ca || !cb )
+            continue;
+
+        // If either side matches the selected net and the other side is a different net,
+        // this symbol is bridging the selected net into its chain.
+        if( ( ca->Name() == conn->Name() && cb->Name() != conn->Name() )
+            || ( cb->Name() == conn->Name() && ca->Name() != conn->Name() ) )
+        {
+            if( symbol->GetPassthroughMode() != SCH_SYMBOL::PASSTHROUGH_MODE::BLOCK )
+            {
+                symbol->SetPassthroughMode( SCH_SYMBOL::PASSTHROUGH_MODE::BLOCK );
+                disabled++;
+            }
+        }
+    }
+
+    if( disabled > 0 )
+    {
+        // Rebuild connectivity/chains so the change takes effect
+        CONNECTION_GRAPH* graph = schematic.ConnectionGraph();
+        if( graph )
+        {
+            wxLogTrace( "KICAD_SCH_HIGHLIGHT", "RemoveFromNetChain: disabled=%d, rebuilding chains", disabled );
+            SCH_SHEET_LIST sheets = schematic.Hierarchy();
+            graph->Recalculate( sheets, /*aUnconditional=*/true );
+            m_frame->GetCanvas()->Refresh();
+        }
+    }
+
+    return 0;
+}
+
+
 int SCH_EDITOR_CONTROL::ClearHighlight( const TOOL_EVENT& aEvent )
 {
     highlightNet( m_toolMgr, CLEAR );
+    // Also clear any highlighted chain explicitly
+    if( m_frame )
+        m_frame->SetHighlightedNetChain( wxEmptyString );
 
     return 0;
 }
@@ -1387,6 +1599,9 @@ int SCH_EDITOR_CONTROL::UpdateNetHighlighting( const TOOL_EVENT& aEvent )
 
     wxCHECK( screen && connectionGraph, 0 );
 
+    wxLogTrace( "KICAD_SCH_HIGHLIGHT", "UpdateNetHighlighting: highlightedConn='%s' highlightedSignal='%s'",
+                selectedName, m_frame->GetHighlightedNetChain() );
+
     if( !selectedName.IsEmpty() )
     {
         connNames.emplace( selectedName );
@@ -1421,6 +1636,18 @@ int SCH_EDITOR_CONTROL::UpdateNetHighlighting( const TOOL_EVENT& aEvent )
                 for( CONNECTION_SUBGRAPH* bus_sg : bus_sgs )
                     connNames.emplace( bus_sg->GetNetName() );
             }
+        }
+        wxLogTrace( "KICAD_SCH_HIGHLIGHT", "UpdateNetHighlighting: connNames after connection='%zu'", connNames.size() );
+    }
+
+    if( !m_frame->GetHighlightedNetChain().IsEmpty() )
+    {
+        if( SCH_NETCHAIN* sig = connectionGraph->GetNetChainByName( m_frame->GetHighlightedNetChain() ) )
+        {
+            for( const wxString& n : sig->GetNets() )
+                connNames.emplace( n );
+            wxLogTrace( "KICAD_SCH_HIGHLIGHT", "UpdateNetHighlighting: added %zu nets from chain '%s'",
+                        sig->GetNets().size(), m_frame->GetHighlightedNetChain() );
         }
     }
 
@@ -1551,6 +1778,7 @@ int SCH_EDITOR_CONTROL::UpdateNetHighlighting( const TOOL_EVENT& aEvent )
 
     if( itemsToRedraw.size() )
     {
+        wxLogTrace( "KICAD_SCH_HIGHLIGHT", "UpdateNetHighlighting: itemsToRedraw=%zu", itemsToRedraw.size() );
         // Be sure highlight change will be redrawn
         KIGFX::VIEW* view = getView();
 
@@ -1582,6 +1810,203 @@ int SCH_EDITOR_CONTROL::HighlightNetCursor( const TOOL_EVENT& aEvent )
             } );
 
     m_toolMgr->RunAction( ACTIONS::pickerTool, &aEvent );
+
+    return 0;
+}
+
+
+int SCH_EDITOR_CONTROL::ReplaceTerminalPin( const TOOL_EVENT& aEvent )
+{
+    SCH_EDIT_FRAME* editFrame = static_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+    auto ids = aEvent.Parameter<std::pair<wxString, wxString>>();
+    wxString oldStr = ids.first;
+    wxString newStr = ids.second;
+    KIID oldPin( oldStr );
+    KIID newPin( newStr );
+    wxString sig = editFrame->GetHighlightedNetChain();
+
+    if( !sig.IsEmpty() )
+        editFrame->Schematic().ConnectionGraph()->ReplaceNetChainTerminalPin( sig, oldPin, newPin );
+
+    return 0;
+}
+
+
+int SCH_EDITOR_CONTROL::NameNetChain( const TOOL_EVENT& aEvent )
+{
+    SCH_SELECTION_TOOL* selTool = m_toolMgr->GetTool<SCH_SELECTION_TOOL>();
+    SCH_ITEM* item = static_cast<SCH_ITEM*>( selTool->GetSelection().Front() );
+    SCH_PIN* pin = dynamic_cast<SCH_PIN*>( item );
+
+    if( !pin || !pin->Connection() )
+        return 0;
+
+    SCH_EDIT_FRAME* editFrame = static_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+    CONNECTION_GRAPH* graph = editFrame->Schematic().ConnectionGraph();
+
+    if( SCH_NETCHAIN* sig = graph->GetNetChainForNet( pin->Connection()->Name() ) )
+    {
+        wxString newName = wxGetTextFromUser( _( "Net chain name:" ), _( "Name Net Chain" ), sig->GetName() );
+
+        if( !newName.IsEmpty() && newName != sig->GetName() )
+        {
+            sig->SetName( newName );
+
+            editFrame->SetHighlightedNetChain( newName );
+            TOOL_EVENT dummy;
+            UpdateNetHighlighting( dummy );
+            editFrame->UpdateNetHighlightStatus();
+        }
+    }
+
+    return 0;
+}
+
+int SCH_EDITOR_CONTROL::CreateNetChainBetweenPins( const TOOL_EVENT& aEvent )
+{
+    SCH_SELECTION_TOOL* selTool = m_toolMgr->GetTool<SCH_SELECTION_TOOL>();
+    auto& selection = selTool->GetSelection();
+
+    if( selection.GetSize() != 2 )
+        return 0;
+
+    SCH_PIN* pinA = dynamic_cast<SCH_PIN*>( static_cast<SCH_ITEM*>( selection[0] ) );
+    SCH_PIN* pinB = dynamic_cast<SCH_PIN*>( static_cast<SCH_ITEM*>( selection[1] ) );
+
+    if( !pinA || !pinB )
+        return 0;
+
+    SCH_EDIT_FRAME* editFrame = static_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+    CONNECTION_GRAPH* graph = editFrame->Schematic().ConnectionGraph();
+
+    SCH_NETCHAIN* potential = graph->FindPotentialNetChainBetweenPins( pinA, pinB );
+    if( !potential )
+    {
+        DisplayError( editFrame, _( "No potential net chain connects the selected pins." ) );
+        return 0;
+    }
+
+    // Build default suggestion name
+    wxString suggestion = wxString::Format( wxS( "%s_%s" ), pinA->GetParentSymbol()->GetRef( &editFrame->GetCurrentSheet() ), pinB->GetParentSymbol()->GetRef( &editFrame->GetCurrentSheet() ) );
+
+    // Compose display text for dialog
+    wxString msg = wxString::Format( _( "Create Net Chain between %s:%s and %s:%s" ),
+                                     pinA->GetParentSymbol()->GetRef( &editFrame->GetCurrentSheet() ), pinA->GetNumber(),
+                                     pinB->GetParentSymbol()->GetRef( &editFrame->GetCurrentSheet() ), pinB->GetNumber() );
+
+    // Temporary highlight preview: highlight all nets in potential (reuse SetHighlightedNetChain with temp name)
+    // We use the potential's current name as a temporary highlight identifier
+    wxString prevHighlightedChain = editFrame->GetHighlightedNetChain();
+    wxString prevHighlightedConn = editFrame->GetHighlightedConnection();
+
+    editFrame->SetHighlightedConnection( wxEmptyString );
+    editFrame->SetHighlightedNetChain( potential->GetName() );
+    TOOL_EVENT dummy;
+    UpdateNetHighlighting( dummy );
+    editFrame->UpdateNetHighlightStatus();
+
+    // Zoom to bounding box of the two pins (union) expanded slightly
+    BOX2I bbox = pinA->GetBoundingBox();
+    bbox.Merge( pinB->GetBoundingBox() );
+    // Expand by 25% for context
+    int dx = bbox.GetWidth() / 4; if( dx < 100 ) dx = 100;
+    int dy = bbox.GetHeight() / 4; if( dy < 100 ) dy = 100;
+    bbox.Inflate( dx, dy );
+    if( auto canvas = editFrame->GetCanvas() )
+    {
+        canvas->GetView()->SetCenter( bbox.GetCenter() );
+        // Compute scale so bbox roughly fits viewport height
+        auto view = canvas->GetView();
+        if( view )
+        {
+            BOX2D viewBox = view->GetBoundary();
+            double scaleX = (double) viewBox.GetWidth() / (double) bbox.GetWidth();
+            double scaleY = (double) viewBox.GetHeight() / (double) bbox.GetHeight();
+            double scale = std::min( scaleX, scaleY );
+            if( scale > 0 )
+                view->SetScale( scale );
+        }
+    }
+
+    wxString name = wxGetTextFromUser( msg, _( "Create Net Chain" ), suggestion, editFrame );
+    if( name.IsEmpty() )
+    {
+        // Restore previous highlight state
+        editFrame->SetHighlightedNetChain( prevHighlightedChain );
+        editFrame->SetHighlightedConnection( prevHighlightedConn );
+        UpdateNetHighlighting( dummy );
+        editFrame->UpdateNetHighlightStatus();
+        return 0; // cancelled
+    }
+
+    if( graph->CreateNetChainFromPotential( potential, name ) )
+    {
+        // Replace temporary highlight with new chain name
+        editFrame->SetHighlightedNetChain( name );
+        editFrame->SetHighlightedConnection( wxEmptyString );
+        UpdateNetHighlighting( dummy );
+        editFrame->UpdateNetHighlightStatus();
+        editFrame->Refresh();
+    }
+
+    return 0;
+}
+
+
+int SCH_EDITOR_CONTROL::ShowCreateNetChain( const TOOL_EVENT& aEvent )
+{
+    SCH_EDIT_FRAME* editFrame = static_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+
+    CONNECTION_GRAPH* graph = editFrame->Schematic().ConnectionGraph();
+
+    if( graph && graph->GetPotentialNetChains().empty() )
+    {
+        SCH_SHEET_LIST sheets = editFrame->Schematic().Hierarchy();
+        graph->Recalculate( sheets, true );
+    }
+
+    DIALOG_CREATE_NET_CHAIN::FOCUS_HINT hint;
+
+    if( SCH_SELECTION_TOOL* selTool = m_toolMgr->GetTool<SCH_SELECTION_TOOL>() )
+    {
+        const SCH_SELECTION& sel = selTool->GetSelection();
+
+        std::vector<SCH_SYMBOL*> symbols;
+
+        for( EDA_ITEM* item : sel )
+        {
+            if( SCH_SYMBOL* sym = dynamic_cast<SCH_SYMBOL*>( static_cast<SCH_ITEM*>( item ) ) )
+                symbols.push_back( sym );
+        }
+
+        if( symbols.size() >= 1 )
+            hint.fromRef = symbols[0]->GetRef( &editFrame->GetCurrentSheet() );
+
+        if( symbols.size() >= 2 )
+            hint.toRef = symbols[1]->GetRef( &editFrame->GetCurrentSheet() );
+
+        // Single pin or single wire/bus → use its connection's net name as the focus hint.
+        if( symbols.empty() && sel.GetSize() == 1 )
+        {
+            SCH_ITEM* schItem = static_cast<SCH_ITEM*>( sel.Front() );
+
+            if( SCH_PIN* pin = dynamic_cast<SCH_PIN*>( schItem ) )
+            {
+                if( pin->Connection() )
+                    hint.netName = pin->Connection()->Name();
+            }
+            else if( schItem
+                     && schItem->Type() == SCH_LINE_T
+                     && schItem->IsType( { SCH_ITEM_LOCATE_WIRE_T, SCH_ITEM_LOCATE_BUS_T } )
+                     && schItem->Connection() )
+            {
+                hint.netName = schItem->Connection()->Name();
+            }
+        }
+    }
+
+    DIALOG_CREATE_NET_CHAIN dlg( editFrame, hint );
+    dlg.ShowModal();
 
     return 0;
 }
@@ -1978,7 +2403,7 @@ SCH_SHEET_PATH SCH_EDITOR_CONTROL::updatePastedSheet( SCH_SHEET* aSheet, const S
         }
     }
 
-    sheetPath.GetSymbols( aPastedSymbols[aPastePath] );
+    sheetPath.GetSymbols( aPastedSymbols[aPastePath], SYMBOL_FILTER_ALL );
 
     return sheetPath;
 }
@@ -2219,7 +2644,7 @@ int SCH_EDITOR_CONTROL::Paste( const TOOL_EVENT& aEvent )
 
     // Build symbol list for reannotation of duplicates
     SCH_REFERENCE_LIST existingRefs;
-    hierarchy.GetSymbols( existingRefs );
+    hierarchy.GetSymbols( existingRefs, SYMBOL_FILTER_ALL );
     existingRefs.SortByReferenceOnly();
 
     std::set<wxString> existingRefsSet;
@@ -2291,6 +2716,9 @@ int SCH_EDITOR_CONTROL::Paste( const TOOL_EVENT& aEvent )
 
         if( schItem->IsConnectable() )
             schItem->SetConnectivityDirty();
+
+        // Clear lock state on paste to match PCB editor behavior
+        schItem->SetLocked( false );
 
         if( item->Type() == SCH_SYMBOL_T )
         {
@@ -2912,9 +3340,9 @@ int SCH_EDITOR_CONTROL::IncrementAnnotations( const TOOL_EVENT& aEvent )
         SCH_REFERENCE_LIST references;
 
         if( dlg.m_AllSheets->GetValue() )
-            schematic->Hierarchy().GetSymbols( references );
+            schematic->Hierarchy().GetSymbols( references, SYMBOL_FILTER_ALL );
         else
-            schematic->CurrentSheet().GetSymbols( references );
+            schematic->CurrentSheet().GetSymbols( references, SYMBOL_FILTER_ALL );
 
         references.SplitReferences();
 
@@ -2953,17 +3381,27 @@ int SCH_EDITOR_CONTROL::ShowCvpcb( const TOOL_EVENT& aEvent )
 }
 
 
+int SCH_EDITOR_CONTROL::ImportNonKicadSchematic( const TOOL_EVENT& aEvent )
+{
+    m_frame->OnImportProject();
+    return 0;
+}
+
+
 int SCH_EDITOR_CONTROL::EditSymbolFields( const TOOL_EVENT& aEvent )
 {
     DIALOG_SYMBOL_FIELDS_TABLE* dlg = m_frame->GetSymbolFieldsTableDialog();
 
-    wxCHECK( dlg, 0 );
+    if( !dlg )
+        return 0;
 
     // Needed at least on Windows. Raise() is not enough
     dlg->Show( true );
 
     // Bring it to the top if already open.  Dual monitor users need this.
     dlg->Raise();
+
+    dlg->ShowEditTab();
 
     return 0;
 }
@@ -3016,7 +3454,8 @@ int SCH_EDITOR_CONTROL::GenerateBOM( const TOOL_EVENT& aEvent )
 {
     DIALOG_SYMBOL_FIELDS_TABLE* dlg = m_frame->GetSymbolFieldsTableDialog();
 
-    wxCHECK( dlg, 0 );
+    if( !dlg )
+        return 0;
 
     // Needed at least on Windows. Raise() is not enough
     dlg->Show( true );
@@ -3320,22 +3759,6 @@ int SCH_EDITOR_CONTROL::ToggleAnnotateAuto( const TOOL_EVENT& aEvent )
 }
 
 
-int SCH_EDITOR_CONTROL::TogglePythonConsole( const TOOL_EVENT& aEvent )
-{
-    m_frame->ScriptingConsoleEnableDisable();
-    return 0;
-}
-
-
-int SCH_EDITOR_CONTROL::ReloadPlugins( const TOOL_EVENT& aEvent )
-{
-#ifdef KICAD_IPC_API
-    if( Pgm().GetCommonSettings()->m_Api.enable_server )
-        Pgm().GetPluginManager().ReloadPlugins();
-#endif
-    return 0;
-}
-
 int SCH_EDITOR_CONTROL::OnAngleSnapModeChanged( const TOOL_EVENT& aEvent )
 {
     // Update the left toolbar Line modes group icon to match current mode
@@ -3486,6 +3909,18 @@ int SCH_EDITOR_CONTROL::RemoveVariant( const TOOL_EVENT& aEvent )
 }
 
 
+int SCH_EDITOR_CONTROL::EditVariantDescription( const TOOL_EVENT& aEvent )
+{
+    SCH_EDIT_FRAME* editFrame = dynamic_cast<SCH_EDIT_FRAME*>( m_frame );
+
+    if( !editFrame )
+        return 1;
+
+    editFrame->EditVariantDescription();
+    return 0;
+}
+
+
 void SCH_EDITOR_CONTROL::setTransitions()
 {
     Go( &SCH_EDITOR_CONTROL::New,                     ACTIONS::doNew.MakeEvent() );
@@ -3512,8 +3947,14 @@ void SCH_EDITOR_CONTROL::setTransitions()
     Go( &SCH_EDITOR_CONTROL::SimTune,                 SCH_ACTIONS::simTune.MakeEvent() );
 
     Go( &SCH_EDITOR_CONTROL::HighlightNet,            SCH_ACTIONS::highlightNet.MakeEvent() );
+    Go( &SCH_EDITOR_CONTROL::CreateNetChainBetweenPins, SCH_ACTIONS::createNetChainBetweenPins.MakeEvent() );
+    Go( &SCH_EDITOR_CONTROL::ShowCreateNetChain, SCH_ACTIONS::createNetChain.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::ClearHighlight,          SCH_ACTIONS::clearHighlight.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::HighlightNetCursor,      SCH_ACTIONS::highlightNetTool.MakeEvent() );
+    Go( &SCH_EDITOR_CONTROL::HighlightNetChain,         SCH_ACTIONS::highlightNetChain.MakeEvent() );
+    Go( &SCH_EDITOR_CONTROL::RemoveFromNetChain,        SCH_ACTIONS::removeFromNetChain.MakeEvent() );
+    Go( &SCH_EDITOR_CONTROL::ReplaceTerminalPin,      SCH_ACTIONS::replaceTerminalPin.MakeEvent() );
+    Go( &SCH_EDITOR_CONTROL::NameNetChain,              SCH_ACTIONS::nameNetChain.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::UpdateNetHighlighting,   EVENTS::SelectedItemsModified );
     Go( &SCH_EDITOR_CONTROL::UpdateNetHighlighting,   SCH_ACTIONS::updateNetHighlighting.MakeEvent() );
 
@@ -3535,6 +3976,7 @@ void SCH_EDITOR_CONTROL::setTransitions()
     Go( &SCH_EDITOR_CONTROL::EditWithSymbolEditor,    SCH_ACTIONS::editLibSymbolWithLibEdit.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::ShowCvpcb,               SCH_ACTIONS::assignFootprints.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::ImportFPAssignments,     SCH_ACTIONS::importFPAssignments.MakeEvent() );
+    Go( &SCH_EDITOR_CONTROL::ImportNonKicadSchematic, SCH_ACTIONS::importNonKicadSchematic.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::Annotate,                SCH_ACTIONS::annotate.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::IncrementAnnotations,    SCH_ACTIONS::incrementAnnotations.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::EditSymbolFields,        SCH_ACTIONS::editSymbolFields.MakeEvent() );
@@ -3573,8 +4015,6 @@ void SCH_EDITOR_CONTROL::setTransitions()
     Go( &SCH_EDITOR_CONTROL::OnAngleSnapModeChanged,  SCH_ACTIONS::angleSnapModeChanged.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::ToggleAnnotateAuto,      SCH_ACTIONS::toggleAnnotateAuto.MakeEvent() );
 
-    Go( &SCH_EDITOR_CONTROL::ReloadPlugins,           ACTIONS::pluginsReload.MakeEvent() );
-
     Go( &SCH_EDITOR_CONTROL::ExportSymbolsToLibrary,  SCH_ACTIONS::exportSymbolsToLibrary.MakeEvent() );
 
     Go( &SCH_EDITOR_CONTROL::PlaceLinkedDesignBlock,  SCH_ACTIONS::placeLinkedDesignBlock.MakeEvent() );
@@ -3582,4 +4022,5 @@ void SCH_EDITOR_CONTROL::setTransitions()
 
     Go( &SCH_EDITOR_CONTROL::AddVariant,              SCH_ACTIONS::addVariant.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::RemoveVariant,           SCH_ACTIONS::removeVariant.MakeEvent() );
+    Go( &SCH_EDITOR_CONTROL::EditVariantDescription, SCH_ACTIONS::editVariantDescription.MakeEvent() );
 }

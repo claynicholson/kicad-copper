@@ -56,7 +56,8 @@ bool DRC_CACHE_GENERATOR::Run()
         largestPhysicalClearance = std::max( largestPhysicalClearance, worstConstraint.GetValue().Min() );
 
     // If the unconditional max is 0, check for conditional constraints that may still apply.
-    // Only include the conditional maximum if matching items actually exist on the board.
+    // User-defined conditional rules always need the test to run.  The implicit barcode rule
+    // only needs the test if barcodes actually exist on the board.
     if( largestPhysicalClearance <= 0 )
     {
         int conditionalMax = 0;
@@ -69,17 +70,24 @@ bool DRC_CACHE_GENERATOR::Run()
 
         if( conditionalMax > 0 )
         {
-            bool hasMatchingItems = false;
-
-            forEachGeometryItem( { PCB_BARCODE_T }, LSET::AllLayersMask(),
-                    [&]( BOARD_ITEM* item ) -> bool
-                    {
-                        hasMatchingItems = true;
-                        return false;
-                    } );
-
-            if( hasMatchingItems )
+            if( m_drcEngine->HasUserDefinedPhysicalConstraint() )
+            {
                 largestPhysicalClearance = conditionalMax;
+            }
+            else
+            {
+                bool hasMatchingItems = false;
+
+                forEachGeometryItem( { PCB_BARCODE_T }, LSET::AllLayersMask(),
+                                     [&]( BOARD_ITEM* item ) -> bool
+                                     {
+                                         hasMatchingItems = true;
+                                         return false;
+                                     } );
+
+                if( hasMatchingItems )
+                    largestPhysicalClearance = conditionalMax;
+            }
         }
     }
 
@@ -138,6 +146,14 @@ bool DRC_CACHE_GENERATOR::Run()
                 }
             }
         }
+    }
+
+    for( ZONE* zone : m_board->m_DRCCopperZones )
+    {
+        LSET zoneCopperLayers = zone->GetLayerSet() & boardCopperLayers;
+
+        for( PCB_LAYER_ID layer : zoneCopperLayers )
+            m_board->m_DRCCopperZonesByLayer[layer].push_back( zone );
     }
 
     size_t              count = 0;
@@ -201,6 +217,7 @@ bool DRC_CACHE_GENERATOR::Run()
                     m_board->m_CopperItemRTreeCache = std::make_shared<DRC_RTREE>();
 
                 forEachGeometryItem( itemTypes, boardCopperLayers, addToCopperTree );
+                m_board->m_CopperItemRTreeCache->Build();
             } );
 
     std::future_status status = retn.wait_for( std::chrono::milliseconds( 250 ) );
@@ -247,6 +264,8 @@ bool DRC_CACHE_GENERATOR::Run()
                                    rtree->Insert( aZone, layer );
                            } );
 
+                   rtree->Build();
+
                    {
                        std::unique_lock<std::shared_mutex> writeLock( m_board->m_CachesMutex );
                        m_board->m_CopperZoneRTreeCache[ aZone ] = std::move( rtree );
@@ -284,7 +303,7 @@ bool DRC_CACHE_GENERATOR::Run()
 
     for( ZONE* zone : m_board->Zones() )
     {
-        if( !zone->GetIsRuleArea() && !zone->IsTeardropArea() )
+        if( !zone->GetIsRuleArea() && !zone->IsTeardropArea() && !zone->IsCopperThieving() )
         {
             zone->GetLayerSet().RunOnLayers(
                     [&]( PCB_LAYER_ID layer )

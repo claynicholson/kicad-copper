@@ -277,7 +277,12 @@ public:
     {
         if( aX > 0 )
         {
-            m_padStack.SetSize( { aX, m_padStack.Size( PADSTACK::ALL_LAYERS ).y }, PADSTACK::ALL_LAYERS );
+            int y = m_padStack.Size( PADSTACK::ALL_LAYERS ).y;
+
+            if( GetShape( PADSTACK::ALL_LAYERS ) == PAD_SHAPE::CIRCLE )
+                y = aX;
+
+            m_padStack.SetSize( { aX, y }, PADSTACK::ALL_LAYERS );
             SetDirty();
         }
     }
@@ -288,7 +293,12 @@ public:
     {
         if( aY > 0 )
         {
-            m_padStack.SetSize( { m_padStack.Size( PADSTACK::ALL_LAYERS ).x, aY }, PADSTACK::ALL_LAYERS );
+            int x = m_padStack.Size( PADSTACK::ALL_LAYERS ).x;
+
+            if( GetShape( PADSTACK::ALL_LAYERS ) == PAD_SHAPE::CIRCLE )
+                x = aY;
+
+            m_padStack.SetSize( { x, aY }, PADSTACK::ALL_LAYERS );
             SetDirty();
         }
     }
@@ -787,6 +797,15 @@ public:
     VECTOR2I ShapePos( PCB_LAYER_ID aLayer ) const;
 
     /**
+     * Swap the visible shape positions of two pads, preserving each pad's own shape offset.
+     *
+     * Using SetPosition() directly would swap anchor (hole) positions, which leaves each pad's
+     * copper shape displaced by its own offset after the swap.  This helper computes the new
+     * anchor for each pad so the visible shape centers (ShapePos) are exchanged.
+     */
+    static void SwapShapePositions( PAD* aLhs, PAD* aRhs );
+
+    /**
      * Has meaning only for rounded rectangle pads.
      *
      * Set the ratio between the smaller X or Y size and the rounded corner radius.
@@ -997,7 +1016,7 @@ public:
     wxString ShowPadShape( PCB_LAYER_ID aLayer ) const;
 
     /**
-     * An older version still used by place file writer and SWIG interface.
+     * An older version still used by place file writer
      */
     wxString ShowLegacyPadShape( PCB_LAYER_ID aLayer ) const;
 

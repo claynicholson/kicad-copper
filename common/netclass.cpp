@@ -186,10 +186,10 @@ void NETCLASS::Serialize( google::protobuf::Any &aContainer ) const
     project::NetClassSchematicSettings* schematic = nc.mutable_schematic();
 
     if( m_wireWidth )
-        schematic->mutable_wire_width()->set_value_nm( *m_wireWidth );
+        PackDistance( *schematic->mutable_wire_width(), *m_wireWidth, schIUScale );
 
     if( m_busWidth )
-        schematic->mutable_bus_width()->set_value_nm( *m_busWidth );
+        PackDistance( *schematic->mutable_bus_width(), *m_busWidth, schIUScale );
 
     if( m_schematicColor != COLOR4D::UNSPECIFIED )
         PackColor( *schematic->mutable_color(), m_schematicColor );
@@ -253,10 +253,10 @@ bool NETCLASS::Deserialize( const google::protobuf::Any &aContainer )
         m_tuningProfile = wxString::FromUTF8( nc.board().tuning_profile() );
 
     if( nc.schematic().has_wire_width() )
-        m_wireWidth = nc.schematic().wire_width().value_nm();
+        m_wireWidth = UnpackDistance( nc.schematic().wire_width(), schIUScale );
 
     if( nc.schematic().has_bus_width() )
-        m_busWidth = nc.schematic().bus_width().value_nm();
+        m_busWidth = UnpackDistance( nc.schematic().bus_width(), schIUScale );
 
     if( nc.schematic().has_color() )
         m_schematicColor = UnpackColor( nc.schematic().color() );
@@ -332,11 +332,19 @@ const wxString NETCLASS::GetName() const
 
     wxASSERT( m_constituents.size() >= 2 );
 
-    wxString name = m_constituents[0]->m_Name;
+    size_t strLen = m_constituents.size() - 1; // Count commas
+
+    for( std::size_t i = 0; i < m_constituents.size(); ++i )
+        strLen += m_constituents[i]->m_Name.length();
+
+    wxString name;
+    name.reserve( strLen );
+
+    name += m_constituents[0]->m_Name;
 
     for( std::size_t i = 1; i < m_constituents.size(); ++i )
     {
-        name += ",";
+        name += wxS( ',' );
         name += m_constituents[i]->m_Name;
     }
 

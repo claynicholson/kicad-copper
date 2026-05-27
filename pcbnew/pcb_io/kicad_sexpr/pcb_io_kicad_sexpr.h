@@ -199,7 +199,13 @@ class PCB_IO_KICAD_SEXPR;   // forward decl
 //#define SEXPR_BOARD_FILE_VERSION    20251028  // Stop writing netcodes; they're an internal implementation detail
 //#define SEXPR_BOARD_FILE_VERSION    20251101  // Backdrill and tertiary drill support
 //#define SEXPR_BOARD_FILE_VERSION    20260101  // PCB variants with per-footprint overrides
-#define SEXPR_BOARD_FILE_VERSION      20260206  // Fix barcode and variant attribute serialization 
+//#define SEXPR_BOARD_FILE_VERSION    20260206  // Fix barcode and variant attribute serialization
+//----------------- Start of 11.0 development -----------------
+//#define SEXPR_BOARD_FILE_VERSION      20260410  // Extruded 3D body
+//#define SEXPR_BOARD_FILE_VERSION      20260508  // Native ellipse primitive
+//#define SEXPR_BOARD_FILE_VERSION      20260511  // Dielectric frequency-dependent models in board stackup
+//#define SEXPR_BOARD_FILE_VERSION      20260512  // Net chains
+#define SEXPR_BOARD_FILE_VERSION        20260513  // Copper thieving zone fill mode
 
 #define BOARD_FILE_HOST_VERSION       20200825  ///< Earlier files than this include the host tag
 #define LEGACY_ARC_FORMATTING         20210925  ///< These were the last to use old arc formatting

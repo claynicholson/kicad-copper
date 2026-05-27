@@ -51,7 +51,7 @@
 #include <geometry/shape.h>
 #include <geometry/shape_line_chain.h>
 #include <geometry/shape_poly_set.h>
-#include <geometry/rtree.h>
+#include <geometry/rtree/dynamic_rtree.h>
 #include <math/box2.h>                       // for BOX2I
 #include <math/util.h>                       // for KiROUND, rescale
 #include <math/vector2d.h>                   // for VECTOR2I, VECTOR2D, VECTOR2
@@ -128,6 +128,9 @@ SHAPE_POLY_SET::SHAPE_POLY_SET( const SHAPE_POLY_SET& aOther ) :
         m_hashValid = false;
         m_triangulationValid = false;
     }
+
+    m_failedHash = aOther.m_failedHash;
+    m_failedHashValid.store( aOther.m_failedHashValid.load() );
 }
 
 
@@ -1894,13 +1897,9 @@ bool SHAPE_POLY_SET::isExteriorWaist( const SEG& aSegA, const SEG& aSegB ) const
     {
         VECTOR2I perp = segDir.Perpendicular().Resize( 10 );
 
-        // Test points on both sides of the overlapping segment
-        bool side1 = PointInside( midpoint + perp );
-        bool side2 = PointInside( midpoint - perp );
-
-        // Only return true if both sides are outside the polygon
-        // This is the case for non-fractured segments
-        if( !side1 && !side2 )
+        // Both sides must be outside for this to be an exterior waist. Short-circuit if
+        // either side is inside the polygon to avoid the second O(N) point-in-polygon test.
+        if( !PointInside( midpoint + perp ) && !PointInside( midpoint - perp ) )
         {
             wxLogTrace( wxT( "collinear" ), wxT( "Found exterior waist between (%d,%d)-(%d,%d) and (%d,%d)-(%d,%d)" ),
                         aSegA.A.x, aSegA.A.y, aSegA.B.x, aSegA.B.y,
@@ -1926,7 +1925,7 @@ void SHAPE_POLY_SET::splitCollinearOutlines()
             SHAPE_LINE_CHAIN& outline = m_polys[polyIdx][0];
             intptr_t count = outline.PointCount();
 
-            RTree<intptr_t, intptr_t, 2, intptr_t> rtree;
+            KIRTREE::DYNAMIC_RTREE<intptr_t, intptr_t, 2> rtree;
 
             for( intptr_t i = 0; i < count; ++i )
             {
@@ -1950,7 +1949,7 @@ void SHAPE_POLY_SET::splitCollinearOutlines()
                 intptr_t max[2] = { std::max( a.x, b.x ), std::max( a.y, b.y ) };
 
                 auto visitor =
-                        [&]( const int& j ) -> bool
+                        [&]( const intptr_t& j ) -> bool
                         {
                             if( j == i || j == ( ( i + 1 ) % count ) || j == ( ( i + count - 1 ) % count ) )
                                 return true;
@@ -2078,7 +2077,7 @@ void SHAPE_POLY_SET::splitSelfTouchingOutlines()
             }
             else
             {
-                RTree<intptr_t, int, 2, double> rtree;
+                KIRTREE::DYNAMIC_RTREE<intptr_t, int, 2> rtree;
 
                 for( int i = 0; i < count; ++i )
                 {
@@ -2096,28 +2095,30 @@ void SHAPE_POLY_SET::splitSelfTouchingOutlines()
                     int bmin[2] = { pt.x, pt.y };
                     int bmax[2] = { pt.x, pt.y };
 
-                    rtree.Search( bmin, bmax,
-                        [&]( const intptr_t& segIdx ) -> bool
-                        {
-                            if( segIdx == prevSeg || segIdx == vertIdx )
-                                return true;
-
-                            const VECTOR2I& a = outline.CPoint( segIdx );
-                            const VECTOR2I& b = outline.CPoint( ( segIdx + 1 ) % count );
-
-                            // SquaredDistance returns 0 only when pt lies exactly on the
-                            // segment.  Clipper2 rounds corridor-cut vertices to integer
-                            // coordinates; they can land within 1nm of an endpoint but
-                            // are not true pinch points.
-                            if( pt != a && pt != b && SEG( a, b ).SquaredDistance( pt ) == 0 )
+                    auto pinchVisitor =
+                            [&]( const intptr_t& segIdx ) -> bool
                             {
-                                insertSegIdx = segIdx;
-                                insertVertIdx = vertIdx;
-                                return false;
-                            }
+                                if( segIdx == prevSeg || segIdx == vertIdx )
+                                    return true;
 
-                            return true;
-                        } );
+                                const VECTOR2I& a = outline.CPoint( segIdx );
+                                const VECTOR2I& b = outline.CPoint( ( segIdx + 1 ) % count );
+
+                                // SquaredDistance returns 0 only when pt lies exactly on the
+                                // segment.  Clipper2 rounds corridor-cut vertices to integer
+                                // coordinates; they can land within 1nm of an endpoint but
+                                // are not true pinch points.
+                                if( pt != a && pt != b && SEG( a, b ).SquaredDistance( pt ) == 0 )
+                                {
+                                    insertSegIdx = segIdx;
+                                    insertVertIdx = vertIdx;
+                                    return false;
+                                }
+
+                                return true;
+                            };
+
+                    rtree.Search( bmin, bmax, pinchVisitor );
                 }
             }
 
@@ -3066,6 +3067,9 @@ SHAPE_POLY_SET &SHAPE_POLY_SET::operator=( const SHAPE_POLY_SET& aOther )
         m_triangulationValid = false;
     }
 
+    m_failedHash = aOther.m_failedHash;
+    m_failedHashValid.store( aOther.m_failedHashValid.load() );
+
     return *this;
 }
 
@@ -3097,17 +3101,22 @@ void SHAPE_POLY_SET::cacheTriangulation( bool aSimplify,
                                          std::vector<std::unique_ptr<TRIANGULATED_POLYGON>>* aHintData,
                                          const TASK_SUBMITTER& aSubmitter )
 {
+    // if( m_triangulationValid && m_hashValid && m_hash == checksum() )
+    //     return;
+    // if( m_failedHashValid && m_failedHash == checksum() )
+    //     return;
+
     std::unique_lock<std::mutex> lock( m_triangulationMutex );
 
-    if( m_triangulationValid && m_hashValid )
-    {
-        if( m_hash == checksum() )
-            return;
-    }
+    if( m_triangulationValid && m_hashValid && m_hash == checksum() )
+        return;
+    if( m_failedHashValid && m_failedHash == checksum() )
+        return;
 
     // Invalidate, in case anything goes wrong below
     m_triangulationValid = false;
     m_hashValid = false;
+    m_failedHashValid = false;
 
     auto triangulate =
             []( SHAPE_POLY_SET& polySet, int forOutline,
@@ -3432,16 +3441,23 @@ void SHAPE_POLY_SET::cacheTriangulation( bool aSimplify,
             }
             else
             {
-                m_hash = checksum();
-                m_hashValid = true;
                 m_triangulationValid = true;
             }
         }
         else
         {
+            m_triangulationValid = true;
+        }
+
+        if( m_triangulationValid )
+        {
             m_hash = checksum();
             m_hashValid = true;
-            m_triangulationValid = true;
+        }
+        else
+        {
+            m_failedHash = checksum();
+            m_failedHashValid = true;
         }
     }
 }
@@ -3664,6 +3680,9 @@ const std::vector<SEG> SHAPE_POLY_SET::GenerateHatchLines( const std::vector<dou
 {
     std::vector<SEG> hatchLines;
 
+    if( OutlineCount() == 0 || TotalVertices() == 0 )
+        return hatchLines;
+
     // define range for hatch lines
     int min_x = CVertex( 0 ).x;
     int max_x = CVertex( 0 ).x;
@@ -3754,7 +3773,7 @@ const std::vector<SEG> SHAPE_POLY_SET::GenerateHatchLines( const std::vector<dou
                 VECTOR2I mid( ( candidate.A.x + candidate.B.x ) / 2, ( candidate.A.y + candidate.B.y ) / 2 );
 
                 // Check if segment is inside the polygon by checking its middle point
-                if( containsSingle( mid, 0, 1, true ) )
+                if( Contains( mid, -1, 1, true ) )
                 {
                     int dx = p2.x - p1.x;
 

@@ -31,6 +31,8 @@
 #include <sch_collectors.h>
 #include <sch_selection_tool.h>
 #include <sch_base_frame.h>
+#include <connection_graph.h>
+#include <sch_netchain.h>
 #include <eeschema_id.h>
 #include <symbol_edit_frame.h>
 #include <symbol_viewer_frame.h>
@@ -155,6 +157,315 @@ SELECTION_CONDITION SCH_CONDITIONS::AllPins = []( const SELECTION& aSel )
 SELECTION_CONDITION SCH_CONDITIONS::AllPinsOrSheetPins = []( const SELECTION& aSel )
 {
     return aSel.GetSize() >= 1 && aSel.OnlyContains( { SCH_PIN_T, SCH_SHEET_PIN_T } );
+};
+
+enum
+{
+    ID_REPLACE_TERMINAL_PIN_A = wxID_HIGHEST + 2000,
+    ID_REPLACE_TERMINAL_PIN_B
+};
+
+class REPLACE_TERMINAL_PIN_MENU : public ACTION_MENU
+{
+public:
+    REPLACE_TERMINAL_PIN_MENU() : ACTION_MENU( true )
+    {
+        SetTitle( _( "Replace terminal pin" ) );
+    }
+
+protected:
+    ACTION_MENU* create() const override { return new REPLACE_TERMINAL_PIN_MENU(); }
+
+    void update() override
+    {
+        Clear();
+
+        TOOL_MANAGER* toolMgr = getToolManager();
+        if( !toolMgr )
+            return;
+
+        SCH_SELECTION_TOOL* selTool = toolMgr->GetTool<SCH_SELECTION_TOOL>();
+        if( !selTool )
+            return;
+
+        const SELECTION& sel = selTool->GetSelection();
+        if( sel.Empty() )
+            return;
+
+        SCH_PIN* pin = dynamic_cast<SCH_PIN*>( sel.Front() );
+        SCH_EDIT_FRAME* frame = static_cast<SCH_EDIT_FRAME*>( toolMgr->GetToolHolder() );
+
+        if( !pin || !frame || !pin->Connection() )
+            return;
+
+        CONNECTION_GRAPH* graph = frame->Schematic().ConnectionGraph();
+        if( !graph )
+            return;
+
+        if( SCH_NETCHAIN* sig = graph->GetNetChainForNet( pin->Connection()->Name() ) )
+        {
+            m_oldA = sig->GetTerminalPinA();
+            m_oldB = sig->GetTerminalPinB();
+            m_new = pin->m_Uuid;
+
+            wxMenuItem* itemA = Append( ID_REPLACE_TERMINAL_PIN_A, _( "Terminal A" ) );
+            wxMenuItem* itemB = Append( ID_REPLACE_TERMINAL_PIN_B, _( "Terminal B" ) );
+
+            if( m_oldA == m_new )
+                itemA->Enable( false );
+
+            if( m_oldB == m_new )
+                itemB->Enable( false );
+        }
+    }
+
+    OPT_TOOL_EVENT eventHandler( const wxMenuEvent& aEvent ) override
+    {
+        if( aEvent.GetId() == ID_REPLACE_TERMINAL_PIN_A )
+        {
+            TOOL_EVENT te = SCH_ACTIONS::replaceTerminalPin.MakeEvent();
+            te.SetParameter( std::make_pair( m_oldA.AsString(), m_new.AsString() ) );
+            return te;
+        }
+        else if( aEvent.GetId() == ID_REPLACE_TERMINAL_PIN_B )
+        {
+            TOOL_EVENT te = SCH_ACTIONS::replaceTerminalPin.MakeEvent();
+            te.SetParameter( std::make_pair( m_oldB.AsString(), m_new.AsString() ) );
+            return te;
+        }
+
+        return OPT_TOOL_EVENT();
+    }
+
+private:
+    KIID m_oldA;
+    KIID m_oldB;
+    KIID m_new;
+};
+
+// Forward declaration of helper used inside NET_CHAIN_MENU::update
+class NET_CHAIN_MENU;
+static bool addCreateNetChainBetweenPinsIfApplicable( NET_CHAIN_MENU* aMenu, SCH_EDIT_FRAME* aFrame, const SCH_SELECTION& aSel );
+
+class NET_CHAIN_MENU : public ACTION_MENU
+{
+public:
+    NET_CHAIN_MENU() : ACTION_MENU( true )
+    {
+        SetTitle( _( "Net Chain..." ) );
+        m_replaceMenu = new REPLACE_TERMINAL_PIN_MENU();
+    }
+
+protected:
+    ACTION_MENU* create() const override { return new NET_CHAIN_MENU(); }
+
+    void update() override
+    {
+        Clear();
+
+        wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] update() invoked" );
+
+        TOOL_MANAGER* toolMgr = getToolManager();
+        if( !toolMgr )
+        {
+            // Defer population; parent UpdateAll() will re-run us after SetTool().
+            SetDirty();
+            wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] defer: toolMgr not yet available" );
+            return;
+        }
+
+        SCH_SELECTION_TOOL* selTool = static_cast<SCH_SELECTION_TOOL*>( m_tool );
+        EDA_BASE_FRAME*     baseFrame = static_cast<EDA_BASE_FRAME*>( toolMgr->GetToolHolder() );
+
+        if( !selTool || !baseFrame || !baseFrame->IsType( FRAME_SCH ) )
+        {
+            wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] abort: selTool=%p baseFrame=%p", (void*) selTool,
+                        (void*) baseFrame );
+            return;
+        }
+
+        SCH_EDIT_FRAME* frame = static_cast<SCH_EDIT_FRAME*>( baseFrame );
+
+        const SCH_SELECTION& sel = selTool->GetSelection();
+        if( sel.Empty() )
+        {
+            wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] abort: empty selection" );
+            return; // nothing to show
+        }
+
+        wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] selection size=%u", sel.GetSize() );
+
+        CONNECTION_GRAPH* graph = frame->Schematic().ConnectionGraph();
+        if( !graph )
+        {
+            wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] abort: no connection graph" );
+            return;
+        }
+
+        if( sel.OnlyContains( { SCH_SYMBOL_T } ) )
+        {
+            Add( SCH_ACTIONS::createNetChain );
+            wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] added createNetChain" );
+            return;
+        }
+
+        auto pinFrom = [&]( int idx ) -> SCH_PIN*
+        {
+            if( idx >= (int) sel.GetSize() )
+                return nullptr;
+            return dynamic_cast<SCH_PIN*>( static_cast<SCH_ITEM*>( sel[idx] ) );
+        };
+
+        // Determine context flags
+        bool singlePin = sel.GetSize() == 1 && pinFrom( 0 ) && pinFrom( 0 )->Connection();
+        bool inSignal  = false; // at least one selected item participates in a committed chain
+        bool canName   = false; // we can rename a chain (single pin with committed chain)
+        bool canRemove = false; // we can remove an item from its chain
+
+        // Evaluate selection items
+        for( size_t i = 0; i < sel.GetSize(); ++i )
+        {
+            SCH_PIN* p = dynamic_cast<SCH_PIN*>( static_cast<SCH_ITEM*>( sel[i] ) );
+            if( !p || !p->Connection() )
+            {
+                wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] sel[%zu]: not a pin or no connection", i );
+                continue;
+            }
+
+            wxString netName = p->Connection()->Name();
+            bool hasSignal = graph->GetNetChainForNet( netName );
+            wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] sel[%zu]: pin uuid=%s net=%s committedSignal=%d", i,
+                        p->m_Uuid.AsString(), netName, hasSignal );
+            if( graph->GetNetChainForNet( p->Connection()->Name() ) )
+            {
+                inSignal = true;
+                canRemove = true; // current remove handler works on a pin in a chain
+                if( sel.GetSize() == 1 )
+                    canName = true; // nameNetChain expects single pin selected
+            }
+        }
+
+        wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] flags: singlePin=%d inSignal=%d canName=%d canRemove=%d", singlePin, inSignal, canName, canRemove );
+
+        // highlightNetChain action: only if we have a committed chain context
+        if( inSignal )
+        {
+            Add( SCH_ACTIONS::highlightNetChain );
+            wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] added highlightNetChain" );
+        }
+
+        // removeFromNetChain action
+        if( canRemove )
+        {
+            Add( SCH_ACTIONS::removeFromNetChain );
+            wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] added removeFromNetChain" );
+        }
+
+        // Replace terminal pin submenu only when a single pin belonging to a chain is selected
+        if( singlePin && inSignal )
+        {
+            Add( m_replaceMenu );
+            wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] added replaceTerminalPin submenu" );
+        }
+
+        // nameNetChain action
+        if( canName )
+        {
+            Add( SCH_ACTIONS::nameNetChain );
+            wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] added nameNetChain" );
+        }
+
+        // createNetChainBetweenPins: two pins selected, share potential (uncommitted) chain
+        if( sel.GetSize() == 2 )
+        {
+            bool added = addCreateNetChainBetweenPinsIfApplicable( this, frame, sel );
+            wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] createNetChainBetweenPins attempted added=%d", added );
+        }
+
+        // Allow opening the Create Net Chain dialog (with the dialog filtered by selection)
+        // for any single connected pin or wire/bus.  The dialog itself surfaces the empty-state
+        // case if the net is already on a committed chain.
+        if( sel.GetSize() == 1 )
+        {
+            SCH_ITEM* item = static_cast<SCH_ITEM*>( sel.Front() );
+            bool isConnectedPin = dynamic_cast<SCH_PIN*>( item ) && item->Connection();
+            bool isConnectedWireOrBus = item && item->Type() == SCH_LINE_T
+                                        && item->IsType( { SCH_ITEM_LOCATE_WIRE_T, SCH_ITEM_LOCATE_BUS_T } )
+                                        && item->Connection();
+
+            if( isConnectedPin || isConnectedWireOrBus )
+            {
+                Add( SCH_ACTIONS::createNetChain );
+                wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] added createNetChain for single connected item" );
+            }
+        }
+
+        // If nothing ended up enabled, leave a placeholder disabled item to make it
+        // obvious to the user that the submenu exists but just has no applicable
+        // actions for the current selection.
+        if( !HasEnabledItems() )
+        {
+            wxMenuItem* placeholder = Append( wxID_ANY, _( "(No net chain actions)" ) );
+            placeholder->Enable( false );
+        }
+    }
+
+private:
+    REPLACE_TERMINAL_PIN_MENU* m_replaceMenu;
+};
+
+// Extend net-chains menu dynamically with createNetChainBetweenPins when two pins are selected
+static bool addCreateNetChainBetweenPinsIfApplicable( NET_CHAIN_MENU* aMenu, SCH_EDIT_FRAME* aFrame, const SCH_SELECTION& aSel )
+{
+    if( aSel.GetSize() != 2 )
+        return false;
+
+    SCH_PIN* pa = dynamic_cast<SCH_PIN*>( static_cast<SCH_ITEM*>( aSel[0] ) );
+    SCH_PIN* pb = dynamic_cast<SCH_PIN*>( static_cast<SCH_ITEM*>( aSel[1] ) );
+    if( !pa || !pb )
+        return false;
+
+    CONNECTION_GRAPH* graph = aFrame->Schematic().ConnectionGraph();
+
+    if( graph->FindPotentialNetChainBetweenPins( pa, pb ) )
+    {
+        wxString label = wxString::Format( _( "Create Net Chain between %s:%s and %s:%s" ),
+                                           pa->GetParentSymbol()->GetRef( &aFrame->GetCurrentSheet() ), pa->GetNumber(),
+                                           pb->GetParentSymbol()->GetRef( &aFrame->GetCurrentSheet() ), pb->GetNumber() );
+        aMenu->Add( SCH_ACTIONS::createNetChainBetweenPins )->SetItemLabel( label );
+        return true;
+    }
+    return false;
+}
+
+
+SELECTION_CONDITION SCH_CONDITIONS::HasLockedItems = []( const SELECTION& aSel )
+{
+    for( EDA_ITEM* item : aSel.Items() )
+    {
+        if( SCH_ITEM* schItem = dynamic_cast<SCH_ITEM*>( item ) )
+        {
+            if( schItem->IsLocked() )
+                return true;
+        }
+    }
+
+    return false;
+};
+
+
+SELECTION_CONDITION SCH_CONDITIONS::HasUnlockedItems = []( const SELECTION& aSel )
+{
+    for( EDA_ITEM* item : aSel.Items() )
+    {
+        if( SCH_ITEM* schItem = dynamic_cast<SCH_ITEM*>( item ) )
+        {
+            if( !schItem->IsLocked() )
+                return true;
+        }
+    }
+
+    return false;
 };
 
 
@@ -345,6 +656,46 @@ bool SCH_SELECTION_TOOL::Init()
 
     auto& menu = m_menu->GetMenu();
 
+    // Allow the Net Chain submenu for any selection consisting solely of pins (one or more).
+    // Restricting to exactly one pin would prevent showing the menu (and thus the
+    // "Create Net Chain between ..." action) when exactly two pins were selected.
+    SELECTION_CONDITION pinSelection = []( const SELECTION& aSel )
+    {
+        return aSel.GetSize() >= 1 && aSel.OnlyContains( { SCH_PIN_T } );
+    };
+
+    // Also expose the Net Chain menu when right-clicking a single wire or bus.  SCH_LINE_T
+    // covers both; IsType against the scan-aliases discriminates wire vs bus.
+    SELECTION_CONDITION wireOrBusInSignal = []( const SELECTION& aSel )
+    {
+        if( aSel.GetSize() != 1 )
+            return false;
+
+        EDA_ITEM* item = aSel.Front();
+
+        if( !item || item->Type() != SCH_LINE_T )
+            return false;
+
+        SCH_ITEM* schItem = static_cast<SCH_ITEM*>( item );
+
+        if( !schItem->IsType( { SCH_ITEM_LOCATE_WIRE_T, SCH_ITEM_LOCATE_BUS_T } ) )
+            return false;
+
+        if( !schItem->Connection() )
+            return false;
+
+        return true; // Allow menu; handlers will rebuild/validate as needed
+    };
+
+    SELECTION_CONDITION symbolSelection = []( const SELECTION& aSel )
+    {
+        return aSel.GetSize() >= 1 && aSel.OnlyContains( { SCH_SYMBOL_T } );
+    };
+
+    std::shared_ptr<NET_CHAIN_MENU> netChainMenu = std::make_shared<NET_CHAIN_MENU>();
+    netChainMenu->SetTool( this );
+    m_menu->RegisterSubMenu( netChainMenu );
+
     // clang-format off
     menu.AddItem( ACTIONS::groupEnter,                groupEnterCondition, 1 );
     menu.AddItem( ACTIONS::groupLeave,                inGroupCondition,    1 );
@@ -390,6 +741,7 @@ bool SCH_SELECTION_TOOL::Init()
     menu.AddSeparator( 400 );
     menu.AddItem( SCH_ACTIONS::symbolProperties,      haveSymbol && SCH_CONDITIONS::Empty, 400 );
     menu.AddItem( SCH_ACTIONS::pinTable,              haveSymbol && SCH_CONDITIONS::Empty, 400 );
+    menu.AddMenu( netChainMenu.get(),                 ( pinSelection || wireOrBusInSignal || symbolSelection ) && SCH_CONDITIONS::Idle, 400 );
 
     menu.AddSeparator( 1000 );
     m_frame->AddStandardSubMenus( *m_menu.get() );
@@ -1642,6 +1994,12 @@ bool SCH_SELECTION_TOOL::SelectPoint( const VECTOR2I& aWhere,
         if( SCH_BASE_FRAME* frame = dynamic_cast<SCH_BASE_FRAME*>( m_frame ) )
             frame->HighlightSelectionFilter( rejected );
 
+        if( !aAdd && !aSubtract && !aExclusiveOr && m_selection.GetSize() > 0 )
+        {
+            ClearSelection( true /*quiet mode*/ );
+            m_toolMgr->ProcessEvent( EVENTS::UnselectedEvent );
+        }
+
         return false;
     }
 
@@ -2057,14 +2415,16 @@ bool SCH_SELECTION_TOOL::itemPassesFilter( EDA_ITEM* aItem, SCH_SELECTION_FILTER
     if( !aItem )
         return false;
 
-    // Locking is not yet exposed uniformly in the schematic
-#if 0
     if( SCH_ITEM* schItem = dynamic_cast<SCH_ITEM*>( aItem ) )
     {
         if( schItem->IsLocked() && !m_filter.lockedItems )
+        {
+            if( aRejected )
+                aRejected->lockedItems = true;
+
             return false;
+        }
     }
-#endif
 
     switch( aItem->Type() )
     {
@@ -2740,6 +3100,37 @@ void SCH_SELECTION_TOOL::filterCollectorForHierarchy( SCH_COLLECTOR& aCollector,
 }
 
 
+void SCH_SELECTION_TOOL::FilterSelectionForLockedItems()
+{
+    if( m_frame && m_frame->GetOverrideLocks() )
+        return;
+
+    std::vector<EDA_ITEM*> toRemove;
+
+    for( EDA_ITEM* item : m_selection )
+    {
+        if( SCH_ITEM* schItem = dynamic_cast<SCH_ITEM*>( item ) )
+        {
+            bool lockedDescendant = false;
+
+            schItem->RunOnChildren(
+                    [&]( SCH_ITEM* child )
+                    {
+                        if( child->IsLocked() )
+                            lockedDescendant = true;
+                    },
+                    RECURSE_MODE::RECURSE );
+
+            if( schItem->IsLocked() || lockedDescendant )
+                toRemove.push_back( item );
+        }
+    }
+
+    for( EDA_ITEM* item : toRemove )
+        RemoveItemFromSel( item, true /* quiet mode */ );
+}
+
+
 int SCH_SELECTION_TOOL::updateSelection( const TOOL_EVENT& aEvent )
 {
     getView()->Update( &m_selection );
@@ -2891,7 +3282,9 @@ int SCH_SELECTION_TOOL::SelectNode( const TOOL_EVENT& aEvent )
 }
 
 
-std::set<SCH_ITEM*> SCH_SELECTION_TOOL::expandConnectionWithGraph( const SCH_SELECTION& aItems )
+std::set<SCH_ITEM*>
+SCH_SELECTION_TOOL::expandConnectionWithGraph( const SCH_SELECTION& aItems,
+                                               STOP_CONDITION aStopCondition )
 {
     SCH_EDIT_FRAME* editFrame = dynamic_cast<SCH_EDIT_FRAME*>( m_frame );
 
@@ -2903,11 +3296,11 @@ std::set<SCH_ITEM*> SCH_SELECTION_TOOL::expandConnectionWithGraph( const SCH_SEL
     if( !graph )
         return {};
 
+    SCH_SCREEN*            screen = m_frame->GetScreen();
     SCH_SHEET_PATH&        currentSheet = editFrame->GetCurrentSheet();
     std::vector<SCH_ITEM*> startItems;
     std::set<SCH_ITEM*>    added;
 
-    // Build the list of starting items for the connection graph traversal
     for( auto item : aItems )
     {
         if( !item->IsSCH_ITEM() )
@@ -2915,7 +3308,6 @@ std::set<SCH_ITEM*> SCH_SELECTION_TOOL::expandConnectionWithGraph( const SCH_SEL
 
         SCH_ITEM* schItem = static_cast<SCH_ITEM*>( item );
 
-        // If we're a symbol, start from all its pins
         if( schItem->Type() == SCH_SYMBOL_T )
         {
             for( SCH_PIN* pin : static_cast<SCH_SYMBOL*>( schItem )->GetPins( &currentSheet ) )
@@ -2932,6 +3324,76 @@ std::set<SCH_ITEM*> SCH_SELECTION_TOOL::expandConnectionWithGraph( const SCH_SEL
 
     if( startItems.empty() )
         return {};
+
+    // Pre-compute which start items belong to symbols already in the original selection so that
+    // pin-stop traversal can step away from those symbols without immediately bouncing back.
+    std::unordered_set<SCH_SYMBOL*> startSymbols;
+
+    for( SCH_ITEM* item : startItems )
+    {
+        if( SCH_PIN* pin = dynamic_cast<SCH_PIN*>( item ) )
+        {
+            if( SCH_SYMBOL* parent = dynamic_cast<SCH_SYMBOL*>( pin->GetParent() ) )
+                startSymbols.insert( parent );
+        }
+    }
+
+    // Cache every pin position on the sheet so endpoint tests are O(log n) lookups instead of
+    // an R-tree query plus a full pin iteration per call.
+    std::set<VECTOR2I> pinPositions;
+
+    for( SCH_ITEM* it : screen->Items().OfType( SCH_SYMBOL_T ) )
+    {
+        for( SCH_PIN* pin : static_cast<SCH_SYMBOL*>( it )->GetPins( &currentSheet ) )
+        {
+            if( pin )
+                pinPositions.insert( pin->GetPosition() );
+        }
+    }
+
+    auto isStopPoint = [&]( const VECTOR2I& aPoint ) -> bool
+    {
+        if( aStopCondition == STOP_CONDITION::STOP_NEVER )
+            return false;
+
+        if( pinPositions.count( aPoint ) )
+            return true;
+
+        if( aStopCondition == STOP_CONDITION::STOP_AT_PIN )
+            return false;
+
+        if( screen->IsJunction( aPoint ) || screen->IsExplicitJunction( aPoint ) )
+            return true;
+
+        for( SCH_ITEM* it : screen->Items().Overlapping( aPoint ) )
+        {
+            switch( it->Type() )
+            {
+            case SCH_LABEL_T:
+            case SCH_GLOBAL_LABEL_T:
+            case SCH_HIER_LABEL_T:
+            case SCH_DIRECTIVE_LABEL_T:
+            case SCH_SHEET_PIN_T:
+            case SCH_NO_CONNECT_T:
+                if( it->IsConnected( aPoint ) )
+                    return true;
+
+                break;
+
+            default:
+                break;
+            }
+        }
+
+        return false;
+    };
+
+    // STOP_AT_JUNCTION refuses to pull a symbol into the selection unless the user already had
+    // a symbol selected; later passes accept every reachable symbol.
+    auto shouldPullInSymbol = [&]()
+    {
+        return aStopCondition != STOP_CONDITION::STOP_AT_JUNCTION || !startSymbols.empty();
+    };
 
     std::deque<SCH_ITEM*>         queue;
     std::unordered_set<SCH_ITEM*> visited;
@@ -2957,13 +3419,26 @@ std::set<SCH_ITEM*> SCH_SELECTION_TOOL::expandConnectionWithGraph( const SCH_SEL
         {
             SCH_SYMBOL* symbol = dynamic_cast<SCH_SYMBOL*>( pin->GetParent() );
 
-            if( symbol && Selectable( symbol ) && itemPassesFilter( symbol, nullptr ) && !symbol->IsSelected() )
+            if( shouldPullInSymbol() && symbol && Selectable( symbol )
+                && itemPassesFilter( symbol, nullptr ) && !symbol->IsSelected() )
+            {
                 added.insert( symbol );
+            }
         }
 
-        const SCH_ITEM_VEC& neighbors = item->ConnectedItems( currentSheet );
+        SCH_LINE*             line = dynamic_cast<SCH_LINE*>( item );
+        std::vector<VECTOR2I> openPoints;
 
-        for( SCH_ITEM* neighbor : neighbors )
+        if( line && aStopCondition != STOP_CONDITION::STOP_NEVER )
+        {
+            for( const VECTOR2I& pt : { line->GetStartPoint(), line->GetEndPoint() } )
+            {
+                if( !isStopPoint( pt ) )
+                    openPoints.push_back( pt );
+            }
+        }
+
+        for( SCH_ITEM* neighbor : item->ConnectedItems( currentSheet ) )
         {
             if( !neighbor )
                 continue;
@@ -2972,10 +3447,31 @@ std::set<SCH_ITEM*> SCH_SELECTION_TOOL::expandConnectionWithGraph( const SCH_SEL
             {
                 SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( neighbor );
 
-                if( Selectable( symbol ) && itemPassesFilter( symbol, nullptr ) && !symbol->IsSelected() )
+                if( shouldPullInSymbol() && Selectable( symbol ) && itemPassesFilter( symbol, nullptr )
+                    && !symbol->IsSelected() )
+                {
                     added.insert( symbol );
+                }
 
                 continue;
+            }
+
+            // Wires gate traversal on open endpoints; items without distinct endpoints always flow.
+            if( line && aStopCondition != STOP_CONDITION::STOP_NEVER )
+            {
+                bool sharesOpenPoint = false;
+
+                for( const VECTOR2I& pt : openPoints )
+                {
+                    if( neighbor->IsConnected( pt ) )
+                    {
+                        sharesOpenPoint = true;
+                        break;
+                    }
+                }
+
+                if( !sharesOpenPoint )
+                    continue;
             }
 
             enqueue( neighbor );
@@ -3046,13 +3542,36 @@ int SCH_SELECTION_TOOL::SelectConnection( const TOOL_EVENT& aEvent )
             connectableSelection.Add( item );
     }
 
+    // Repeated Ctrl+4 must advance to the next stop condition if the current stage did not pull
+    // in any items beyond what was already selected, matching PCBNew's "Select/Expand Connection".
+    std::unordered_set<const SCH_ITEM*> originalConnectableSet;
+
+    for( EDA_ITEM* selItem : connectableSelection.GetItems() )
+        originalConnectableSet.insert( static_cast<const SCH_ITEM*>( selItem ) );
+
     ClearSelection( true );
 
     std::set<SCH_ITEM*> graphAdded;
     std::set<SCH_ITEM*> graphicalAdded;
 
     if( !connectableSelection.Empty() )
-        graphAdded = expandConnectionWithGraph( connectableSelection );
+    {
+        for( STOP_CONDITION stop : { STOP_CONDITION::STOP_AT_JUNCTION,
+                                     STOP_CONDITION::STOP_AT_PIN,
+                                     STOP_CONDITION::STOP_NEVER } )
+        {
+            graphAdded = expandConnectionWithGraph( connectableSelection, stop );
+
+            bool grew = std::any_of( graphAdded.begin(), graphAdded.end(),
+                                     [&]( const SCH_ITEM* c )
+                                     {
+                                         return !originalConnectableSet.count( c );
+                                     } );
+
+            if( grew )
+                break;
+        }
+    }
 
     if( !graphicalSelection.Empty() )
         graphicalAdded = expandConnectionGraphically( graphicalSelection );

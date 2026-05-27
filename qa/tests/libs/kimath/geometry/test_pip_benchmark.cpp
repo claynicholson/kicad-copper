@@ -709,7 +709,7 @@ BOOST_AUTO_TEST_CASE( BenchmarkSyntheticPolygons )
 }
 
 
-BOOST_AUTO_TEST_CASE( BenchmarkRealWorldPolygons )
+BOOST_AUTO_TEST_CASE( BenchmarkRealWorldPolygons, * boost::unit_test::disabled() )
 {
     std::string dataDir = KI_TEST::GetTestDataRootDir() + "triangulation/";
 
@@ -850,7 +850,7 @@ BOOST_AUTO_TEST_CASE( BenchmarkRealWorldPolygons )
 }
 
 
-BOOST_AUTO_TEST_CASE( ScalingAnalysis )
+BOOST_AUTO_TEST_CASE( ScalingAnalysis, * boost::unit_test::disabled() )
 {
     std::vector<int> vertexCounts = { 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
                                       16384, 32768, 65536 };

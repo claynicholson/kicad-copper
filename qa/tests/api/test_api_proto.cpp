@@ -20,16 +20,18 @@
 
 #include <boost/test/unit_test.hpp>
 #include <import_export.h>
+#include <qa_utils/api_test_utils.h>
 #include <qa_utils/wx_utils/wx_assert.h>
 #include <pcbnew_utils/board_test_utils.h>
 #include <settings/settings_manager.h>
-#include <google/protobuf/any.pb.h>
 
 #include <api/board/board_types.pb.h>
 
 #include <board.h>
 #include <footprint.h>
+#include <pcb_barcode.h>
 #include <pcb_dimension.h>
+#include <pcb_reference_image.h>
 #include <pcb_track.h>
 #include <zone.h>
 
@@ -46,58 +48,12 @@ struct PROTO_TEST_FIXTURE
 };
 
 
-template<typename ProtoClass, typename KiCadClass, typename ParentClass>
-void testProtoFromKiCadObject( KiCadClass* aInput, ParentClass* aParent, bool aStrict = true )
-{
-    BOOST_TEST_CONTEXT( aInput->GetFriendlyName() << ": " << aInput->m_Uuid.AsStdString() )
-    {
-        google::protobuf::Any any;
-        BOOST_REQUIRE_NO_THROW( aInput->Serialize( any ) );
-
-        BOOST_TEST_MESSAGE( "Input: " << any.Utf8DebugString() );
-
-        ProtoClass proto;
-        BOOST_REQUIRE_MESSAGE( any.UnpackTo( &proto ),
-                               "Any message did not unpack into the requested type" );
-
-        std::unique_ptr<KiCadClass> output;
-
-        if( aStrict )
-        {
-            output = std::make_unique<KiCadClass>( aParent );
-        }
-        else
-        {
-            std::unique_ptr<KiCadClass> cloned( static_cast<KiCadClass*>( aInput->Clone() ) );
-            output = std::make_unique<KiCadClass>( *cloned );
-        }
-
-        bool deserializeResult = false;
-        BOOST_REQUIRE_NO_THROW( deserializeResult = output->Deserialize( any ) );
-        BOOST_REQUIRE_MESSAGE( deserializeResult, "Deserialize failed" );
-
-        // This round-trip checks that we can create an equivalent protobuf
-        google::protobuf::Any outputAny;
-        BOOST_REQUIRE_NO_THROW( output->Serialize( outputAny ) );
-        BOOST_TEST_MESSAGE( "Output: " << outputAny.Utf8DebugString() );
-
-        if( !( outputAny.SerializeAsString() == any.SerializeAsString() ) )
-        {
-            BOOST_TEST_FAIL( "Round-tripped protobuf does not match" );
-        }
-
-        // This round-trip checks that we can create an equivalent KiCad object
-        if( !( *output == *aInput ) )
-        {
-            BOOST_TEST_FAIL( "Round-tripped object does not match" );
-        }
-    }
-}
-
-
 BOOST_FIXTURE_TEST_CASE( BoardTypes, PROTO_TEST_FIXTURE )
 {
     KI_TEST::LoadBoard( m_settingsManager, "api_kitchen_sink", m_board );
+
+    int barcodeCount = 0;
+    int referenceImageCount = 0;
 
     for( PCB_TRACK* track : m_board->Tracks() )
     {
@@ -160,14 +116,27 @@ BOOST_FIXTURE_TEST_CASE( BoardTypes, PROTO_TEST_FIXTURE )
                     static_cast<PCB_DIM_RADIAL*>( item ), m_board.get() );
             break;
 
+        case PCB_BARCODE_T:
+            testProtoFromKiCadObject<kiapi::board::types::Barcode>(
+                    static_cast<PCB_BARCODE*>( item ), m_board.get() );
+            ++barcodeCount;
+            break;
+
+        case PCB_REFERENCE_IMAGE_T:
+            testProtoFromKiCadObject<kiapi::board::types::ReferenceImage>(
+                    static_cast<PCB_REFERENCE_IMAGE*>( item ), m_board.get() );
+            ++referenceImageCount;
+            break;
+
         default: break;
         }
         // TODO(JE) Shapes
 
         // TODO(JE) Text
-
-        // TODO Barcodes
     }
+
+    BOOST_CHECK_GT( barcodeCount, 0 );
+    BOOST_CHECK_GT( referenceImageCount, 0 );
 }
 
 
@@ -195,5 +164,60 @@ BOOST_FIXTURE_TEST_CASE( Padstacks, PROTO_TEST_FIXTURE )
     for( FOOTPRINT* footprint : m_board->Footprints() )
         testProtoFromKiCadObject<kiapi::board::types::FootprintInstance>( footprint, m_board.get() );
 }
+
+/**
+ * Round-trip a copper-thieving zone through the protobuf API.  The shared
+ * testProtoFromKiCadObject helper relies on ZONE::operator==, which by
+ * existing precedent does not compare fill-mode or hatch/thieving fields,
+ * so we hand-check every thieving field plus the netless invariant.
+ */
+BOOST_FIXTURE_TEST_CASE( CopperThievingZoneRoundTrip, PROTO_TEST_FIXTURE )
+{
+    m_board = std::make_unique<BOARD>();
+
+    ZONE* zone = new ZONE( m_board.get() );
+    zone->SetLayer( F_Cu );
+    zone->AppendCorner( VECTOR2I( 0, 0 ), -1 );
+    zone->AppendCorner( VECTOR2I( pcbIUScale.mmToIU( 5 ), 0 ), -1 );
+    zone->AppendCorner( VECTOR2I( pcbIUScale.mmToIU( 5 ), pcbIUScale.mmToIU( 5 ) ), -1 );
+    zone->AppendCorner( VECTOR2I( 0, pcbIUScale.mmToIU( 5 ) ), -1 );
+    zone->SetFillMode( ZONE_FILL_MODE::COPPER_THIEVING );
+
+    THIEVING_SETTINGS thieving;
+    thieving.pattern      = THIEVING_PATTERN::SQUARES;
+    thieving.element_size = pcbIUScale.mmToIU( 0.75 );
+    thieving.gap        = pcbIUScale.mmToIU( 2.0 );
+    thieving.line_width   = pcbIUScale.mmToIU( 0.4 );
+    thieving.stagger      = true;
+    thieving.orientation     = EDA_ANGLE( 15.0, DEGREES_T );
+    zone->SetThievingSettings( thieving );
+
+    m_board->Add( zone );
+
+    google::protobuf::Any any;
+    BOOST_REQUIRE_NO_THROW( zone->Serialize( any ) );
+
+    kiapi::board::types::Zone proto;
+    BOOST_REQUIRE( any.UnpackTo( &proto ) );
+    BOOST_REQUIRE( proto.has_copper_settings() );
+    BOOST_REQUIRE( proto.copper_settings().has_thieving_settings() );
+
+    std::unique_ptr<ZONE> roundTripped = std::make_unique<ZONE>( m_board.get() );
+    BOOST_REQUIRE( roundTripped->Deserialize( any ) );
+
+    BOOST_CHECK( roundTripped->GetFillMode() == ZONE_FILL_MODE::COPPER_THIEVING );
+    // A board with no netinfo list returns GetNetCode() == -1 for an unbound zone.
+    // The invariant we want is "no real net assigned"; netcode > 0 would mean a leak.
+    BOOST_CHECK_LE( roundTripped->GetNetCode(), 0 );
+
+    const THIEVING_SETTINGS& loaded = roundTripped->GetThievingSettings();
+    BOOST_CHECK( loaded.pattern == THIEVING_PATTERN::SQUARES );
+    BOOST_CHECK_EQUAL( loaded.element_size, thieving.element_size );
+    BOOST_CHECK_EQUAL( loaded.gap, thieving.gap );
+    BOOST_CHECK_EQUAL( loaded.line_width, thieving.line_width );
+    BOOST_CHECK_EQUAL( loaded.stagger, true );
+    BOOST_CHECK( loaded.orientation == EDA_ANGLE( 15.0, DEGREES_T ) );
+}
+
 
 BOOST_AUTO_TEST_SUITE_END()

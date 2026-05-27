@@ -44,6 +44,7 @@ public:
 
     static TOOL_ACTION reloadBoard;
     static TOOL_ACTION toggleRaytacing;
+    static TOOL_ACTION toggleShowMissingModels;
 
     static TOOL_ACTION copyToClipboard;
     static TOOL_ACTION exportImage;

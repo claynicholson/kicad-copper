@@ -38,6 +38,8 @@
 #include <validators.h>
 #include <wildcards_and_files_ext.h>
 #include <eda_pattern_match.h>
+#include <map>
+#include <cmath>
 
 #include <wx/wupdlock.h>
 #include <wx/filedlg.h>
@@ -110,41 +112,45 @@ void PCB_NET_INSPECTOR_PANEL::buildColumns()
 
     // Set up the column display vector
     m_columns.emplace_back( 0u, UNDEFINED_LAYER, _( "Name" ), _( "Net Name" ), CSV_COLUMN_DESC::CSV_QUOTE, false );
-    m_columns.emplace_back( 1u, UNDEFINED_LAYER, _( "Netclass" ), _( "Netclass" ), CSV_COLUMN_DESC::CSV_QUOTE, false );
+    m_columns.emplace_back( 1u, UNDEFINED_LAYER, _( "Net Chain" ), _( "Net Chain" ), CSV_COLUMN_DESC::CSV_QUOTE, false );
+    m_columns.emplace_back( 2u, UNDEFINED_LAYER, _( "Netclass" ), _( "Netclass" ), CSV_COLUMN_DESC::CSV_QUOTE, false );
 
     if( m_showTimeDomainDetails )
     {
-        m_columns.emplace_back( 2u, UNDEFINED_LAYER, _( "Total Delay" ), _( "Net Delay" ), CSV_COLUMN_DESC::CSV_NONE,
+        m_columns.emplace_back( 3u, UNDEFINED_LAYER, _( "Total Delay" ), _( "Net Delay" ), CSV_COLUMN_DESC::CSV_NONE,
                                 true );
     }
     else
     {
-        m_columns.emplace_back( 2u, UNDEFINED_LAYER, _( "Total Length" ), _( "Net Length" ), CSV_COLUMN_DESC::CSV_NONE,
+        m_columns.emplace_back( 3u, UNDEFINED_LAYER, _( "Total Length" ), _( "Net Length" ), CSV_COLUMN_DESC::CSV_NONE,
                                 true );
     }
 
-    m_columns.emplace_back( 3u, UNDEFINED_LAYER, _( "Via Count" ), _( "Via Count" ), CSV_COLUMN_DESC::CSV_NONE, false );
+    m_columns.emplace_back( 4u, UNDEFINED_LAYER, _( "Net Chain Length" ), _( "Net Chain Length" ), CSV_COLUMN_DESC::CSV_NONE,
+                            true );
+
+    m_columns.emplace_back( 5u, UNDEFINED_LAYER, _( "Via Count" ), _( "Via Count" ), CSV_COLUMN_DESC::CSV_NONE, false );
 
     if( m_showTimeDomainDetails )
     {
-        m_columns.emplace_back( 4u, UNDEFINED_LAYER, _( "Via Delay" ), _( "Via Delay" ), CSV_COLUMN_DESC::CSV_NONE,
+        m_columns.emplace_back( 6u, UNDEFINED_LAYER, _( "Via Delay" ), _( "Via Delay" ), CSV_COLUMN_DESC::CSV_NONE,
                                 true );
-        m_columns.emplace_back( 5u, UNDEFINED_LAYER, _( "Track Delay" ), _( "Track Delay" ), CSV_COLUMN_DESC::CSV_NONE,
+        m_columns.emplace_back( 7u, UNDEFINED_LAYER, _( "Track Delay" ), _( "Track Delay" ), CSV_COLUMN_DESC::CSV_NONE,
                                 true );
-        m_columns.emplace_back( 6u, UNDEFINED_LAYER, _( "Die Delay" ), _( "Die Delay" ), CSV_COLUMN_DESC::CSV_NONE,
+        m_columns.emplace_back( 8u, UNDEFINED_LAYER, _( "Die Delay" ), _( "Die Delay" ), CSV_COLUMN_DESC::CSV_NONE,
                                 true );
     }
     else
     {
-        m_columns.emplace_back( 4u, UNDEFINED_LAYER, _( "Via Length" ), _( "Via Length" ), CSV_COLUMN_DESC::CSV_NONE,
+        m_columns.emplace_back( 6u, UNDEFINED_LAYER, _( "Via Length" ), _( "Via Length" ), CSV_COLUMN_DESC::CSV_NONE,
                                 true );
-        m_columns.emplace_back( 5u, UNDEFINED_LAYER, _( "Track Length" ), _( "Track Length" ),
+        m_columns.emplace_back( 7u, UNDEFINED_LAYER, _( "Track Length" ), _( "Track Length" ),
                                 CSV_COLUMN_DESC::CSV_NONE, true );
-        m_columns.emplace_back( 6u, UNDEFINED_LAYER, _( "Die Length" ), _( "Die Length" ), CSV_COLUMN_DESC::CSV_NONE,
+        m_columns.emplace_back( 8u, UNDEFINED_LAYER, _( "Die Length" ), _( "Die Length" ), CSV_COLUMN_DESC::CSV_NONE,
                                 true );
     }
 
-    m_columns.emplace_back( 7u, UNDEFINED_LAYER, _( "Pad Count" ), _( "Pad Count" ), CSV_COLUMN_DESC::CSV_NONE, false );
+    m_columns.emplace_back( 9u, UNDEFINED_LAYER, _( "Pad Count" ), _( "Pad Count" ), CSV_COLUMN_DESC::CSV_NONE, false );
 
     const std::vector<std::function<void( void )>> add_col{
         [&]()
@@ -152,6 +158,12 @@ void PCB_NET_INSPECTOR_PANEL::buildColumns()
             m_netsList->AppendTextColumn( m_columns[COLUMN_NAME].display_name, m_columns[COLUMN_NAME],
                                           wxDATAVIEW_CELL_INERT, -1, wxALIGN_LEFT,
                                           wxDATAVIEW_COL_RESIZABLE|wxDATAVIEW_COL_SORTABLE );
+        },
+        [&]()
+        {
+            m_netsList->AppendTextColumn( m_columns[COLUMN_NET_CHAIN].display_name, m_columns[COLUMN_NET_CHAIN],
+                                          wxDATAVIEW_CELL_INERT, -1, wxALIGN_LEFT,
+                                          wxDATAVIEW_COL_RESIZABLE|wxDATAVIEW_COL_REORDERABLE|wxDATAVIEW_COL_SORTABLE );
         },
         [&]()
         {
@@ -163,6 +175,12 @@ void PCB_NET_INSPECTOR_PANEL::buildColumns()
         {
             m_netsList->AppendTextColumn( m_columns[COLUMN_TOTAL_LENGTH].display_name, m_columns[COLUMN_TOTAL_LENGTH],
                                           wxDATAVIEW_CELL_INERT, -1, wxALIGN_CENTER,
+                                          wxDATAVIEW_COL_RESIZABLE|wxDATAVIEW_COL_REORDERABLE|wxDATAVIEW_COL_SORTABLE );
+        },
+        [&]()
+        {
+            m_netsList->AppendTextColumn( m_columns[COLUMN_NET_CHAIN_LENGTH].display_name,
+                                          m_columns[COLUMN_NET_CHAIN_LENGTH], wxDATAVIEW_CELL_INERT, -1, wxALIGN_CENTER,
                                           wxDATAVIEW_COL_RESIZABLE|wxDATAVIEW_COL_REORDERABLE|wxDATAVIEW_COL_SORTABLE );
         },
         [&]()
@@ -454,6 +472,7 @@ void PCB_NET_INSPECTOR_PANEL::buildNetsList( const bool rebuildColumns )
     m_showZeroPadNets = cfg->show_zero_pad_nets;
     m_showTimeDomainDetails = cfg->show_time_domain_details;
     m_groupByNetclass = cfg->group_by_netclass;
+    m_groupByNetChain = cfg->group_by_net_chain;
     m_groupByConstraint = cfg->group_by_constraint;
 
     // Attempt to keep any expanded groups open
@@ -722,7 +741,7 @@ PCB_NET_INSPECTOR_PANEL::calculateNets( const std::vector<NETINFO_ITEM*>& aNetCo
             {
                 int netCode = foundNets[i]->GetNetCode();
 
-                constexpr PATH_OPTIMISATIONS opts = { .OptimiseViaLayers = true,
+                constexpr PATH_OPTIMISATIONS opts = { .OptimiseVias = true,
                                                       .MergeTracks = true,
                                                       .OptimiseTracesInPads = true,
                                                       .InferViaInPad = false };
@@ -752,12 +771,60 @@ PCB_NET_INSPECTOR_PANEL::calculateNets( const std::vector<NETINFO_ITEM*>& aNetCo
                     if( m_showTimeDomainDetails )
                         new_item->SetLayerWireDelays( *lengthDetails.LayerDelays );
 
+                    new_item->SetNetChainName( foundNets[i]->GetNetChain() );
+                    new_item->SetNetChainLength( lengthDetails.TotalLength() );
+
                     std::scoped_lock lock( resultsMutex );
                     results.emplace_back( std::move( new_item ) );
                 }
             } );
 
     resultsFuture.get();
+
+    std::map<wxString, int64_t> netChainLengths;
+
+    for( const std::unique_ptr<LIST_ITEM>& item : results )
+    {
+        if( !item->GetNetChainName().IsEmpty() )
+            netChainLengths[item->GetNetChainName()] += item->GetTotalLength();
+    }
+
+    for( FOOTPRINT* fp : m_board->Footprints() )
+    {
+        std::vector<PAD*> chainPads;
+
+        for( PAD* pad : fp->Pads() )
+        {
+            if( pad->GetNet() && !pad->GetNet()->GetNetChain().IsEmpty() )
+                chainPads.push_back( pad );
+        }
+
+        for( size_t i = 0; i < chainPads.size(); ++i )
+        {
+            for( size_t j = i + 1; j < chainPads.size(); ++j )
+            {
+                NETINFO_ITEM* netA = chainPads[i]->GetNet();
+                NETINFO_ITEM* netB = chainPads[j]->GetNet();
+
+                if( netA->GetNetChain() == netB->GetNetChain()
+                        && netA->GetNetCode() != netB->GetNetCode() )
+                {
+                    VECTOR2I p1 = chainPads[i]->GetPosition();
+                    VECTOR2I p2 = chainPads[j]->GetPosition();
+                    int64_t dx = p1.x - p2.x;
+                    int64_t dy = p1.y - p2.y;
+                    int64_t dist = KiROUND( std::hypot( (double) dx, (double) dy ) );
+                    netChainLengths[netA->GetNetChain()] += dist;
+                }
+            }
+        }
+    }
+
+    for( std::unique_ptr<LIST_ITEM>& item : results )
+    {
+        if( !item->GetNetChainName().IsEmpty() )
+            item->SetNetChainLength( netChainLengths[item->GetNetChainName()] );
+    }
 
     return results;
 }
@@ -966,6 +1033,8 @@ void PCB_NET_INSPECTOR_PANEL::updateNets( const std::vector<NETINFO_ITEM*>& aNet
             curListItem->SetViaLength( newListItem->GetViaLength() );
             curListItem->SetViaDelay( newListItem->GetViaDelay() );
             curListItem->SetLayerWireLengths( newListItem->GetLayerWireLengths() );
+            curListItem->SetNetChainName( newListItem->GetNetChainName() );
+            curListItem->SetNetChainLength( newListItem->GetNetChainLength() );
 
             if( m_showTimeDomainDetails )
                 curListItem->SetLayerWireDelays( newListItem->GetLayerWireDelays() );
@@ -1268,6 +1337,12 @@ void PCB_NET_INSPECTOR_PANEL::OnConfigButton( wxCommandEvent& event )
     menu.Append( groupNetclass );
     groupNetclass->Check( m_groupByNetclass );
 
+    wxMenuItem* groupSignal = new wxMenuItem( &menu, ID_GROUP_BY_NET_CHAIN,
+                                              _( "Group by Net Chain" ),
+                                              wxEmptyString, wxITEM_CHECK );
+    menu.Append( groupSignal );
+    groupSignal->Check( m_groupByNetChain );
+
     menu.AppendSeparator();
 
     wxMenuItem* addGroup = new wxMenuItem( &menu, ID_ADD_GROUP, _( "Add Custom Group..." ),
@@ -1379,6 +1454,10 @@ void PCB_NET_INSPECTOR_PANEL::onContextMenuSelection( wxCommandEvent& event )
 
     case ID_GROUP_BY_NETCLASS:
         m_groupByNetclass = !m_groupByNetclass;
+        break;
+
+    case ID_GROUP_BY_NET_CHAIN:
+        m_groupByNetChain = !m_groupByNetChain;
         break;
 
     case ID_FILTER_BY_NET_NAME:
@@ -1869,6 +1948,7 @@ void PCB_NET_INSPECTOR_PANEL::SaveSettings()
     cfg.filter_by_net_name = m_filterByNetName;
     cfg.filter_by_netclass = m_filterByNetclass;
     cfg.group_by_netclass = m_groupByNetclass;
+    cfg.group_by_net_chain = m_groupByNetChain;
     cfg.group_by_constraint = m_groupByConstraint;
     cfg.show_zero_pad_nets = m_showZeroPadNets;
     cfg.show_unconnected_nets = m_showUnconnectedNets;

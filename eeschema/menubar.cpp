@@ -101,13 +101,9 @@ void SCH_EDIT_FRAME::doReCreateMenuBar()
     submenuImport->SetTitle( _( "Import" ) );
     submenuImport->SetIcon( BITMAPS::import );
 
-    submenuImport->Add( _( "Non-KiCad Schematic..." ),
-                _( "Replace current schematic sheet with one imported from another application" ),
-                ID_IMPORT_NON_KICAD_SCH,
-                BITMAPS::import_document );
-
+    submenuImport->Add( SCH_ACTIONS::importNonKicadSchematic, ACTION_MENU::NORMAL, _( "Non-KiCad Schematic..." ) );
     submenuImport->Add( SCH_ACTIONS::importFPAssignments, ACTION_MENU::NORMAL, _( "Footprint Assignments..." ) );
-    submenuImport->Add( SCH_ACTIONS::importGraphics,      ACTION_MENU::NORMAL, _( "Graphics..." ) );
+    submenuImport->Add( SCH_ACTIONS::importGraphics, ACTION_MENU::NORMAL, _( "Graphics..." ) );
 
     fileMenu->Add( submenuImport );
 
@@ -266,6 +262,8 @@ void SCH_EDIT_FRAME::doReCreateMenuBar()
     placeMenu->Add( SCH_ACTIONS::drawTable );
     placeMenu->Add( SCH_ACTIONS::drawRectangle );
     placeMenu->Add( SCH_ACTIONS::drawCircle );
+    placeMenu->Add( SCH_ACTIONS::drawEllipse );
+    placeMenu->Add( SCH_ACTIONS::drawEllipseArc );
     placeMenu->Add( SCH_ACTIONS::drawArc );
     placeMenu->Add( SCH_ACTIONS::drawBezier );
     placeMenu->Add( SCH_ACTIONS::drawLines );
@@ -328,10 +326,14 @@ void SCH_EDIT_FRAME::doReCreateMenuBar()
     toolsMenu->Add( ACTIONS::updateSchematicFromPcb )->Enable( !Kiface().IsSingle() );
 
     toolsMenu->AppendSeparator();
+    toolsMenu->Add( SCH_ACTIONS::createNetChain );
+
+    toolsMenu->AppendSeparator();
     ACTION_MENU* submenuVariants = new ACTION_MENU( false, selTool );
     submenuVariants->SetTitle( _( "Variants" ) );
     submenuVariants->Add( SCH_ACTIONS::addVariant );
     submenuVariants->Add( SCH_ACTIONS::removeVariant );
+    submenuVariants->Add( SCH_ACTIONS::editVariantDescription );
     toolsMenu->Add( submenuVariants );
 
 #ifdef KICAD_IPC_API

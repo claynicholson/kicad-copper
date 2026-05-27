@@ -53,6 +53,7 @@
 #define SEG_PER_CIRCLE_COUNT  64
 
 class GLUtesselator;
+class wxImage;
 
 struct bitmap_glyph;
 
@@ -146,6 +147,15 @@ public:
     /// @copydoc GAL::DrawArcSegment()
     void DrawArcSegment( const VECTOR2D& aCenterPoint, double aRadius, const EDA_ANGLE& aStartAngle,
                          const EDA_ANGLE& aAngle, double aWidth, double aMaxError ) override;
+
+    /// @copydoc GAL::DrawEllipse()
+    void DrawEllipse( const VECTOR2D& aCenterPoint, double aMajorRadius, double aMinorRadius,
+                      const EDA_ANGLE& aRotation ) override;
+
+    /// @copydoc GAL::DrawEllipseArc()
+    void DrawEllipseArc( const VECTOR2D& aCenterPoint, double aMajorRadius, double aMinorRadius,
+                         const EDA_ANGLE& aRotation, const EDA_ANGLE& aStartAngle,
+                         const EDA_ANGLE& aEndAngle ) override;
 
     /// @copydoc GAL::DrawRectangle()
     void DrawRectangle( const VECTOR2D& aStartPoint, const VECTOR2D& aEndPoint ) override;
@@ -323,6 +333,8 @@ public:
 
     /// @copydoc GAL::EndDrawing()
     void EndDrawing() override;
+
+    bool GetScreenshot( wxImage& aDstImage );
 
     ///< Parameters passed to the GLU tesselator
     struct TessParams

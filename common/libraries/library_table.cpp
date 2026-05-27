@@ -20,6 +20,10 @@
 
 #include <boost/lexical_cast.hpp>
 
+#include <cstdint>
+#include <limits>
+
+#include <kiplatform/io.h>
 #include <libraries/library_table.h>
 #include <libraries/library_table_parser.h>
 #include <richio.h>
@@ -27,7 +31,11 @@
 #include <trace_helpers.h>
 #include <wx_filename.h>
 #include <xnode.h>
+#include <ki_exception.h>
 #include <libraries/library_manager.h>
+
+#include <wx/buffer.h>
+#include <wx/ffile.h>
 
 
 const wxString LIBRARY_TABLE_ROW::TABLE_TYPE_NAME = wxT( "Table" );
@@ -52,7 +60,7 @@ std::map<std::string, UTF8> LIBRARY_TABLE_ROW::GetOptionsMap() const
 }
 
 
-LIBRARY_TABLE::LIBRARY_TABLE( const wxFileName &aPath, LIBRARY_TABLE_SCOPE aScope ) :
+LIBRARY_TABLE::LIBRARY_TABLE( const wxFileName &aPath, LIBRARY_TABLE_SCOPE aScope, LIBRARY_TABLE_TYPE aExpectedType ) :
         m_scope( aScope )
 {
     LIBRARY_TABLE_PARSER parser;
@@ -69,10 +77,24 @@ LIBRARY_TABLE::LIBRARY_TABLE( const wxFileName &aPath, LIBRARY_TABLE_SCOPE aScop
         return;
     }
 
+    if( fn.GetSize() <= 1 ) // test for an empty file, 1 byte allowed for BOM
+    {
+        m_ok = true;
+        m_type = aExpectedType;
+        return;
+    }
+
     tl::expected<LIBRARY_TABLE_IR, LIBRARY_PARSE_ERROR> ir = parser.Parse( m_path.ToStdString() );
 
     if( ir.has_value() )
     {
+        if( aExpectedType != LIBRARY_TABLE_TYPE::UNINITIALIZED && ir->type != aExpectedType )
+        {
+            m_ok = false;
+            m_errorDescription = _( "The library table is of wrong type" );
+            return;
+        }
+
         m_ok = initFromIR( *ir );
     }
     else
@@ -164,7 +186,10 @@ void LIBRARY_TABLE::Format( OUTPUTFORMATTER* aOutput ) const
         { LIBRARY_TABLE_TYPE::DESIGN_BLOCK, "design_block_lib_table" }
     };
 
-    wxCHECK( types.contains( Type() ), /* void */ );
+    if( !types.contains( Type() ) )
+    {
+        THROW_IO_ERROR( "Unknown library table type: " + std::to_string( static_cast<int>( Type() ) ) );
+    }
 
     XNODE self( wxXML_ELEMENT_NODE, types.at( Type() ) );
 
@@ -272,10 +297,46 @@ LIBRARY_RESULT<void> LIBRARY_TABLE::Save()
     // This should already be normalized, but just in case...
     fn.Normalize( FN_NORMALIZE_FLAGS | wxPATH_NORM_ENV_VARS );
 
+    // Global user data with no other recovery path: keep a rotating .bak sibling so the
+    // user can recover from logical corruption outside our fsync window.
+    wxFFile existing( fn.GetFullPath(), wxT( "rb" ) );
+
+    if( existing.IsOpened() )
+    {
+        wxFileOffset rawLen = existing.Length();
+
+        if( rawLen >= 0
+            && static_cast<uint64_t>( rawLen ) <= std::numeric_limits<size_t>::max() )
+        {
+            size_t         len = static_cast<size_t>( rawLen );
+            wxMemoryBuffer buf;
+            void*          dst = len > 0 ? buf.GetWriteBuf( len ) : nullptr;
+
+            if( len == 0 || existing.Read( dst, len ) == len )
+            {
+                buf.SetDataLen( len );
+                existing.Close();
+
+                wxString bakPath = fn.GetFullPath() + wxT( ".bak" );
+                wxString bakError;
+
+                if( !KIPLATFORM::IO::AtomicWriteFile( bakPath, buf.GetData(), len, &bakError ) )
+                {
+                    // Non-fatal: the original is still on disk and the atomic save below
+                    // is safe.
+                    wxLogTrace( traceLibraries,
+                                "Could not rotate library table backup to '%s': %s", bakPath,
+                                bakError );
+                }
+            }
+        }
+    }
+
     try
     {
         PRETTIFIED_FILE_OUTPUTFORMATTER formatter( fn.GetFullPath(), KICAD_FORMAT::FORMAT_MODE::LIBRARY_TABLE );
         Format( &formatter );
+        formatter.Finish();
     }
     catch( IO_ERROR& e )
     {

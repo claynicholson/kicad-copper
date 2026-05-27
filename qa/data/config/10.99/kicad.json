@@ -55,6 +55,7 @@
   "pcm": {
     "check_for_updates": true,
     "last_download_dir": "",
+    "last_selected_repo_id": "",
     "lib_auto_add": true,
     "lib_auto_remove": true,
     "lib_prefix": "PCM_",

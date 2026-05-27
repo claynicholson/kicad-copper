@@ -24,6 +24,9 @@
 #ifndef RC_ITEM_H
 #define RC_ITEM_H
 
+#include <memory>
+#include <vector>
+
 #include <wx/dataview.h>
 #include <units_provider.h>
 #include <kiid.h>
@@ -189,6 +192,18 @@ public:
 protected:
     static wxString getSeverityString( SEVERITY aSeverity );
 
+    /**
+     * Resolve the description string used for an affected item in ShowReport and
+     * GetJsonViolation.  Subclasses that need per-context formatting (e.g. ERC's
+     * per-sheet-instance symbol references) override this rather than reimplementing
+     * the surrounding report layout.
+     *
+     * @param aItem is the affected item being described
+     * @param aIndex is 0 for the main item and 1 for the aux item
+     */
+    virtual wxString getItemDescription( EDA_ITEM* aItem, int aIndex,
+                                         UNITS_PROVIDER* aUnitsProvider ) const;
+
     int           m_errorCode;         ///< The error code's numeric value
     wxString      m_errorMessage;      ///< A message describing the details of this specific error
     wxString      m_errorTitle;        ///< The string describing the type of error
@@ -234,6 +249,12 @@ public:
     NODE_TYPE                  m_Type;
     std::shared_ptr<RC_ITEM>   m_RcItem;
 
+    struct HANDLE
+    {
+        RC_TREE_NODE* m_Node = nullptr;
+    };
+
+    HANDLE*                    m_Handle = nullptr;
     RC_TREE_NODE*              m_Parent;
     std::vector<RC_TREE_NODE*> m_Children;
 };
@@ -244,12 +265,13 @@ class RC_TREE_MODEL : public wxDataViewModel, public wxEvtHandler
 public:
     static wxDataViewItem ToItem( RC_TREE_NODE const* aNode )
     {
-        return wxDataViewItem( const_cast<void*>( static_cast<void const*>( aNode ) ) );
+        return aNode && aNode->m_Handle ? wxDataViewItem( aNode->m_Handle ) : wxDataViewItem();
     }
 
     static RC_TREE_NODE* ToNode( wxDataViewItem aItem )
     {
-        return static_cast<RC_TREE_NODE*>( aItem.GetID() );
+        auto* handle = static_cast<RC_TREE_NODE::HANDLE*>( aItem.GetID() );
+        return handle ? handle->m_Node : nullptr;
     }
 
     const wxDataViewCtrl* GetView() const { return m_view; }
@@ -266,6 +288,10 @@ public:
     RC_TREE_MODEL& operator=( const RC_TREE_MODEL& ) = delete;
 
     void Update( std::shared_ptr<RC_ITEMS_PROVIDER> aProvider, int aSeverities );
+
+    /// Render [label](url) markup as clickable links.  Must be called before
+    /// any rows are added.
+    void EnableHyperlinks( bool aEnable );
 
     void ExpandAll();
 
@@ -329,13 +355,22 @@ public:
     void DeleteItems( bool aCurrentOnly, bool aIncludeExclusions, bool aDeep );
 
 protected:
+    RC_TREE_NODE* createNode( RC_TREE_NODE* aParent, const std::shared_ptr<RC_ITEM>& aRcItem,
+                              RC_TREE_NODE::NODE_TYPE aType );
+    void          retireNodeTree( RC_TREE_NODE* aNode );
+    void          deleteNodeTree( RC_TREE_NODE* aNode );
     void     rebuildModel( std::shared_ptr<RC_ITEMS_PROVIDER> aProvider, int aSeverities );
+
+    void onViewSize( wxSizeEvent& aEvent );
 
     EDA_DRAW_FRAME*                    m_editFrame;
     wxDataViewCtrl*                    m_view;
     int                                m_severities;
+    bool                               m_enableHyperlinks = false;
+    wxDataViewColumn*                  m_hyperlinkColumn = nullptr;
     std::shared_ptr<RC_ITEMS_PROVIDER> m_rcItemsProvider;
 
+    std::vector<std::unique_ptr<RC_TREE_NODE::HANDLE>> m_handles;   // Stable wx item IDs
     std::vector<RC_TREE_NODE*>         m_tree;              // I own this
 };
 

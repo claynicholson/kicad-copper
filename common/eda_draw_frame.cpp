@@ -44,6 +44,7 @@
 #include <page_info.h>
 #include <paths.h>
 #include <pgm_base.h>
+#include <reporter.h>
 #include <render_settings.h>
 #include <settings/app_settings.h>
 #include <settings/color_settings.h>
@@ -281,46 +282,6 @@ bool EDA_DRAW_FRAME::LockFile( const wxString& aFileName )
     // If the file is valid, return true.  This could mean that the file is locked or it could mean
     // that the file is read-only.
     return m_file_checker->Valid();
-}
-
-
-void EDA_DRAW_FRAME::ScriptingConsoleEnableDisable()
-{
-    KIWAY_PLAYER* frame = Kiway().Player( FRAME_PYTHON, false );
-
-    wxRect  rect = GetScreenRect();
-    wxPoint center = rect.GetPosition() + rect.GetSize() / 2;
-
-    if( !frame )
-    {
-        frame = Kiway().Player( FRAME_PYTHON, true, Kiway().GetTop() );
-
-        // If we received an error in the CTOR due to Python-ness, don't crash
-        if( !frame )
-            return;
-
-        if( !frame->IsVisible() )
-            frame->Show( true );
-
-        // On Windows, Raise() does not bring the window on screen, when iconized
-        if( frame->IsIconized() )
-            frame->Iconize( false );
-
-        frame->Raise();
-        frame->SetPosition( center - frame->GetSize() / 2 );
-
-        return;
-    }
-
-    frame->Show( !frame->IsVisible() );
-    frame->SetPosition( center - frame->GetSize() / 2 );
-}
-
-
-bool EDA_DRAW_FRAME::IsScriptingConsoleVisible()
-{
-    KIWAY_PLAYER* frame = Kiway().Player( FRAME_PYTHON, false );
-    return frame && frame->IsVisible();
 }
 
 
@@ -762,38 +723,32 @@ void EDA_DRAW_FRAME::updateStatusBarWidths()
 
     std::vector<int> dims = {
         // remainder of status bar on far left is set to a default or whatever is left over.
-        -3,
+        -2,
 
         // When using GetTextSize() remember the width of character '1' is not the same
         // as the width of '0' unless the font is fixed width, and it usually won't be.
 
         // zoom:
-        KIUI::GetTextSize( wxT( "Z 762000" ), stsbar ).x,
+        KIUI::GetTextSize( wxT( "Z 762000" ), stsbar ).x + spacer,
 
         // cursor coords
-        KIUI::GetTextSize( wxT( "X 1234.1234  Y 1234.1234" ), stsbar ).x,
+        KIUI::GetTextSize( wxT( "X 00000.0000  Y 00000.0000" ), stsbar ).x + spacer,
 
         // delta distances
-        KIUI::GetTextSize( wxT( "dx 1234.1234  dy 1234.1234  dist 1234.1234" ), stsbar ).x,
+        KIUI::GetTextSize( wxT( "dx 00000.0000  dy 00000.0000  dist 00000.0000" ), stsbar ).x + spacer,
 
         // grid size
-        KIUI::GetTextSize( wxT( "grid 1234.1234 x 1234.1234" ), stsbar ).x,
+        KIUI::GetTextSize( wxT( "grid 0000.0000 x 0000.0000" ), stsbar ).x + spacer,
 
         // units display, Inches is bigger than mm
-        KIUI::GetTextSize( _( "Inches" ), stsbar ).x,
+        KIUI::GetTextSize( _( "Inches" ), stsbar ).x + spacer,
 
         // Size for the "Current Tool" panel
-        -2,
+        -1,
 
         // constraint mode
-        -2
+        KIUI::GetTextSize(  _( "Constrain to H, V, 45" ), stsbar).x + spacer
     };
-
-    for( int& dim : dims )
-    {
-        if( dim >= 0 )
-            dim += spacer;
-    }
 
     for( int idx = numLocalFields; idx < totalFields; ++idx )
         dims.emplace_back( stsbar->GetStatusWidth( idx ) );
@@ -1413,20 +1368,22 @@ void EDA_DRAW_FRAME::onActivate( wxActivateEvent& aEvent )
 
 bool EDA_DRAW_FRAME::SaveCanvasImageToFile( const wxString& aFileName, BITMAP_TYPE aBitmapType )
 {
-    bool retv = true;
+    wxImage image;
 
-    // Make a screen copy of the canvas:
-    wxSize image_size = GetCanvas()->GetClientSize();
 
-    wxClientDC dc( GetCanvas() );
-    wxBitmap   bitmap( image_size.x, image_size.y );
-    wxMemoryDC memdc;
+    if( !GetCanvas()->GetScreenshot( image ) )
+    {
+        wxSize     image_size = GetCanvas()->GetClientSize();
+        wxClientDC dc( GetCanvas() );
+        wxBitmap   bitmap( image_size.x, image_size.y );
+        wxMemoryDC memdc;
 
-    memdc.SelectObject( bitmap );
-    memdc.Blit( 0, 0, image_size.x, image_size.y, &dc, 0, 0 );
-    memdc.SelectObject( wxNullBitmap );
+        memdc.SelectObject( bitmap );
+        memdc.Blit( 0, 0, image_size.x, image_size.y, &dc, 0, 0 );
+        memdc.SelectObject( wxNullBitmap );
 
-    wxImage image = bitmap.ConvertToImage();
+        image = bitmap.ConvertToImage();
+    }
 
     wxBitmapType type = wxBITMAP_TYPE_PNG;
     switch( aBitmapType )
@@ -1436,8 +1393,7 @@ bool EDA_DRAW_FRAME::SaveCanvasImageToFile( const wxString& aFileName, BITMAP_TY
     case BITMAP_TYPE::JPG: type = wxBITMAP_TYPE_JPEG; break;
     }
 
-    if( !image.SaveFile( aFileName, type ) )
-        retv = false;
+    bool retv = image.SaveFile( aFileName, type );
 
     image.Destroy();
     return retv;
@@ -1530,6 +1486,13 @@ void EDA_DRAW_FRAME::OnApiPluginInvoke( wxCommandEvent& aEvent )
     API_PLUGIN_MANAGER& mgr = Pgm().GetPluginManager();
 
     if( mgr.ButtonBindings().count( aEvent.GetId() ) )
-        mgr.InvokeAction( mgr.ButtonBindings().at( aEvent.GetId() ) );
+    {
+        std::shared_ptr<REPORTER> reporter;
+
+        if( KISTATUSBAR* statusBar = dynamic_cast<KISTATUSBAR*>( GetStatusBar() ) )
+            reporter = std::make_shared<STATUSBAR_WARNING_REPORTER>( statusBar, wxS( "plugin" ) );
+
+        mgr.InvokeAction( mgr.ButtonBindings().at( aEvent.GetId() ), reporter );
+    }
 #endif
 }

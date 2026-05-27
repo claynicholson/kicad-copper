@@ -41,6 +41,8 @@
 #include <drc/drc_test_provider.h>
 #include <drc/drc_item.h>
 #include <drc/drc_cache_generator.h>
+#include <board.h>
+#include <pcb_marker.h>
 #include <footprint.h>
 #include <pad.h>
 #include <pcb_track.h>
@@ -535,9 +537,9 @@ void DRC_ENGINE::loadImplicitRules()
                     diffPairClearanceRule->m_Name = wxString::Format( _( "tuning profile '%s'" ), aProfileName );
                     diffPairClearanceRule->SetImplicitSource( DRC_IMPLICIT_SOURCE::TUNING_PROFILE );
 
-                    expr = wxString::Format( wxT( "A.hasExactNetclass('%s') && A.Layer == '%s' && A.inDiffPair('*')" ),
-                                             aNetclass->GetName(),
-                                             LSET::Name( aLayerEntry.GetSignalLayer() ) );
+                    expr = wxString::Format(
+                            wxT( "A.hasExactNetclass('%s') && A.Layer == '%s' && AB.isCoupledDiffPair()" ),
+                            aNetclass->GetName(), LSET::Name( aLayerEntry.GetSignalLayer() ) );
                     diffPairClearanceRule->m_Condition = new DRC_RULE_CONDITION( expr );
 
                     DRC_CONSTRAINT min_clearanceConstraint( CLEARANCE_CONSTRAINT );
@@ -618,6 +620,7 @@ void DRC_ENGINE::loadImplicitRules()
                 }
 
                 rule->m_ImplicitItemId = zone->m_Uuid;
+                rule->m_ImplicitItem = zone;
 
                 rule->m_Condition = new DRC_RULE_CONDITION( wxString::Format( wxT( "A.intersectsArea('%s')" ),
                                                                               zone->m_Uuid.AsString() ) );
@@ -736,6 +739,17 @@ void DRC_ENGINE::compileRules()
             engineConstraint->condition = condition;
             engineConstraint->constraint = constraint;
             engineConstraint->parentRule = rule;
+
+            if( rule->IsImplicit() && constraint.m_Type == DISALLOW_CONSTRAINT
+                && m_board && rule->m_ImplicitItemId != niluuid )
+            {
+                const auto& cache = m_board->GetItemByIdCache();
+                auto        it = cache.find( rule->m_ImplicitItemId );
+
+                if( it != cache.end() && it->second->Type() == PCB_ZONE_T )
+                    engineConstraint->implicitKeepoutZone = static_cast<ZONE*>( it->second );
+            }
+
             ruleVec->push_back( engineConstraint );
         }
     }
@@ -777,6 +791,17 @@ void DRC_ENGINE::InitEngine( const std::shared_ptr<DRC_RULE>& rule )
             m_logReporter->Report( wxString::Format( wxT( "Create DRC provider: '%s'" ), provider->GetName() ) );
 
         provider->SetDRCEngine( this );
+    }
+
+    // Existing markers may hold raw pointers to DRC_RULEs we're about to destroy.
+    // Null them out so GetSeverity() falls back to the board design settings.
+    if( m_board )
+    {
+        for( PCB_MARKER* marker : m_board->Markers() )
+        {
+            DRC_ITEM* drcItem = static_cast<DRC_ITEM*>( marker->GetRCItem().get() );
+            drcItem->SetViolatingRule( nullptr );
+        }
     }
 
     m_rules.clear();
@@ -821,6 +846,17 @@ void DRC_ENGINE::InitEngine( const wxFileName& aRulePath )
             m_logReporter->Report( wxString::Format( wxT( "Create DRC provider: '%s'" ), provider->GetName() ) );
 
         provider->SetDRCEngine( this );
+    }
+
+    // Existing markers may hold raw pointers to DRC_RULEs we're about to destroy.
+    // Null them out so GetSeverity() falls back to the board design settings.
+    if( m_board )
+    {
+        for( PCB_MARKER* marker : m_board->Markers() )
+        {
+            DRC_ITEM* drcItem = static_cast<DRC_ITEM*>( marker->GetRCItem().get() );
+            drcItem->SetViolatingRule( nullptr );
+        }
     }
 
     m_rules.clear();
@@ -1023,6 +1059,8 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                 {
                     if( c->parentRule && c->parentRule->IsImplicit() )
                         constraint.m_ImplicitMin = true;
+                    else
+                        constraint.m_ImplicitMin = false;
 
                     constraint.m_Value.SetMin( c->constraint.m_Value.Min() );
                 }
@@ -1424,6 +1462,9 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                 case TEXT_THICKNESS_CONSTRAINT:
                 case DIFF_PAIR_GAP_CONSTRAINT:
                 case LENGTH_CONSTRAINT:
+                case NET_CHAIN_LENGTH_CONSTRAINT:
+                case NET_CHAIN_STUB_LENGTH_CONSTRAINT:
+                case NET_CHAIN_RETURN_PATH_CONSTRAINT:
                 case CONNECTION_WIDTH_CONSTRAINT:
                 case HOLE_TO_HOLE_CONSTRAINT:
                 {
@@ -1703,6 +1744,19 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                 }
                 else
                 {
+                    // For implicit keepout rules with a pre-resolved zone pointer, skip the
+                    // expensive expression evaluation when the item doesn't overlap the
+                    // zone's bounding box. This avoids UUID string parsing and cache lock
+                    // contention for the vast majority of item-keepout pairs.
+                    if( c->implicitKeepoutZone && !aReporter )
+                    {
+                        BOX2I itemBBox = a->GetBoundingBox();
+                        BOX2I zoneBBox = c->implicitKeepoutZone->GetBoundingBox();
+
+                        if( !itemBBox.Intersects( zoneBBox ) )
+                            return;
+                    }
+
                     if( implicit )
                     {
                         // Don't report on implicit rule conditions; they're synthetic.
@@ -2277,6 +2331,28 @@ bool DRC_ENGINE::QueryWorstConstraint( DRC_CONSTRAINT_T aConstraintId, DRC_CONST
     }
 
     return worst > 0;
+}
+
+
+bool DRC_ENGINE::HasUserDefinedPhysicalConstraint()
+{
+    for( DRC_CONSTRAINT_T type : { PHYSICAL_CLEARANCE_CONSTRAINT, PHYSICAL_HOLE_CLEARANCE_CONSTRAINT } )
+    {
+        auto it = m_constraintMap.find( type );
+
+        if( it != m_constraintMap.end() )
+        {
+            for( DRC_ENGINE_CONSTRAINT* c : *it->second )
+            {
+                if( c->condition && c->parentRule && !c->parentRule->IsImplicit() )
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
 }
 
 

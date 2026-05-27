@@ -32,6 +32,12 @@
 #include <wx/stream.h>
 #include <wx/utils.h>
 
+#ifdef __UNIX__
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 #include <nng/nng.h>
 #include <nng/protocol/reqrep0/req.h>
 
@@ -113,7 +119,7 @@ public:
         {
             m_isOpen = true;
             nng_socket_set_ms( m_socket, NNG_OPT_RECVTIMEO, 10000 );
-            nng_socket_set_ms( m_socket, NNG_OPT_SENDTIMEO, 2000 );
+            nng_socket_set_ms( m_socket, NNG_OPT_SENDTIMEO, 10000 );
         }
         else
         {
@@ -146,6 +152,25 @@ public:
 
         m_isConnected = true;
         return true;
+    }
+
+    void Disconnect()
+    {
+        if( m_isOpen )
+        {
+            nng_close( m_socket );
+            m_isOpen = false;
+            m_isConnected = false;
+
+            int ret = nng_req0_open( &m_socket );
+
+            if( ret == 0 )
+            {
+                m_isOpen = true;
+                nng_socket_set_ms( m_socket, NNG_OPT_RECVTIMEO, 10000 );
+                nng_socket_set_ms( m_socket, NNG_OPT_SENDTIMEO, 10000 );
+            }
+        }
     }
 
     const wxString& LastError() const { return m_lastError; }
@@ -441,13 +466,78 @@ private:
 };
 
 
-class API_SERVER_E2E_FIXTURE
+/**
+ * Manages a single shared kicad-cli api-server process and NNG client across all E2E tests.
+ *
+ * Starting the api-server takes several seconds due to process startup and IPC handshake.
+ * Rather than paying that cost per test case, this singleton starts the server and connects
+ * a single persistent client on first use. Both live until the test module exits.
+ *
+ * A single NNG client is used because the NNG req/rep protocol does not reliably handle
+ * rapid connect/disconnect cycles on IPC sockets. Keeping one persistent connection avoids
+ * stale pipe state in the server's rep socket.
+ */
+class API_SERVER_MANAGER
 {
 public:
-    API_SERVER_E2E_FIXTURE()
+    static API_SERVER_MANAGER& Instance()
     {
-        m_cliPath = wxString::FromUTF8( QA_KICAD_CLI_PATH );
+        static API_SERVER_MANAGER s_instance;
+        return s_instance;
+    }
 
+    /**
+     * Ensure the api-server is running and the shared client is connected and responsive.
+     */
+    bool EnsureReady( const wxString& aCliPath, wxString* aError )
+    {
+        if( m_ready )
+        {
+            if( isProcessAlive() )
+                return true;
+
+            m_ready = false;
+        }
+
+        if( !startServerProcess( aCliPath, aError ) )
+            return false;
+
+        if( !connectAndWaitReady( aError ) )
+            return false;
+
+        m_ready = true;
+        return true;
+    }
+
+    API_TEST_CLIENT& Client() { return m_client; }
+
+    /**
+     * Kill the current server and reset state so EnsureReady() will start fresh.
+     */
+    void Reset()
+    {
+        m_ready = false;
+        m_client.Disconnect();
+
+        if( m_pid != 0 && isProcessAlive() )
+        {
+#ifdef __WXMAC__
+            wxProcess::Kill( m_pid, wxSIGKILL );
+#else
+            wxProcess::Kill( m_pid, wxSIGKILL, wxKILL_CHILDREN );
+#endif
+        }
+
+        m_pid = 0;
+        m_process = nullptr;
+
+        if( wxFileName::Exists( m_socketPath ) )
+            wxRemoveFile( m_socketPath );
+    }
+
+private:
+    API_SERVER_MANAGER()
+    {
 #ifdef __UNIX__
         m_socketPath = wxString::Format( wxS( "/tmp/kicad-api-e2e-%ld.sock" ), wxGetProcessId() );
 #else
@@ -459,25 +549,90 @@ public:
         m_socketPath = tempPath + wxS( ".sock" );
 #endif
 
-        if( wxFileName::Exists( m_socketPath ) )
-            wxRemoveFile( m_socketPath );
-    }
-
-    ~API_SERVER_E2E_FIXTURE()
-    {
-        stopServer();
+        m_socketUrl = wxS( "ipc://" ) + m_socketPath;
 
         if( wxFileName::Exists( m_socketPath ) )
             wxRemoveFile( m_socketPath );
     }
 
-    bool Start( const wxString& aCliPathOverride = wxString() )
+    ~API_SERVER_MANAGER()
     {
-        if( !startServerProcess( aCliPathOverride ) )
+        // Use POSIX primitives here because this destructor runs during static destruction
+        // when wxWidgets may already be partially torn down.
+#ifdef __UNIX__
+        if( m_pid != 0 )
+        {
+            kill( static_cast<pid_t>( m_pid ), SIGTERM );
+            usleep( 200000 );
+            kill( static_cast<pid_t>( m_pid ), SIGKILL );
+        }
+
+        if( !m_socketPath.IsEmpty() )
+            unlink( m_socketPath.ToUTF8().data() );
+#else
+        if( m_pid != 0 )
+            wxProcess::Kill( m_pid, wxSIGKILL, wxKILL_CHILDREN );
+
+        if( !m_socketPath.IsEmpty() && wxFileName::Exists( m_socketPath ) )
+            wxRemoveFile( m_socketPath );
+#endif
+    }
+
+    API_SERVER_MANAGER( const API_SERVER_MANAGER& ) = delete;
+    API_SERVER_MANAGER& operator=( const API_SERVER_MANAGER& ) = delete;
+
+    bool startServerProcess( const wxString& aCliPath, wxString* aError )
+    {
+        if( m_pid != 0 )
+            return true;
+
+        if( !wxFileExists( aCliPath ) )
+        {
+            if( aError )
+                *aError = wxS( "kicad-cli path does not exist: " ) + aCliPath;
+
             return false;
+        }
 
-        auto     deadline = std::chrono::steady_clock::now() + std::chrono::seconds( 15 );
-        wxString lastProbeError;
+        m_stdout.clear();
+        m_stderr.clear();
+        m_exitCode = 0;
+
+        m_process = new API_SERVER_PROCESS(
+                [this]( int aStatus, const wxString& aOutput, const wxString& aErrOutput )
+                {
+                    m_exitCode = aStatus;
+                    m_stdout += aOutput;
+                    m_stderr += aErrOutput;
+                    m_pid = 0;
+                    m_process = nullptr;
+                    m_ready = false;
+                } );
+
+        m_process->Redirect();
+
+        std::vector<const wchar_t*> args = { aCliPath.wc_str(), wxS( "api-server" ), wxS( "--socket" ),
+                                             m_socketPath.wc_str(), nullptr };
+
+        m_pid = wxExecute( args.data(), wxEXEC_ASYNC, m_process );
+
+        if( m_pid == 0 )
+        {
+            delete m_process;
+            m_process = nullptr;
+
+            if( aError )
+                *aError = wxS( "Failed to launch kicad-cli api-server" );
+
+            return false;
+        }
+
+        return true;
+    }
+
+    bool connectAndWaitReady( wxString* aError )
+    {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds( 15 );
 
         while( std::chrono::steady_clock::now() < deadline )
         {
@@ -486,13 +641,13 @@ public:
 
             if( !isProcessAlive() )
             {
-                m_lastError = wxS( "kicad-cli process exited before ready" );
+                if( aError )
+                    *aError = wxS( "kicad-cli process exited before ready" );
+
                 return false;
             }
 
-            wxString socketUrl = wxS( "ipc://" ) + m_socketPath;
-
-            if( !m_client.Connect( socketUrl ) )
+            if( !m_client.Connect( m_socketUrl ) )
             {
                 wxLogTrace( traceApi, "kicad-cli connect attempt failed, will retry" );
                 continue;
@@ -507,8 +662,12 @@ public:
 
                 if( pingStatus != kiapi::common::AS_NOT_READY )
                 {
-                    m_lastError = wxString::Format( wxS( "Ping returned unexpected status: %s" ),
+                    if( aError )
+                    {
+                        *aError = wxString::Format( wxS( "Ping returned unexpected status: %s" ),
                                                     magic_enum::enum_name( pingStatus ) );
+                    }
+
                     return false;
                 }
 
@@ -520,60 +679,10 @@ public:
             }
         }
 
-        m_lastError = wxS( "Timed out waiting for kicad-cli to start up" );
+        if( aError )
+            *aError = wxS( "Timed out waiting for kicad-cli to start up" );
+
         return false;
-    }
-
-    API_TEST_CLIENT& Client() { return m_client; }
-
-    wxString CliPath() const { return m_cliPath; }
-
-    const wxString& LastError() const { return m_lastError; }
-
-private:
-    bool startServerProcess( const wxString& aCliPathOverride )
-    {
-        if( m_pid != 0 )
-            return true;
-
-        wxString cliPath = aCliPathOverride.IsEmpty() ? m_cliPath : aCliPathOverride;
-
-        if( !wxFileExists( cliPath ) )
-        {
-            m_lastError = wxS( "kicad-cli path does not exist: " ) + cliPath;
-            return false;
-        }
-
-        m_stdout.clear();
-        m_stderr.clear();
-        m_exitCode = 0;
-
-        m_process = new API_SERVER_PROCESS(
-                [this]( int aStatus, const wxString& aOutput, const wxString& aError )
-                {
-                    m_exitCode = aStatus;
-                    m_stdout += aOutput;
-                    m_stderr += aError;
-                    m_pid = 0;
-                    m_process = nullptr;
-                } );
-
-        m_process->Redirect();
-
-        std::vector<const wchar_t*> args = { cliPath.wc_str(), wxS( "api-server" ), wxS( "--socket" ),
-                                             m_socketPath.wc_str(), nullptr };
-
-        m_pid = wxExecute( args.data(), wxEXEC_ASYNC, m_process );
-
-        if( m_pid == 0 )
-        {
-            delete m_process;
-            m_process = nullptr;
-            m_lastError = wxS( "Failed to launch kicad-cli api-server" );
-            return false;
-        }
-
-        return true;
     }
 
     void collectServerOutput()
@@ -585,46 +694,94 @@ private:
         API_SERVER_PROCESS::drainStream( m_process->GetErrorStream(), m_stderr );
     }
 
-    void stopServer()
-    {
-        collectServerOutput();
-
-        if( isProcessAlive() )
-        {
-            wxProcess::Kill( m_pid, wxSIGTERM, wxKILL_CHILDREN );
-
-            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds( 5 );
-
-            while( isProcessAlive() && std::chrono::steady_clock::now() < deadline )
-                wxMilliSleep( 50 );
-
-            if( isProcessAlive() )
-                wxProcess::Kill( m_pid, wxSIGKILL, wxKILL_CHILDREN );
-        }
-
-        collectServerOutput();
-        m_pid = 0;
-        m_process = nullptr;
-    }
-
     bool isProcessAlive() const
     {
         if( m_pid == 0 )
             return false;
 
+#ifdef __UNIX__
+        int   status = 0;
+        pid_t result = waitpid( static_cast<pid_t>( m_pid ), &status, WNOHANG );
+
+        if( result == 0 )
+            return true;
+
+        if( result > 0 )
+        {
+            if( WIFSIGNALED( status ) )
+            {
+                BOOST_TEST_MESSAGE( wxString::Format( "api-server killed by signal %d (%s)",
+                                                      WTERMSIG( status ),
+                                                      strsignal( WTERMSIG( status ) ) ) );
+            }
+            else if( WIFEXITED( status ) )
+            {
+                BOOST_TEST_MESSAGE( wxString::Format( "api-server exited with code %d",
+                                                      WEXITSTATUS( status ) ) );
+            }
+
+            return false;
+        }
+#endif
+
         return wxProcess::Exists( m_pid );
     }
 
-private:
+    bool                m_ready = false;
     API_TEST_CLIENT     m_client;
     API_SERVER_PROCESS* m_process = nullptr;
     long                m_pid = 0;
-    wxString            m_cliPath;
     wxString            m_socketPath;
+    wxString            m_socketUrl;
     wxString            m_stdout;
     wxString            m_stderr;
-    wxString            m_lastError;
     mutable int         m_exitCode = 0;
+};
+
+
+/**
+ * Per-test fixture for API E2E tests.
+ *
+ * All tests share a single api-server process and NNG client managed by API_SERVER_MANAGER.
+ * The server and client are created on the first test's Start() call and remain alive for
+ * all subsequent tests in the module.
+ *
+ * If the server crashed during a previous test, Start() automatically restarts it.
+ */
+class API_SERVER_E2E_FIXTURE
+{
+public:
+    API_SERVER_E2E_FIXTURE()
+    {
+        m_cliPath = wxString::FromUTF8( QA_KICAD_CLI_PATH );
+    }
+
+    ~API_SERVER_E2E_FIXTURE() = default;
+
+    bool Start( const wxString& aCliPathOverride = wxString() )
+    {
+        wxString cliPath = aCliPathOverride.IsEmpty() ? m_cliPath : aCliPathOverride;
+
+        API_SERVER_MANAGER& manager = API_SERVER_MANAGER::Instance();
+
+        if( manager.EnsureReady( cliPath, &m_lastError ) )
+            return true;
+
+        // First attempt failed. The server may have crashed during a previous test.
+        manager.Reset();
+
+        return manager.EnsureReady( cliPath, &m_lastError );
+    }
+
+    API_TEST_CLIENT& Client() { return API_SERVER_MANAGER::Instance().Client(); }
+
+    wxString CliPath() const { return m_cliPath; }
+
+    const wxString& LastError() const { return m_lastError; }
+
+private:
+    wxString m_cliPath;
+    wxString m_lastError;
 };
 
 #endif // QA_API_E2E_UTILS_H

@@ -23,6 +23,7 @@
 
 #include <pcb_dimension.h>
 #include <pcb_track.h>
+#include <cmath>
 #include <layer_ids.h>
 #include <lset.h>
 #include <kiface_base.h>
@@ -874,6 +875,126 @@ BOARD_DESIGN_SETTINGS::BOARD_DESIGN_SETTINGS( JSON_SETTINGS* aParent, const std:
             &m_defaultZoneSettings.m_ZoneClearance, pcbIUScale.mmToIU( ZONE_CLEARANCE_MM ),
             pcbIUScale.mmToIU( 0.0 ), pcbIUScale.mmToIU( 25.0 ), pcbIUScale.MM_PER_IU ) );
 
+    m_params.emplace_back( new PARAM_SCALED<int>(
+            "defaults.zones.min_thickness", &m_defaultZoneSettings.m_ZoneMinThickness,
+            pcbIUScale.mmToIU( ZONE_THICKNESS_MM ), pcbIUScale.mmToIU( ZONE_THICKNESS_MIN_VALUE_MM ),
+            pcbIUScale.mmToIU( 25.0 ), pcbIUScale.MM_PER_IU ) );
+
+    m_params.emplace_back( new PARAM_ENUM<ZONE_FILL_MODE>( "defaults.zones.fill_mode",
+                                                           &m_defaultZoneSettings.m_FillMode, ZONE_FILL_MODE::POLYGONS,
+                                                           ZONE_FILL_MODE::POLYGONS,
+                                                           ZONE_FILL_MODE::COPPER_THIEVING ) );
+
+    m_params.emplace_back(
+            new PARAM_SCALED<int>( "defaults.zones.hatch_thickness", &m_defaultZoneSettings.m_HatchThickness,
+                                   std::max( pcbIUScale.mmToIU( ZONE_THICKNESS_MM ) * 4, pcbIUScale.mmToIU( 1.0 ) ),
+                                   pcbIUScale.mmToIU( 0.0 ), pcbIUScale.mmToIU( 25.0 ), pcbIUScale.MM_PER_IU ) );
+
+    m_params.emplace_back(
+            new PARAM_SCALED<int>( "defaults.zones.hatch_gap", &m_defaultZoneSettings.m_HatchGap,
+                                   std::max( pcbIUScale.mmToIU( ZONE_THICKNESS_MM ) * 6, pcbIUScale.mmToIU( 1.5 ) ),
+                                   pcbIUScale.mmToIU( 0.0 ), pcbIUScale.mmToIU( 25.0 ), pcbIUScale.MM_PER_IU ) );
+
+    m_params.emplace_back( new PARAM_LAMBDA<double>(
+            "defaults.zones.hatch_orientation",
+            [&]() -> double
+            {
+                return m_defaultZoneSettings.m_HatchOrientation.AsDegrees();
+            },
+            [&]( double aVal )
+            {
+                m_defaultZoneSettings.m_HatchOrientation = EDA_ANGLE( aVal, DEGREES_T );
+            },
+            0.0 ) );
+
+    m_params.emplace_back( new PARAM<int>( "defaults.zones.hatch_smoothing_level",
+                                           &m_defaultZoneSettings.m_HatchSmoothingLevel, 0, 0, 2 ) );
+
+    m_params.emplace_back( new PARAM<double>( "defaults.zones.hatch_smoothing_value",
+                                              &m_defaultZoneSettings.m_HatchSmoothingValue, 0.1, 0.0, 1.0 ) );
+
+    m_params.emplace_back( new PARAM_ENUM<ZONE_BORDER_DISPLAY_STYLE>(
+            "defaults.zones.border_display_style", &m_defaultZoneSettings.m_ZoneBorderDisplayStyle,
+            ZONE_BORDER_DISPLAY_STYLE::DIAGONAL_EDGE, ZONE_BORDER_DISPLAY_STYLE::NO_HATCH,
+            ZONE_BORDER_DISPLAY_STYLE::INVISIBLE_BORDER ) );
+
+    m_params.emplace_back( new PARAM_SCALED<int>(
+            "defaults.zones.border_hatch_pitch", &m_defaultZoneSettings.m_BorderHatchPitch,
+            pcbIUScale.mmToIU( ZONE_BORDER_HATCH_DIST_MM ), pcbIUScale.mmToIU( ZONE_BORDER_HATCH_MINDIST_MM ),
+            pcbIUScale.mmToIU( ZONE_BORDER_HATCH_MAXDIST_MM ), pcbIUScale.MM_PER_IU ) );
+
+    m_params.emplace_back(
+            new PARAM_SCALED<long>( "defaults.zones.thermal_relief_gap", &m_defaultZoneSettings.m_ThermalReliefGap,
+                                    pcbIUScale.mmToIU( ZONE_THERMAL_RELIEF_GAP_MM ), pcbIUScale.mmToIU( 0.0 ),
+                                    pcbIUScale.mmToIU( 25.0 ), pcbIUScale.MM_PER_IU ) );
+
+    m_params.emplace_back( new PARAM_SCALED<long>(
+            "defaults.zones.thermal_relief_spoke_width", &m_defaultZoneSettings.m_ThermalReliefSpokeWidth,
+            pcbIUScale.mmToIU( ZONE_THERMAL_RELIEF_COPPER_WIDTH_MM ), pcbIUScale.mmToIU( 0.0 ),
+            pcbIUScale.mmToIU( 25.0 ), pcbIUScale.MM_PER_IU ) );
+
+    m_params.emplace_back( new PARAM_LAMBDA<int>(
+            "defaults.zones.pad_connection",
+            [&]() -> int
+            {
+                return static_cast<int>( m_defaultZoneSettings.GetPadConnection() );
+            },
+            [&]( int aVal )
+            {
+                m_defaultZoneSettings.SetPadConnection( static_cast<ZONE_CONNECTION>( aVal ) );
+            },
+            static_cast<int>( ZONE_CONNECTION::THERMAL ) ) );
+
+    m_params.emplace_back( new PARAM_LAMBDA<int>(
+            "defaults.zones.corner_smoothing",
+            [&]() -> int
+            {
+                return m_defaultZoneSettings.GetCornerSmoothingType();
+            },
+            [&]( int aVal )
+            {
+                m_defaultZoneSettings.SetCornerSmoothingType( aVal );
+            },
+            ZONE_SETTINGS::SMOOTHING_NONE ) );
+
+    m_params.emplace_back( new PARAM_LAMBDA<double>(
+            "defaults.zones.corner_radius",
+            [&]() -> double
+            {
+                return pcbIUScale.IUTomm( m_defaultZoneSettings.GetCornerRadius() );
+            },
+            [&]( double aVal )
+            {
+                m_defaultZoneSettings.SetCornerRadius( pcbIUScale.mmToIU( aVal ) );
+            },
+            0.0 ) );
+
+    m_params.emplace_back( new PARAM_LAMBDA<int>(
+            "defaults.zones.remove_islands",
+            [&]() -> int
+            {
+                return static_cast<int>( m_defaultZoneSettings.GetIslandRemovalMode() );
+            },
+            [&]( int aVal )
+            {
+                m_defaultZoneSettings.SetIslandRemovalMode( static_cast<ISLAND_REMOVAL_MODE>( aVal ) );
+            },
+            static_cast<int>( ISLAND_REMOVAL_MODE::ALWAYS ) ) );
+
+    m_params.emplace_back( new PARAM_LAMBDA<double>(
+            "defaults.zones.min_island_area",
+            [&]() -> double
+            {
+                const double iuPerMm2 = pcbIUScale.IU_PER_MM * pcbIUScale.IU_PER_MM;
+                return static_cast<double>( m_defaultZoneSettings.GetMinIslandArea() ) / iuPerMm2;
+            },
+            [&]( double aVal )
+            {
+                const double iuPerMm2 = pcbIUScale.IU_PER_MM * pcbIUScale.IU_PER_MM;
+                m_defaultZoneSettings.SetMinIslandArea( static_cast<long long int>( aVal * iuPerMm2 ) );
+            },
+            10.0 ) );
+
     m_params.emplace_back( new PARAM_LAMBDA<nlohmann::json>( "defaults.pads",
             [&]() -> nlohmann::json
             {
@@ -1317,6 +1438,170 @@ SEVERITY BOARD_DESIGN_SETTINGS::GetSeverity( int aDRCErrorCode )
 bool BOARD_DESIGN_SETTINGS::Ignore( int aDRCErrorCode )
 {
     return m_DRCSeverities[ aDRCErrorCode ] == RPT_SEVERITY_IGNORE;
+}
+
+
+std::vector<BOARD_DESIGN_SETTINGS::VALIDATION_ERROR>
+BOARD_DESIGN_SETTINGS::ValidateDesignRules( std::optional<EDA_UNITS> aUnits ) const
+{
+    std::vector<VALIDATION_ERROR> errors;
+    EDA_UNITS                     units = aUnits.value_or( EDA_UNITS::MM );
+
+    auto addRangeError =
+            [&]( const wxString& aField, int aValue, int aMin, int aMax )
+            {
+                if( aValue < aMin || aValue > aMax )
+                {
+                    wxString minValue = EDA_UNIT_UTILS::UI::StringFromValue( pcbIUScale, units,
+                                                                              aMin, true );
+                    wxString maxValue = EDA_UNIT_UTILS::UI::StringFromValue( pcbIUScale, units,
+                                                                              aMax, true );
+
+                    errors.push_back( {
+                            aField,
+                            wxString::Format( _( "Value must be between %s and %s." ),
+                                              minValue, maxValue )
+                    } );
+                }
+            };
+
+    auto addRatioRangeError =
+            [&]( const wxString& aField, double aValue, double aMin, double aMax )
+            {
+                if( !std::isfinite( aValue ) || aValue < aMin || aValue > aMax )
+                {
+                    errors.push_back( {
+                            aField,
+                            wxString::Format( _( "Value must be between %.3f and %.3f." ),
+                                              aMin, aMax )
+                    } );
+                }
+            };
+
+    addRangeError( wxS( "min_clearance" ), m_MinClearance,
+                   pcbIUScale.mmToIU( 0.00 ), pcbIUScale.mmToIU( 25.0 ) );
+    addRangeError( wxS( "min_connection" ), m_MinConn,
+                   pcbIUScale.mmToIU( 0.00 ), pcbIUScale.mmToIU( 100.0 ) );
+    addRangeError( wxS( "min_track_width" ), m_TrackMinWidth,
+                   pcbIUScale.mmToIU( 0.00 ), pcbIUScale.mmToIU( 25.0 ) );
+    addRangeError( wxS( "min_via_annular_width" ), m_ViasMinAnnularWidth,
+                   pcbIUScale.mmToIU( 0.00 ), pcbIUScale.mmToIU( 25.0 ) );
+    addRangeError( wxS( "min_via_diameter" ), m_ViasMinSize,
+                   pcbIUScale.mmToIU( 0.00 ), pcbIUScale.mmToIU( 25.0 ) );
+    addRangeError( wxS( "min_through_hole_diameter" ), m_MinThroughDrill,
+                   pcbIUScale.mmToIU( 0.00 ), pcbIUScale.mmToIU( 25.0 ) );
+    addRangeError( wxS( "min_microvia_diameter" ), m_MicroViasMinSize,
+                   pcbIUScale.mmToIU( 0.00 ), pcbIUScale.mmToIU( 10.0 ) );
+    addRangeError( wxS( "min_microvia_drill" ), m_MicroViasMinDrill,
+                   pcbIUScale.mmToIU( 0.00 ), pcbIUScale.mmToIU( 10.0 ) );
+    addRangeError( wxS( "min_hole_to_hole" ), m_HoleToHoleMin,
+                   pcbIUScale.mmToIU( 0.00 ), pcbIUScale.mmToIU( 10.0 ) );
+    addRangeError( wxS( "min_hole_clearance" ), m_HoleClearance,
+                   pcbIUScale.mmToIU( 0.00 ), pcbIUScale.mmToIU( 100.0 ) );
+    addRangeError( wxS( "min_silk_clearance" ), m_SilkClearance,
+                   pcbIUScale.mmToIU( -10.0 ), pcbIUScale.mmToIU( 100.0 ) );
+    addRangeError( wxS( "min_groove_width" ), m_MinGrooveWidth,
+                   pcbIUScale.mmToIU( 0.00 ), pcbIUScale.mmToIU( 25.0 ) );
+    addRangeError( wxS( "min_text_height" ), m_MinSilkTextHeight,
+                   pcbIUScale.mmToIU( 0.00 ), pcbIUScale.mmToIU( 100.0 ) );
+    addRangeError( wxS( "min_text_thickness" ), m_MinSilkTextThickness,
+                   pcbIUScale.mmToIU( 0.00 ), pcbIUScale.mmToIU( 25.0 ) );
+    addRangeError( wxS( "min_copper_edge_clearance" ), m_CopperEdgeClearance,
+                   pcbIUScale.mmToIU( -0.01 ), pcbIUScale.mmToIU( 25.0 ) );
+
+    if( m_MinResolvedSpokes < 0 || m_MinResolvedSpokes > 99 )
+    {
+        errors.push_back( {
+                wxS( "min_resolved_spokes" ),
+                _( "Value must be between 0 and 99." )
+        } );
+    }
+
+    addRangeError( wxS( "max_error" ), m_MaxError,
+                   pcbIUScale.mmToIU( MINIMUM_ERROR_SIZE_MM ),
+                   pcbIUScale.mmToIU( MAXIMUM_ERROR_SIZE_MM ) );
+
+    addRangeError( wxS( "solder_mask_expansion" ), m_SolderMaskExpansion,
+                   pcbIUScale.mmToIU( -25.0 ), pcbIUScale.mmToIU( 25.0 ) );
+    addRangeError( wxS( "solder_mask_min_width" ), m_SolderMaskMinWidth,
+                   pcbIUScale.mmToIU( 0.0 ), pcbIUScale.mmToIU( 25.0 ) );
+    addRangeError( wxS( "solder_mask_to_copper_clearance" ), m_SolderMaskToCopperClearance,
+                   pcbIUScale.mmToIU( 0.0 ), pcbIUScale.mmToIU( 25.0 ) );
+    addRangeError( wxS( "solder_paste_margin" ), m_SolderPasteMargin,
+                   pcbIUScale.mmToIU( -25.0 ), pcbIUScale.mmToIU( 25.0 ) );
+    addRatioRangeError( wxS( "solder_paste_margin_ratio" ), m_SolderPasteMarginRatio,
+                        -1.0, 1.0 );
+
+    TEARDROP_PARAMETERS_LIST& teardropParamsList =
+            const_cast<TEARDROP_PARAMETERS_LIST&>( m_TeardropParamsList );
+
+    for( size_t ii = 0; ii < teardropParamsList.GetParametersCount(); ++ii )
+    {
+        const TEARDROP_PARAMETERS* params = teardropParamsList.GetParameters( static_cast<TARGET_TD>( ii ) );
+        std::string target = GetTeardropTargetCanonicalName( static_cast<TARGET_TD>( ii ) );
+
+        if( params->m_TdMaxLen < 0 )
+        {
+            errors.push_back( {
+                    wxString::Format( wxS( "teardrop_parameters[%s].max_length" ), target ),
+                    _( "Value must be greater than or equal to 0." )
+            } );
+        }
+
+        if( params->m_TdMaxWidth < 0 )
+        {
+            errors.push_back( {
+                    wxString::Format( wxS( "teardrop_parameters[%s].max_width" ), target ),
+                    _( "Value must be greater than or equal to 0." )
+            } );
+        }
+
+        addRatioRangeError( wxString::Format( wxS( "teardrop_parameters[%s].best_length_ratio" ), target ),
+                            params->m_BestLengthRatio, 0.0, 1.0 );
+        addRatioRangeError( wxString::Format( wxS( "teardrop_parameters[%s].best_width_ratio" ), target ),
+                            params->m_BestWidthRatio, 0.0, 1.0 );
+        addRatioRangeError( wxString::Format( wxS( "teardrop_parameters[%s].width_to_size_filter_ratio" ),
+                                              target ),
+                            params->m_WidthtoSizeFilterRatio, 0.0, 1.0 );
+    }
+
+    for( size_t ii = 1; ii < m_DiffPairDimensionsList.size(); ++ii )
+    {
+        const DIFF_PAIR_DIMENSION& diffPair = m_DiffPairDimensionsList[ii];
+
+        if( diffPair.m_Width > 0 && diffPair.m_Gap <= 0 )
+        {
+            errors.push_back( {
+                    wxString::Format( wxS( "diff_pair_dimensions_list[%zu].gap" ), ii ),
+                    _( "No differential pair gap defined." )
+            } );
+        }
+    }
+
+    for( size_t ii = 1; ii < m_ViasDimensionsList.size(); ++ii )
+    {
+        const VIA_DIMENSION& viaDim = m_ViasDimensionsList[ii];
+
+        std::optional<int> viaDiameter;
+        std::optional<int> viaDrill;
+
+        if( viaDim.m_Diameter > 0 )
+            viaDiameter = viaDim.m_Diameter;
+
+        if( viaDim.m_Drill > 0 )
+            viaDrill = viaDim.m_Drill;
+
+        if( std::optional<PCB_VIA::VIA_PARAMETER_ERROR> error =
+                    PCB_VIA::ValidateViaParameters( viaDiameter, viaDrill ) )
+        {
+            errors.push_back( {
+                    wxString::Format( wxS( "via_dimensions_list[%zu]" ), ii ),
+                    error->m_Message
+            } );
+        }
+    }
+
+    return errors;
 }
 
 

@@ -113,16 +113,8 @@ static std::unique_ptr<SCHEMATIC> readSchematicFromFile( const std::string& aFil
 
     if( !project )
     {
-        if( wxFileExists( projectPath ) )
-        {
-            // cli
-            manager.LoadProject( projectPath, true );
-            project = manager.GetProject( projectPath );
-        }
-        else
-        {
-            manager.LoadProject( "" );
-        }
+        manager.LoadProject( projectPath, true );
+        project = manager.GetProject( projectPath );
     }
 
     schematic->Reset();
@@ -315,7 +307,7 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
             for( ACTION_TOOLBAR_CONTROL* control : ACTION_TOOLBAR::GetCustomControlList( FRAME_SCH_SYMBOL_EDITOR ) )
                 controls.push_back( control );
 
-            return new PANEL_TOOLBAR_CUSTOMIZATION( aParent, cfg, tb, actions, controls );
+            return new PANEL_TOOLBAR_CUSTOMIZATION( aParent, cfg, tb, FRAME_SCH_SYMBOL_EDITOR, actions, controls );
         }
 
         case PANEL_SYM_COLORS:
@@ -371,7 +363,7 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
             for( ACTION_TOOLBAR_CONTROL* control : ACTION_TOOLBAR::GetCustomControlList( FRAME_SCH ) )
                 controls.push_back( control );
 
-            return new PANEL_TOOLBAR_CUSTOMIZATION( aParent, cfg, tb, actions, controls );
+            return new PANEL_TOOLBAR_CUSTOMIZATION( aParent, cfg, tb, FRAME_SCH, actions, controls );
         }
 
         case PANEL_SCH_COLORS:
@@ -817,6 +809,10 @@ void IFACE::closeCurrentDocument( KICAD_API_SERVER* aServer )
 
     delete m_openSchematic;
     m_openSchematic = nullptr;
+
+    // The jobs handler caches the last-loaded schematic. Clear it so the next job
+    // uses the schematic from the newly opened document rather than a stale copy.
+    m_jobHandler->ClearCachedSchematic();
 }
 
 
@@ -841,6 +837,11 @@ bool IFACE::HandleApiOpenDocument( const wxString& aPath, KICAD_API_SERVER* aSer
         projectPath.SetExt( FILEEXT::ProjectFileExtension );
 
     projectPath.MakeAbsolute();
+
+    // Close any existing document before loading a new project. LoadProject with
+    // aSetActive=true destroys the old PROJECT, which would leave the old schematic
+    // and context holding dangling project pointers.
+    closeCurrentDocument( aServer );
 
     SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
 
@@ -892,7 +893,6 @@ bool IFACE::HandleApiOpenDocument( const wxString& aPath, KICAD_API_SERVER* aSer
         return false;
     }
 
-    closeCurrentDocument( aServer );
     m_openSchematic = schematic;
 
     m_openContext = std::make_shared<HEADLESS_SCH_CONTEXT>( m_openSchematic, project, m_kiway );

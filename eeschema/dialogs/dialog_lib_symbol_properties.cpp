@@ -86,6 +86,7 @@ DIALOG_LIB_SYMBOL_PROPERTIES::DIALOG_LIB_SYMBOL_PROPERTIES( SYMBOL_EDIT_FRAME* a
 
     m_fields = new FIELDS_GRID_TABLE( this, aParent, m_grid, m_libEntry, { m_embeddedFiles->GetLocalFiles() } );
     m_grid->SetTable( m_fields );
+    m_grid->OverrideMinSize( 1.0, 1.0 );
     m_grid->PushEventHandler( new FIELDS_GRID_TRICKS( m_grid, this, { m_embeddedFiles->GetLocalFiles() },
                                                       [&]( wxCommandEvent& aEvent )
                                                       {
@@ -485,6 +486,29 @@ bool DIALOG_LIB_SYMBOL_PROPERTIES::Validate()
         if( parentName.IsEmpty() )
         {
             m_delayedErrorMessage = _( "Derived symbol must have a parent selected" );
+            return false;
+        }
+    }
+
+    if( !m_unitNamesGrid->CommitPendingChanges() )
+        return false;
+
+    std::set<wxString> seenSubRefs;
+
+    for( int row = 0; row < m_unitNamesGrid->GetNumberRows(); ++row )
+    {
+        wxString subRef = m_unitNamesGrid->GetCellValue( row, 1 );
+
+        if( subRef.IsEmpty() )
+            subRef = LIB_SYMBOL::LetterSubReference( row + 1, 'A' );
+
+        if( !seenSubRefs.insert( subRef.Upper() ).second )
+        {
+            m_delayedErrorMessage = wxString::Format( _( "The unit name '%s' is already in use." ), subRef );
+            m_delayedFocusGrid = m_unitNamesGrid;
+            m_delayedFocusColumn = 1;
+            m_delayedFocusRow = row;
+            m_delayedFocusPage = 1;
             return false;
         }
     }

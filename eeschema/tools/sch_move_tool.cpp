@@ -345,7 +345,11 @@ void SCH_MOVE_TOOL::orthoLineDrag( SCH_COMMIT* aCommit, SCH_LINE* line, const VE
                 for( auto& [label, info] : m_specialCaseLabels )
                 {
                     if( info.attachedLine == bendLine || info.attachedLine == foundLine )
+                    {
                         info.attachedLine = line;
+                        info.originalLineStart = line->GetStartPoint();
+                        info.originalLineEnd = line->GetEndPoint();
+                    }
                 }
 
                 m_lineConnectionCache[line] = m_lineConnectionCache[bendLine];
@@ -439,8 +443,19 @@ void SCH_MOVE_TOOL::orthoLineDrag( SCH_COMMIT* aCommit, SCH_LINE* line, const VE
             {
                 SCH_LABEL_BASE* label = dynamic_cast<SCH_LABEL_BASE*>( candidate );
 
-                if( label && m_specialCaseLabels.count( label ) )
+                if( !label || !m_specialCaseLabels.count( label ) )
+                    continue;
+
+                if( label->GetPosition() == selectedEnd )
+                {
+                    m_specialCaseLabels[label].trackMovingEnd = true;
+                }
+                else
+                {
                     m_specialCaseLabels[label].attachedLine = a;
+                    m_specialCaseLabels[label].originalLineStart = a->GetStartPoint();
+                    m_specialCaseLabels[label].originalLineEnd = a->GetEndPoint();
+                }
             }
 
             // We just broke off of the existing items, so replace all of them with our new end
@@ -859,6 +874,16 @@ bool SCH_MOVE_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aComm
                 evt->SetPassEvent( false );
                 restore_state = true;
             }
+            else if( m_mode == BREAK || m_mode == SLICE )
+            {
+                // preprocessBreakOrSliceSelection() split the wire before any motion arrived,
+                // so cancel must roll those edits back.  Activations still pass through so the
+                // requested tool starts.
+                if( !evt->IsActivate() )
+                    evt->SetPassEvent( false );
+
+                restore_state = true;
+            }
 
             clearNewDragLines();
 
@@ -954,6 +979,13 @@ bool SCH_MOVE_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aComm
     if( restore_state )
     {
         m_selectionTool->RemoveItemsFromSel( &m_dragAdditions, QUIET_MODE );
+
+        // Clear the split-segment selection that preprocessBreakOrSliceSelection() built
+        // before the caller's Revert() runs.  Revert() rebuilds selection from the screen,
+        // so leaving the splits selected keeps the restored wire hidden until the next
+        // selection refresh.
+        if( m_mode == BREAK || m_mode == SLICE )
+            m_toolMgr->RunAction( ACTIONS::selectionClear );
     }
     else
     {
@@ -1043,6 +1075,8 @@ SCH_SELECTION& SCH_MOVE_TOOL::prepareSelection( bool& aUnselect )
     // looking for the stuff under mouse cursor (i.e. KiCad old-style hover selection).
     SCH_SELECTION& selection = m_selectionTool->RequestSelection( SCH_COLLECTOR::MovableItems, true );
     aUnselect = selection.IsHover();
+
+    m_selectionTool->FilterSelectionForLockedItems();
 
     return selection;
 }
@@ -1365,7 +1399,7 @@ SCH_SHEET* SCH_MOVE_TOOL::findTargetSheet( const SCH_SELECTION& aSelection, cons
     // Determine potential target sheet
     SCH_SHEET* sheet = dynamic_cast<SCH_SHEET*>( m_frame->GetScreen()->GetItem( aCursorPos, 0, SCH_SHEET_T ) );
 
-    if( sheet && sheet->IsSelected() )
+    if( sheet && ( sheet->IsSelected() || sheet->HasFlag( IS_MOVING ) ) )
         sheet = nullptr;  // Never target a selected sheet
 
     if( !sheet )
@@ -1390,7 +1424,7 @@ SCH_SHEET* SCH_MOVE_TOOL::findTargetSheet( const SCH_SELECTION& aSelection, cons
             {
                 SCH_SHEET* candidate = static_cast<SCH_SHEET*>( it );
 
-                if( candidate->IsSelected() || candidate->IsTopLevelSheet() )
+                if( candidate->IsSelected() || candidate->IsTopLevelSheet() || candidate->HasFlag( IS_MOVING ) )
                     continue;
 
                 BOX2I body = candidate->GetBodyBoundingBox();
@@ -1526,10 +1560,32 @@ void SCH_MOVE_TOOL::performItemMove( SCH_SELECTION& aSelection, const VECTOR2I& 
         // on the line. The label moves by splitDelta for each part of the split move, but the
         // line endpoints may not follow splitDelta due to orthogonal drag or sheet pin constraints,
         // which can put the label off the line.
-        for( const auto& [label, info] : m_specialCaseLabels )
+        for( auto& [label, info] : m_specialCaseLabels )
         {
             if( !label || !info.attachedLine )
                 continue;
+
+            if( info.trackMovingEnd )
+            {
+                label->Move( splitDelta );
+
+                VECTOR2I start = info.attachedLine->GetStartPoint();
+                VECTOR2I end = info.attachedLine->GetEndPoint();
+
+                if( info.attachedLine->GetLength() > 0
+                    && info.attachedLine->HitTest( info.originalLabelPos, 1 )
+                    && info.originalLabelPos != start
+                    && info.originalLabelPos != end )
+                {
+                    info.trackMovingEnd = false;
+                    label->SetPosition( info.originalLabelPos );
+                    info.originalLineStart = start;
+                    info.originalLineEnd = end;
+                }
+
+                updateItem( label, false );
+                continue;
+            }
 
             VECTOR2I start = info.attachedLine->GetStartPoint();
             VECTOR2I end = info.attachedLine->GetEndPoint();
@@ -1537,7 +1593,6 @@ void SCH_MOVE_TOOL::performItemMove( SCH_SELECTION& aSelection, const VECTOR2I& 
             VECTOR2I deltaEnd = end - info.originalLineEnd;
 
             // TODO: this could be improved by positioning the label based on the new line geometry,
-            // including line angle changes, grid snapping, and line length changes when orthogonal
             // bends are involved.
             //
             // For now, special casing the equal delta case and using splitDelta should work in most
@@ -1548,30 +1603,22 @@ void SCH_MOVE_TOOL::performItemMove( SCH_SELECTION& aSelection, const VECTOR2I& 
             }
             else
             {
-                label->Move( splitDelta );
+                bool     startDrags = info.attachedLine->HasFlag( STARTPOINT );
+                VECTOR2I fixedEndDelta = startDrags ? deltaEnd : deltaStart;
+
+                label->SetPosition( info.originalLabelPos + fixedEndDelta );
 
                 // If the line shrank while dragging, keep the label on the line,
                 // otherwise the label can drift off the end of the line, and change connectivity
-                if( !info.attachedLine->HitTest( label->GetPosition(), 1 ) && info.attachedLine->IsOrthogonal() )
+                if( !info.attachedLine->HitTest( label->GetPosition(), 1 ) )
                 {
-                    VECTOR2I pos = label->GetPosition();
+                    SEG seg( start, end );
+                    label->SetPosition( seg.NearestPoint( label->GetPosition() ) );
 
-                    if( start.x == end.x )
-                    {
-                        int minY = std::min( start.y, end.y );
-                        int maxY = std::max( start.y, end.y );
-                        pos.x = start.x;
-                        pos.y = std::clamp( pos.y, minY, maxY );
-                    }
-                    else if( start.y == end.y )
-                    {
-                        int minX = std::min( start.x, end.x );
-                        int maxX = std::max( start.x, end.x );
-                        pos.y = start.y;
-                        pos.x = std::clamp( pos.x, minX, maxX );
-                    }
+                    VECTOR2I movingEnd = startDrags ? start : end;
 
-                    label->SetPosition( pos );
+                    if( label->GetPosition() == movingEnd )
+                        info.trackMovingEnd = true;
                 }
             }
 
@@ -1835,13 +1882,36 @@ void SCH_MOVE_TOOL::finalizeMoveOperation( SCH_SELECTION& aSelection, SCH_COMMIT
 
     m_frame->Schematic().CleanUp( aCommit );
 
+    // Mirror the IS_MOVING flag propagation done at the start of the move so that child items
+    // (e.g. label fields, symbol pins/fields) don't keep their edit flags after the move ends.
+    auto clearChildEditFlags =
+            []( SCH_ITEM* aItem )
+            {
+                aItem->RunOnChildren(
+                        []( SCH_ITEM* aChild )
+                        {
+                            aChild->ClearEditFlags();
+                        },
+                        RECURSE_MODE::RECURSE );
+            };
+
     for( EDA_ITEM* item : m_frame->GetScreen()->Items() )
+    {
         item->ClearEditFlags();
+
+        if( SCH_ITEM* schItem = dynamic_cast<SCH_ITEM*>( item ) )
+            clearChildEditFlags( schItem );
+    }
 
     // Ensure any selected item not in screen main list (for instance symbol fields) has its
     // edit flags cleared
     for( EDA_ITEM* item : selectionCopy )
+    {
         item->ClearEditFlags();
+
+        if( SCH_ITEM* schItem = dynamic_cast<SCH_ITEM*>( item ) )
+            clearChildEditFlags( schItem );
+    }
 
     m_newDragLines.clear();
     m_changedDragLines.clear();
@@ -1919,12 +1989,25 @@ void SCH_MOVE_TOOL::trimDanglingLines( SCH_COMMIT* aCommit )
             {
                 m_toolMgr->GetView()->Update( aChangedItem, KIGFX::REPAINT );
 
-                // Delete newly dangling lines:
-                // Find split segments (one segment is new, the other is changed) that
-                // we aren't dragging and don't have selected.
-                // Also catch drag wires (created with IS_NEW and SELECTED_BY_DRAG) that are dangling.
-                if( ( aChangedItem->HasFlag( IS_BROKEN ) || aChangedItem->HasFlag( IS_NEW ) )
-                    && aChangedItem->IsDangling() && !aChangedItem->IsSelected() )
+                if( aChangedItem->IsSelected() )
+                    return;
+
+                SCH_LINE* line = dynamic_cast<SCH_LINE*>( aChangedItem );
+
+                if( !line )
+                    return;
+
+                // Split segments that are dangling get trimmed back since they extend
+                // past the break point.
+                if( line->HasFlag( IS_BROKEN ) && line->IsDangling() )
+                {
+                    danglers.insert( aChangedItem );
+                }
+                // Drag wires that are completely disconnected (both ends dangling) are
+                // stubs that should be removed. Wires with only one connected end are
+                // still providing connectivity and must be preserved.
+                else if( line->HasFlag( IS_NEW ) && !line->HasFlag( IS_BROKEN )
+                         && line->IsStartDangling() && line->IsEndDangling() )
                 {
                     danglers.insert( aChangedItem );
                 }
@@ -2552,6 +2635,9 @@ int SCH_MOVE_TOOL::AlignToGrid( const TOOL_EVENT& aEvent )
 {
     EE_GRID_HELPER    grid( m_toolMgr);
     SCH_SELECTION&    selection = m_selectionTool->RequestSelection( SCH_COLLECTOR::MovableItems );
+
+    m_selectionTool->FilterSelectionForLockedItems();
+
     GRID_HELPER_GRIDS selectionGrid = grid.GetSelectionGrid( selection );
     SCH_COMMIT        commit( m_toolMgr );
 

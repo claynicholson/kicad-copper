@@ -68,8 +68,10 @@ BOARD_STACKUP_ITEM::BOARD_STACKUP_ITEM( BOARD_STACKUP_ITEM_TYPE aType )
         m_TypeName = KEY_CORE;          // or prepreg
         SetColor( NotSpecifiedPrm() );
         SetMaterial( wxT( "FR4" ) );    // or other dielectric name
-        SetLossTangent( 0.02 );         // for FR4
-        SetEpsilonR( 4.5 );             // for FR4
+        SetLossTangent( 0.02 ); // for FR4
+        SetEpsilonR( 4.5 );         // for FR4
+        SetSpecFreq( 1e9 );         // for FR4
+        SetDielectricModel( DIELECTRIC_MODEL::CONSTANT );
         break;
 
     case BS_ITEM_TYPE_SOLDERPASTE:
@@ -195,6 +197,22 @@ double BOARD_STACKUP_ITEM::GetLossTangent( int aDielectricSubLayer ) const
 }
 
 
+double BOARD_STACKUP_ITEM::GetSpecFreq( int aDielectricSubLayer ) const
+{
+    wxASSERT( aDielectricSubLayer >= 0 && aDielectricSubLayer < GetSublayersCount() );
+
+    return m_DielectricPrmsList[aDielectricSubLayer].m_SpecFreq;
+}
+
+
+DIELECTRIC_MODEL BOARD_STACKUP_ITEM::GetDielectricModel( int aDielectricSubLayer ) const
+{
+    wxASSERT( aDielectricSubLayer >= 0 && aDielectricSubLayer < GetSublayersCount() );
+
+    return m_DielectricPrmsList[aDielectricSubLayer].m_DielectricModel;
+}
+
+
 double BOARD_STACKUP_ITEM::GetEpsilonR( int aDielectricSubLayer ) const
 {
     wxASSERT( aDielectricSubLayer >= 0 && aDielectricSubLayer < GetSublayersCount() );
@@ -247,6 +265,24 @@ void BOARD_STACKUP_ITEM::SetLossTangent( double aTg, int aDielectricSubLayer )
 }
 
 
+void BOARD_STACKUP_ITEM::SetSpecFreq( const double aSpecFreq, const int aDielectricSubLayer )
+{
+    wxASSERT( aDielectricSubLayer >= 0 && aDielectricSubLayer < GetSublayersCount() );
+
+    if( aDielectricSubLayer >= 0 && aDielectricSubLayer < GetSublayersCount() )
+        m_DielectricPrmsList[aDielectricSubLayer].m_SpecFreq = aSpecFreq;
+}
+
+
+void BOARD_STACKUP_ITEM::SetDielectricModel( DIELECTRIC_MODEL aModel, int aDielectricSubLayer )
+{
+    wxASSERT( aDielectricSubLayer >= 0 && aDielectricSubLayer < GetSublayersCount() );
+
+    if( aDielectricSubLayer >= 0 && aDielectricSubLayer < GetSublayersCount() )
+        m_DielectricPrmsList[aDielectricSubLayer].m_DielectricModel = aModel;
+}
+
+
 void BOARD_STACKUP_ITEM::SetEpsilonR( double aEpsilon, int aDielectricSubLayer )
 {
     wxASSERT( aDielectricSubLayer >= 0 && aDielectricSubLayer < GetSublayersCount() );
@@ -286,6 +322,12 @@ bool BOARD_STACKUP_ITEM::HasLossTangentValue() const
     return m_Type == BS_ITEM_TYPE_DIELECTRIC
             || m_Type == BS_ITEM_TYPE_SOLDERMASK;
 };
+
+
+bool BOARD_STACKUP_ITEM::HasSpecFreqValue() const
+{
+    return m_Type == BS_ITEM_TYPE_DIELECTRIC;
+}
 
 
 bool BOARD_STACKUP_ITEM::HasMaterialValue( int aDielectricSubLayer ) const
@@ -794,6 +836,18 @@ void BOARD_STACKUP::FormatBoardStackup( OUTPUTFORMATTER* aFormatter, const BOARD
                 aFormatter->Print( "(loss_tangent %s)",
                                    FormatDouble2Str( item->GetLossTangent( idx ) ).c_str() );
             }
+
+            if( item->HasSpecFreqValue() && item->HasMaterialValue( idx ) )
+            {
+                aFormatter->Print( "(spec_frequency %s)", FormatDouble2Str( item->GetSpecFreq( idx ) ).c_str() );
+
+                wxString modelToken = wxT( "constant" );
+
+                if( item->GetDielectricModel( idx ) == DIELECTRIC_MODEL::DJORDJEVIC_SARKAR )
+                    modelToken = wxT( "djordjevic_sarkar" );
+
+                aFormatter->Print( "(dielectric_model %s)", modelToken.ToStdString().c_str() );
+            }
         }
 
         aFormatter->Print( ")" );
@@ -831,25 +885,43 @@ int BOARD_STACKUP::GetLayerDistance( PCB_LAYER_ID aFirstLayer, PCB_LAYER_ID aSec
 
     int total = 0;
     bool start = false;
+    bool half = false;
 
-    for( BOARD_STACKUP_ITEM* item : m_list )
+    for( const BOARD_STACKUP_ITEM* item : m_list )
     {
         // Will be UNDEFINED_LAYER for dielectrics
-        PCB_LAYER_ID layer = item->GetBrdLayerId();
+        const PCB_LAYER_ID layer = item->GetBrdLayerId();
 
         if( layer != UNDEFINED_LAYER && !IsCopperLayer( layer ) )
             continue;   // Silk/mask layer
 
         // Reached the start copper layer?  Start counting the next dielectric after it
         if( !start && ( layer != UNDEFINED_LAYER && layer == aFirstLayer ) )
+        {
             start = true;
+
+            // Only count half of each internal copper layer
+            if( aFirstLayer != F_Cu && aFirstLayer != B_Cu )
+                half = true;
+        }
         else if( !start )
             continue;
 
+        // Reached the stop copper layer?  we're done
+        if( start && ( layer != UNDEFINED_LAYER && layer == aSecondLayer ) )
+        {
+            // Only count half of each internal copper layer
+            if( aSecondLayer != F_Cu && aSecondLayer != B_Cu )
+                half = true;
+        }
+
         for( int sublayer = 0; sublayer < item->GetSublayersCount(); sublayer++ )
         {
-            total += item->GetThickness( sublayer );
+            const int subThickness = item->GetThickness( sublayer );
+            total += half ? ( subThickness / 2 ) : subThickness;
         }
+
+        half = false;
 
         if( layer != UNDEFINED_LAYER && layer == aSecondLayer )
             break;

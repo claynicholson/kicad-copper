@@ -706,7 +706,7 @@ void DIALOG_LIB_FIELDS_TABLE::OnAddField(wxCommandEvent& event)
 
     for( int i = 0; i < m_dataModel->GetNumberCols(); ++i )
     {
-        if( fieldName == m_dataModel->GetColFieldName( i ) )
+        if( fieldName.CmpNoCase( m_dataModel->GetColFieldName( i ) ) == 0 )
         {
             DisplayError( this, wxString::Format( _( "Field name '%s' already in use." ), fieldName ) );
             return;
@@ -1054,7 +1054,12 @@ void DIALOG_LIB_FIELDS_TABLE::UpdateFieldList()
     AddField( wxS( "LocalPower" ), _( "Local Power Symbol" ), true, false, false, true );
 
     // User fields next
-    std::set<wxString> userFieldNames;
+    auto caseInsensitiveLess = []( const wxString& a, const wxString& b )
+    {
+        return a.CmpNoCase( b ) < 0;
+    };
+
+    std::map<wxString, std::map<wxString, int>, decltype( caseInsensitiveLess )> userFieldGroups( caseInsensitiveLess );
 
     for( LIB_SYMBOL* symbol : m_symbolsList )
     {
@@ -1064,12 +1069,26 @@ void DIALOG_LIB_FIELDS_TABLE::UpdateFieldList()
         for( SCH_FIELD* field : fields )
         {
             if( !field->IsMandatory() && !field->IsPrivate() )
-                userFieldNames.insert( field->GetName() );
+                userFieldGroups[field->GetName()][field->GetName()]++;
         }
     }
 
-    for( const wxString& fieldName : userFieldNames )
-        AddField( fieldName, GetGeneratedFieldDisplayName( fieldName ), true, false );
+    for( const auto& [groupKey, exactCounts] : userFieldGroups )
+    {
+        wxString canonicalName;
+        int      bestCount = -1;
+
+        for( const auto& [name, count] : exactCounts )
+        {
+            if( count > bestCount )
+            {
+                bestCount = count;
+                canonicalName = name;
+            }
+        }
+
+        AddField( canonicalName, GetGeneratedFieldDisplayName( canonicalName ), true, false );
+    }
 }
 
 
@@ -1080,7 +1099,7 @@ void DIALOG_LIB_FIELDS_TABLE::AddField( const wxString& aFieldName, const wxStri
     // e.g. ${QUANTITY} so make sure we don't add them twice
     for( int row = 0; row < m_viewControlsDataModel->GetNumberRows(); row++ )
     {
-        if( m_viewControlsDataModel->GetCanonicalFieldName( row ) == aFieldName )
+        if( m_viewControlsDataModel->GetCanonicalFieldName( row ).CmpNoCase( aFieldName ) == 0 )
             return;
     }
 

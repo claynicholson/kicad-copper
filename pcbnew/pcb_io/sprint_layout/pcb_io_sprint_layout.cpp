@@ -30,8 +30,10 @@
 #include <font/fontconfig.h>
 #include <reporter.h>
 
+#include <ranges>
 #include <wx/filename.h>
 #include <wx/wfstream.h>
+#include <wx/dir.h>
 
 
 PCB_IO_SPRINT_LAYOUT::PCB_IO_SPRINT_LAYOUT() :
@@ -40,7 +42,76 @@ PCB_IO_SPRINT_LAYOUT::PCB_IO_SPRINT_LAYOUT() :
 }
 
 
-PCB_IO_SPRINT_LAYOUT::~PCB_IO_SPRINT_LAYOUT() = default;
+void PCB_IO_SPRINT_LAYOUT::FootprintEnumerate( wxArrayString& aFootprintNames, const wxString& aLibraryPath,
+                                               bool aBestEfforts, const std::map<std::string, UTF8>* aProperties )
+{
+    wxFileName libFn( aLibraryPath );
+
+    if( libFn.FileExists() && libFn.GetExt().Upper() == wxS( "LMK" ) )
+    {
+        aFootprintNames.Add( libFn.GetName() );
+        return;
+    }
+
+    if( wxDir::Exists( aLibraryPath ) )
+    {
+        wxArrayString files;
+        wxDir::GetAllFiles( aLibraryPath, &files, wxEmptyString, wxDIR_FILES | wxDIR_DIRS );
+
+        for( const wxString& filePath : files )
+        {
+            wxFileName file( filePath );
+
+            if( file.GetExt().Upper() != wxS( "LMK" ) )
+                continue;
+
+            file.MakeRelativeTo( aLibraryPath );
+            aFootprintNames.Add( file.GetFullPath().BeforeLast( '.' ) );
+        }
+    }
+}
+
+
+FOOTPRINT* PCB_IO_SPRINT_LAYOUT::FootprintLoad( const wxString& aLibraryPath, const wxString& aFootprintName,
+                                                bool aKeepUUID, const std::map<std::string, UTF8>* aProperties )
+{
+    wxFileName libFn( aLibraryPath );
+    wxFileName lmkPath;
+
+    if( libFn.FileExists() && libFn.GetExt().Upper() == wxS( "LMK" ) )
+    {
+        lmkPath = libFn;
+    }
+    else
+    {
+        if( !wxDir::Exists( aLibraryPath ) )
+            return nullptr;
+
+        lmkPath = wxFileName( aLibraryPath + wxFileName::GetPathSeparator() + aFootprintName + wxS( ".LMK" ) );
+
+        if( !lmkPath.FileExists() )
+        {
+            lmkPath.SetExt( "lmk" );
+
+            if( !lmkPath.FileExists() )
+                return nullptr;
+        }
+    }
+
+    SPRINT_LAYOUT_PARSER parser;
+
+    if( !parser.ParseMacroFile( lmkPath.GetFullPath() ) )
+        return nullptr;
+
+    return parser.CreateFootprint();
+}
+
+
+PCB_IO_SPRINT_LAYOUT::~PCB_IO_SPRINT_LAYOUT()
+{
+    for( std::unique_ptr<FOOTPRINT>& fp : m_loadedFootprints | std::views::values )
+        fp->SetParent( nullptr );
+}
 
 
 bool PCB_IO_SPRINT_LAYOUT::CanReadBoard( const wxString& aFileName ) const
@@ -85,7 +156,7 @@ BOARD* PCB_IO_SPRINT_LAYOUT::LoadBoard( const wxString& aFileName, BOARD* aAppen
 
     SPRINT_LAYOUT_PARSER parser;
 
-    if( !parser.Parse( aFileName ) )
+    if( !parser.ParseBoard( aFileName ) )
     {
         THROW_IO_ERROR( wxString::Format( _( "Failed to parse Sprint Layout file '%s'" ),
                                           aFileName ) );

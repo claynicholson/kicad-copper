@@ -123,7 +123,7 @@ PAD::PAD( const PAD& aOther ) :
 {
     PAD::operator=( aOther );
 
-    const_cast<KIID&>( m_Uuid ) = aOther.m_Uuid;
+    SetUuidDirect( aOther.m_Uuid );
 }
 
 
@@ -222,7 +222,7 @@ bool PAD::Deserialize( const google::protobuf::Any &aContainer )
     if( !aContainer.UnpackTo( &pad ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( pad.id().value() );
+    SetUuidDirect( KIID( pad.id().value() ) );
     SetPosition( kiapi::common::UnpackVector2( pad.position() ) );
     UnpackNet( pad.net() );
     SetLocked( pad.locked() == kiapi::common::types::LockedState::LS_LOCKED );
@@ -1570,6 +1570,24 @@ VECTOR2I PAD::ShapePos( PCB_LAYER_ID aLayer ) const
 }
 
 
+void PAD::SwapShapePositions( PAD* aLhs, PAD* aRhs )
+{
+    wxCHECK( aLhs && aRhs, /* void */ );
+
+    VECTOR2I lhsShapePos = aLhs->ShapePos( PADSTACK::ALL_LAYERS );
+    VECTOR2I rhsShapePos = aRhs->ShapePos( PADSTACK::ALL_LAYERS );
+
+    VECTOR2I lhsOffset = aLhs->GetOffset( PADSTACK::ALL_LAYERS );
+    VECTOR2I rhsOffset = aRhs->GetOffset( PADSTACK::ALL_LAYERS );
+
+    RotatePoint( lhsOffset, aLhs->GetOrientation() );
+    RotatePoint( rhsOffset, aRhs->GetOrientation() );
+
+    aLhs->SetPosition( rhsShapePos - lhsOffset );
+    aRhs->SetPosition( lhsShapePos - rhsOffset );
+}
+
+
 bool PAD::IsOnCopperLayer() const
 {
     if( GetAttribute() == PAD_ATTRIB::NPTH )
@@ -1887,6 +1905,14 @@ void PAD::GetMsgPanelInfo( EDA_DRAW_FRAME* aFrame, std::vector<MSG_PANEL_ITEM>& 
     if( aFrame->GetName() == PCB_EDIT_FRAME_NAME )
     {
         aList.emplace_back( _( "Net" ), UnescapeString( GetNetname() ) );
+
+        if( NETINFO_ITEM* netInfo = GetNet() )
+        {
+            const wxString& chainName = netInfo->GetNetChain();
+
+            if( !chainName.IsEmpty() )
+                aList.emplace_back( _( "Net Chain" ), UnescapeString( chainName ) );
+        }
 
         aList.emplace_back( _( "Resolved Netclass" ),
                             UnescapeString( GetEffectiveNetClass()->GetHumanReadableName() ) );
@@ -2383,17 +2409,28 @@ double PAD::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) const
     const BOARD*         board = GetBoard();
 
     // Meta control for hiding all pads
-    if( !aView->IsLayerVisible( LAYER_PADS ) )
+    if( !aView->IsLayerVisibleCached( LAYER_PADS ) )
         return LOD_HIDE;
 
     // Handle Render tab switches
     //const PCB_LAYER_ID& pcbLayer = static_cast<PCB_LAYER_ID>( aLayer );
 
-    if( !IsFlipped() && !aView->IsLayerVisible( LAYER_FOOTPRINTS_FR ) )
-        return LOD_HIDE;
+    {
+        const LSET padLayers = GetLayerSet();
+        const bool onFront = ( padLayers & LSET::FrontMask() ).any();
+        const bool onBack = ( padLayers & LSET::BackMask() ).any();
+        const bool frVis = aView->IsLayerVisible( LAYER_FOOTPRINTS_FR );
+        const bool bkVis = aView->IsLayerVisible( LAYER_FOOTPRINTS_BK );
 
-    if( IsFlipped() && !aView->IsLayerVisible( LAYER_FOOTPRINTS_BK ) )
-        return LOD_HIDE;
+        if( onFront && !onBack && !frVis )
+            return LOD_HIDE;
+
+        if( onBack && !onFront && !bkVis )
+            return LOD_HIDE;
+
+        if( onFront && onBack && !frVis && !bkVis )
+            return LOD_HIDE;
+    }
 
     if( IsHoleLayer( aLayer ) )
     {

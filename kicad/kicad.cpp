@@ -35,6 +35,7 @@
 #include <wx/msgdlg.h>
 #include <wx/cmdline.h>
 
+#include <common.h>
 #include <env_vars.h>
 #include <file_history.h>
 #include <hotkeys_basic.h>
@@ -178,13 +179,7 @@ bool PGM_KICAD::OnPgmInit()
     }
 #endif
 
-    bool skipPythonInit = false;
-
-    if( appType == FRAME_BM2CMP || appType == FRAME_PL_EDITOR || appType == FRAME_GERBER
-        || appType == FRAME_CALC )
-        skipPythonInit = true;
-
-    if( !InitPgm( false, skipPythonInit ) )
+    if( !InitPgm( false ) )
         return false;
 
 
@@ -220,23 +215,36 @@ bool PGM_KICAD::OnPgmInit()
                 m_bm.m_search.AddPaths( fn.GetPath() );
         }
 
+        auto insertExpanded = [&]( const wxString& aValue )
+        {
+            wxString resolved = ExpandEnvVarSubstitutions( aValue, nullptr );
+
+            // Skip values that still contain unresolved variable references so we don't
+            // pollute the search stack with paths like "${MISSING}/templates".
+            if( resolved.Contains( wxT( "${" ) ) || resolved.Contains( wxT( "$(" ) ) )
+                return;
+
+            m_bm.m_search.Insert( resolved, 0 );
+        };
+
         // The versioned TEMPLATE_DIR takes precedence over the search stack template path.
         if( std::optional<wxString> v = ENV_VAR::GetVersionedEnvVarValue( GetLocalEnvVariables(),
                                                                           wxT( "TEMPLATE_DIR" ) ) )
         {
             if( !v->IsEmpty() )
-                m_bm.m_search.Insert( *v, 0 );
+                insertExpanded( *v );
         }
 
         // We've been adding system (installed default) search paths so far, now for user paths
         // The default user search path is inside KIPLATFORM::ENV::GetDocumentsPath()
         m_bm.m_search.Insert( PATHS::GetUserTemplatesPath(), 0 );
 
-        // ...but the user can override that default with the KICAD_USER_TEMPLATE_DIR env var
+        // ...but the user can override that default with the KICAD_USER_TEMPLATE_DIR env var.
+        // The value may itself reference other KiCad path variables, so expand them here.
         ENV_VAR_MAP_CITER it = GetLocalEnvVariables().find( "KICAD_USER_TEMPLATE_DIR" );
 
         if( it != GetLocalEnvVariables().end() && it->second.GetValue() != wxEmptyString )
-            m_bm.m_search.Insert( it->second.GetValue(), 0 );
+            insertExpanded( it->second.GetValue() );
     }
 
     wxFrame*      frame = nullptr;
@@ -413,6 +421,11 @@ int PGM_KICAD::OnPgmRun()
 
 void PGM_KICAD::OnPgmExit()
 {
+    // Signal all background library preloads to abort before waiting for the thread pool.
+    // The design block preload runs on the global thread pool and checks this flag; without
+    // setting it here the pool wait below can block for up to 120 seconds.
+    m_libraryPreloadAbort.store( true );
+
     // Abort and wait on any background jobs
     GetKiCadThreadPool().purge();
     GetKiCadThreadPool().wait();
@@ -526,12 +539,18 @@ struct APP_KICAD : public wxApp
 
     int OnExit() override
     {
-        program.OnPgmExit();
+        // Drain wxPendingDelete (frames deferred via Destroy()) before tearing down
+        // PGM_BASE singletons. On macOS the dock-quit path leaves frames in this
+        // queue at OnExit() time, and their canvas destructors call into
+        // Pgm().GetGLContextManager(). Running OnPgmExit() first would null that
+        // pointer out from under them. See https://gitlab.com/kicad/code/kicad/-/issues/23373
+        int ret = wxApp::OnExit();
 
-        // Avoid wxLog crashing when used in destructors.
+        // Avoid wxLog crashing when used in destructors invoked from OnPgmExit().
         wxLog::EnableLogging( false );
 
-        return wxApp::OnExit();
+        program.OnPgmExit();
+        return ret;
     }
 
 

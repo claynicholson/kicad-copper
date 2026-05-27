@@ -107,16 +107,6 @@ public:
      */
     void ReleaseFile();
 
-    /**
-     * Toggle the scripting console visibility.
-     */
-    void ScriptingConsoleEnableDisable();
-
-    /**
-     * Get the current visibility of the scripting console window.
-     */
-    bool IsScriptingConsoleVisible();
-
     EDA_SEARCH_DATA& GetFindReplaceData();
     wxArrayString& GetFindHistoryList() { return m_findStringHistoryList; }
 

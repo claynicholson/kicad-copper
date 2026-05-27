@@ -265,6 +265,14 @@ DRC_ITEM DRC_ITEM::lengthOutOfRange( DRCE_LENGTH_OUT_OF_RANGE,
         _HKI( "Track length out of range" ),
         wxT( "length_out_of_range" ) );
 
+DRC_ITEM DRC_ITEM::netChainStubTooLong( DRCE_NET_CHAIN_STUB_TOO_LONG,
+        _HKI( "Net chain stub length out of range" ),
+        wxT( "net_chain_stub_length" ) );
+
+DRC_ITEM DRC_ITEM::netChainReturnPathBreak( DRCE_NET_CHAIN_RETURN_PATH_BREAK,
+        _HKI( "Net chain routed without continuous copper on the required reference layer" ),
+        wxT( "net_chain_return_path" ) );
+
 DRC_ITEM DRC_ITEM::skewOutOfRange( DRCE_SKEW_OUT_OF_RANGE,
         _HKI( "Skew between tracks out of range" ),
         wxT( "skew_out_of_range" ) );
@@ -339,6 +347,7 @@ std::vector<std::reference_wrapper<RC_ITEM>> DRC_ITEM::allItemTypes( {
         DRC_ITEM::annularWidth,
         DRC_ITEM::drillTooSmall,
         DRC_ITEM::microviaDrillTooSmall,
+        DRC_ITEM::viaDiameter,
         DRC_ITEM::courtyardsOverlap,
         DRC_ITEM::missingCourtyard,
         DRC_ITEM::malformedCourtyard,
@@ -362,6 +371,8 @@ std::vector<std::reference_wrapper<RC_ITEM>> DRC_ITEM::allItemTypes( {
 
         DRC_ITEM::heading_signal_integrity,
         DRC_ITEM::lengthOutOfRange,
+        DRC_ITEM::netChainStubTooLong,
+        DRC_ITEM::netChainReturnPathBreak,
         DRC_ITEM::skewOutOfRange,
         DRC_ITEM::viaCountOutOfRange,
         DRC_ITEM::diffPairGapOutOfRange,
@@ -387,6 +398,7 @@ std::vector<std::reference_wrapper<RC_ITEM>> DRC_ITEM::allItemTypes( {
         DRC_ITEM::npthInsideCourtyard,
         DRC_ITEM::itemOnDisabledLayer,
         DRC_ITEM::unresolvedVariable,
+        DRC_ITEM::assertionFailure,
         DRC_ITEM::footprintTypeMismatch,
         DRC_ITEM::libFootprintIssues,
         DRC_ITEM::libFootprintMismatch,
@@ -460,6 +472,9 @@ std::shared_ptr<DRC_ITEM> DRC_ITEM::Create( int aErrorCode )
     case DRCE_TEXT_HEIGHT:              return std::make_shared<DRC_ITEM>( textHeightOutOfRange );
     case DRCE_TEXT_THICKNESS:           return std::make_shared<DRC_ITEM>( textThicknessOutOfRange );
     case DRCE_LENGTH_OUT_OF_RANGE:      return std::make_shared<DRC_ITEM>( lengthOutOfRange );
+    case DRCE_NET_CHAIN_STUB_TOO_LONG:  return std::make_shared<DRC_ITEM>( netChainStubTooLong );
+    case DRCE_NET_CHAIN_RETURN_PATH_BREAK:
+        return std::make_shared<DRC_ITEM>( netChainReturnPathBreak );
     case DRCE_SKEW_OUT_OF_RANGE:        return std::make_shared<DRC_ITEM>( skewOutOfRange );
     case DRCE_VIA_COUNT_OUT_OF_RANGE:   return std::make_shared<DRC_ITEM>( viaCountOutOfRange );
     case DRCE_DIFF_PAIR_GAP_OUT_OF_RANGE:          return std::make_shared<DRC_ITEM>( diffPairGapOutOfRange );
@@ -472,8 +487,8 @@ std::shared_ptr<DRC_ITEM> DRC_ITEM::Create( int aErrorCode )
     case DRCE_MISSING_TUNING_PROFILE:   return std::make_shared<DRC_ITEM>( missingTuningProfile );
     case DRCE_TRACK_ON_POST_MACHINED_LAYER: return std::make_shared<DRC_ITEM>( trackOnPostMachinedLayer );
     case DRCE_TRACK_NOT_CENTERED_ON_VIA:    return std::make_shared<DRC_ITEM>( trackNotCenteredOnVia );
+
     default:
-        wxFAIL_MSG( wxT( "Unknown DRC error code" ) );
         return nullptr;
     }
 }

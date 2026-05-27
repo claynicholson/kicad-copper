@@ -236,6 +236,12 @@ bool PLUGIN_CONTENT_MANAGER::DownloadToStream( const wxString& aUrl, std::ostrea
     curl.SetFollowRedirects( true );
     curl.SetTransferCallback( callback, 250000L );
 
+    // Bound stalled transfers without capping total time. DownloadToStream is shared
+    // by metadata fetches and large package/resource downloads, so a fixed total
+    // timeout would abort legitimate long downloads on slow links. Abort only if the
+    // transfer rate stays below 100 B/s for 30 seconds.
+    curl.SetStallTimeout( 100L, 30L );
+
     if( !aAccept.empty() )
         curl.SetHeader( "Accept", aAccept );
 
@@ -714,6 +720,10 @@ void PLUGIN_CONTENT_MANAGER::PreparePackage( PCM_PACKAGE& aPackage )
         {
             ver.compatible = false;
         }
+        else if( UsesSWIGRuntime( aPackage, ver.version ) )
+        {
+            ver.compatible = false;
+        }
     }
 
     // Sort by descending version
@@ -722,6 +732,24 @@ void PLUGIN_CONTENT_MANAGER::PreparePackage( PCM_PACKAGE& aPackage )
                {
                    return a.parsed_version > b.parsed_version;
                } );
+}
+
+
+bool PLUGIN_CONTENT_MANAGER::UsesSWIGRuntime( const PCM_PACKAGE& aPackage, const wxString& aVersion )
+{
+    if( !( aPackage.type == PT_PLUGIN || aPackage.type == PT_FAB ) )
+        return false;
+
+    auto ver_it = std::find_if( aPackage.versions.begin(), aPackage.versions.end(),
+                                [&]( const PACKAGE_VERSION& ver )
+                                {
+                                    return ver.version == aVersion;
+                                } );
+
+    if( ver_it == aPackage.versions.end() )
+        return false;
+
+    return ver_it->runtime.value_or( PCM_PACKAGE_RUNTIME::PPR_SWIG ) == PCM_PACKAGE_RUNTIME::PPR_SWIG;
 }
 
 

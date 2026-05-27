@@ -34,6 +34,8 @@
 #include <sch_edit_frame.h>
 #include <settings/color_settings.h>
 #include <connection_graph.h>
+#include <sch_netchain.h>
+#include <schematic.h>
 #include <project/project_file.h>
 #include <project/net_settings.h>
 #include <trigo.h>
@@ -105,13 +107,40 @@ SCH_LINE::SCH_LINE( const SCH_LINE& aLine ) :
 
 void SCH_LINE::Serialize( google::protobuf::Any &aContainer ) const
 {
-    kiapi::schematic::types::Line line;
+    using namespace kiapi::common;
+
+    kiapi::schematic::types::SchematicLine line;
+    types::StrokeAttributes* stroke = line.mutable_stroke();
 
     line.mutable_id()->set_value( m_Uuid.AsStdString() );
-    kiapi::common::PackVector2( *line.mutable_start(), GetStartPoint() );
-    kiapi::common::PackVector2( *line.mutable_end(), GetEndPoint() );
-    line.set_layer(
-            ToProtoEnum<SCH_LAYER_ID, kiapi::schematic::types::SchematicLayer>( GetLayer() ) );
+    PackVector2( *line.mutable_start(), GetStartPoint(), schIUScale );
+    PackVector2( *line.mutable_end(), GetEndPoint(), schIUScale );
+    line.set_locked( IsLocked() ? types::LockedState::LS_LOCKED : types::LockedState::LS_UNLOCKED );
+
+    PackDistance( *stroke->mutable_width(), m_stroke.GetWidth(), schIUScale );
+    stroke->set_style( ToProtoEnum<LINE_STYLE, types::StrokeLineStyle>( m_stroke.GetLineStyle() ) );
+
+    if( m_stroke.GetColor() != COLOR4D::UNSPECIFIED )
+        PackColor( *stroke->mutable_color(), m_stroke.GetColor() );
+
+    switch( GetLayer() )
+    {
+    case LAYER_WIRE:
+        line.set_type( kiapi::schematic::types::SLT_WIRE );
+        break;
+
+    case LAYER_BUS:
+        line.set_type( kiapi::schematic::types::SLT_BUS );
+        break;
+
+    case LAYER_NOTES:
+        line.set_type( kiapi::schematic::types::SLT_GRAPHIC );
+        break;
+
+    default:
+        line.set_type( kiapi::schematic::types::SLT_UNKNOWN );
+        break;
+    }
 
     aContainer.PackFrom( line );
 }
@@ -119,26 +148,39 @@ void SCH_LINE::Serialize( google::protobuf::Any &aContainer ) const
 
 bool SCH_LINE::Deserialize( const google::protobuf::Any &aContainer )
 {
-    kiapi::schematic::types::Line line;
+    using namespace kiapi::common;
+
+    kiapi::schematic::types::SchematicLine line;
 
     if( !aContainer.UnpackTo( &line ) )
         return false;
 
     const_cast<KIID&>( m_Uuid ) = KIID( line.id().value() );
-    SetStartPoint( kiapi::common::UnpackVector2( line.start() ) );
-    SetEndPoint( kiapi::common::UnpackVector2( line.end() ) );
-    SCH_LAYER_ID layer =
-            FromProtoEnum<SCH_LAYER_ID, kiapi::schematic::types::SchematicLayer>( line.layer() );
+    SetStartPoint( UnpackVector2( line.start(), schIUScale ) );
+    SetEndPoint( UnpackVector2( line.end(), schIUScale ) );
+    SetLocked( line.locked() == types::LockedState::LS_LOCKED );
 
-    switch( layer )
+    m_stroke.SetWidth( UnpackDistance( line.stroke().width(), schIUScale ) );
+    m_stroke.SetLineStyle( FromProtoEnum<LINE_STYLE, types::StrokeLineStyle>( line.stroke().style() ) );
+
+    if( line.stroke().has_color() )
+        m_stroke.SetColor( UnpackColor( line.stroke().color() ) );
+    else
+        m_stroke.SetColor( COLOR4D::UNSPECIFIED );
+
+    switch( line.type() )
     {
-    case LAYER_WIRE:
-    case LAYER_BUS:
-    case LAYER_NOTES:
-        SetLayer( layer );
+    case kiapi::schematic::types::SLT_WIRE:
+        SetLayer( LAYER_WIRE );
+        break;
+
+    case kiapi::schematic::types::SLT_BUS:
+        SetLayer( LAYER_BUS );
         break;
 
     default:
+    case kiapi::schematic::types::SLT_GRAPHIC:
+        SetLayer( LAYER_NOTES );
         break;
     }
 
@@ -978,6 +1020,12 @@ void SCH_LINE::GetMsgPanelInfo( EDA_DRAW_FRAME* aFrame, std::vector<MSG_PANEL_IT
         {
             aList.emplace_back( _( "Resolved Netclass" ),
                                 UnescapeString( GetEffectiveNetClass()->GetHumanReadableName() ) );
+
+            if( SCHEMATIC* schematic = Schematic() )
+            {
+                if( SCH_NETCHAIN* chain = schematic->ConnectionGraph()->GetNetChainForNet( conn->Name() ) )
+                    aList.emplace_back( _( "Net Chain" ), UnescapeString( chain->GetName() ) );
+            }
         }
     }
 }
@@ -1099,7 +1147,7 @@ std::vector<VECTOR3I> SCH_LINE::BuildWireWithHopShape( const SCH_SCREEN* aScreen
     std::vector<VECTOR3I> wire_shape;       // List of coordinates:
                                             // 2 points for a segment, 3 points for an arc
 
-    if( !IsWire() )
+    if( !IsWire() && !IsBus() )
     {
         wire_shape.emplace_back( GetStartPoint().x,GetStartPoint().y, 0 );
         wire_shape.emplace_back( GetEndPoint().x, GetEndPoint().y, 0 );
@@ -1113,7 +1161,7 @@ std::vector<VECTOR3I> SCH_LINE::BuildWireWithHopShape( const SCH_SCREEN* aScreen
     {
         SCH_LINE* line = static_cast<SCH_LINE*>( item );
 
-        if( line->IsWire() )
+        if( line->IsWire() || line->IsBus() )
             existingWires.push_back( line );
     }
 
@@ -1175,28 +1223,17 @@ std::vector<VECTOR3I> SCH_LINE::BuildWireWithHopShape( const SCH_SCREEN* aScreen
             double lineAngle = std::atan2( GetEndPoint().y - GetStartPoint().y,
                                            GetEndPoint().x - GetStartPoint().x );
 
-            // Convert the angle from radians to degrees
-            double lineAngleDeg = lineAngle * ( 180.0f / M_PI );
+            // Normalize to [0, pi) so the arc side doesn't depend
+            // on which endpoint is start vs end
+            double arcAngle = lineAngle;
 
-            // Normalize the angle to be between 0 and 360 degrees
-            if( lineAngleDeg < 0 )
-                lineAngleDeg += 360;
+            if( arcAngle < 0.0 )
+                arcAngle += M_PI;
+            else if( arcAngle >= M_PI )
+                arcAngle -= M_PI;
 
-            double startAngle = lineAngleDeg;
-            double endAngle = startAngle + 180.0f;
-
-            // Adjust the end angle if it exceeds 360 degrees
-            if( endAngle >= 360.0 )
-                endAngle -= 360.0;
-
-            // Convert start and end angles from degrees to radians
-            double startAngleRad = startAngle * ( M_PI / 180.0f );
-            double endAngleRad = endAngle * ( M_PI / 180.0f );
-
-            VECTOR2I arcMidPoint = {
-                hopMid.x + static_cast<int>( R * cos( ( startAngleRad + endAngleRad ) / 2.0f ) ),
-                hopMid.y - static_cast<int>( R * sin( ( startAngleRad + endAngleRad ) / 2.0f ) )
-            };
+            VECTOR2I arcMidPoint = { hopMid.x + static_cast<int>( R * std::sin( arcAngle ) ),
+                                     hopMid.y - static_cast<int>( R * std::cos( arcAngle ) ) };
 
             VECTOR2I beforeHop = hopMid - KiROUND( R * std::cos( lineAngle ), R * std::sin( lineAngle ) );
             VECTOR2I afterHop = hopMid + KiROUND( R * std::cos( lineAngle ), R * std::sin( lineAngle ) );
@@ -1206,7 +1243,6 @@ std::vector<VECTOR3I> SCH_LINE::BuildWireWithHopShape( const SCH_SCREEN* aScreen
             wire_shape.emplace_back( beforeHop.x, beforeHop.y, 0 );
 
             // Create an arc object
-            SHAPE_ARC arc( beforeHop, arcMidPoint, afterHop, 0 );
             wire_shape.emplace_back( beforeHop.x, beforeHop.y, 1 );
             wire_shape.emplace_back( arcMidPoint.x, arcMidPoint.y, 1 );
             wire_shape.emplace_back( afterHop.x, afterHop.y, 1 );
@@ -1295,8 +1331,8 @@ static struct SCH_LINE_DESC
                     &SCH_LINE::SetLineStyle, &SCH_LINE::GetLineStyle ) )
                 .SetAvailableFunc( isGraphicLine );
 
-        propMgr.AddProperty( new PROPERTY_ENUM<SCH_LINE, WIRE_STYLE>( _HKI( "Line Style" ),
-                    &SCH_LINE::SetWireStyle, &SCH_LINE::GetWireStyle ) )
+        propMgr.AddProperty( new PROPERTY_ENUM<SCH_LINE, WIRE_STYLE>( _HKI( "Wire Style" ), &SCH_LINE::SetWireStyle,
+                                                                      &SCH_LINE::GetWireStyle ) )
                 .SetAvailableFunc( isWireOrBus );
 
         propMgr.AddProperty( new PROPERTY<SCH_LINE, int>( _HKI( "Line Width" ),

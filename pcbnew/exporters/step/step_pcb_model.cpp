@@ -50,6 +50,7 @@
 #include <board.h>
 #include <board_design_settings.h>
 #include <footprint.h>
+#include <3d_rendering/3d_placeholder_utils.h>
 #include <pad.h>
 #include <pcb_track.h>
 #include <kiplatform/io.h>
@@ -84,12 +85,13 @@
 #include <Standard_Version.hxx>
 #include <TCollection_ExtendedString.hxx>
 #include <TDocStd_Document.hxx>
-#include <TDocStd_XLinkTool.hxx>
 #include <TDataStd_Name.hxx>
 #include <TDataStd_TreeNode.hxx>
 #include <TDF_ChildIterator.hxx>
-#include <TDF_LabelSequence.hxx>
+#include <NCollection_Sequence.hxx>
+#include <TColStd_IndexedDataMapOfStringString.hxx>
 #include <TDF_Tool.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <XCAFApp_Application.hxx>
@@ -100,6 +102,7 @@
 #include <XCAFDoc_VisMaterialTool.hxx>
 #include <XCAFDoc_Area.hxx>
 #include <XCAFDoc_Centroid.hxx>
+#include <XCAFDoc_Editor.hxx>
 #include <XCAFDoc_Location.hxx>
 #include <XCAFDoc_Volume.hxx>
 #include "kicad3d_info.h"
@@ -126,6 +129,7 @@
 
 #include <BRepBndLib.hxx>
 #include <Bnd_BoundSortBox.hxx>
+#include <Bnd_HArray1OfBox.hxx>
 #include <GProp_GProps.hxx>
 #include <BRepGProp.hxx>
 
@@ -502,7 +506,7 @@ static SHAPE_LINE_CHAIN approximateLineChainWithArcs( const SHAPE_LINE_CHAIN& aS
 
 static TopoDS_Shape getOneShape( Handle( XCAFDoc_ShapeTool ) aShapeTool )
 {
-    TDF_LabelSequence theLabels;
+    NCollection_Sequence<TDF_Label> theLabels;
     aShapeTool->GetFreeShapes( theLabels );
 
     TopoDS_Shape aShape;
@@ -514,7 +518,7 @@ static TopoDS_Shape getOneShape( Handle( XCAFDoc_ShapeTool ) aShapeTool )
     BRep_Builder    aBuilder;
     aBuilder.MakeCompound( aCompound );
 
-    for( TDF_LabelSequence::Iterator anIt( theLabels ); anIt.More(); anIt.Next() )
+    for( NCollection_Sequence<TDF_Label>::Iterator anIt( theLabels ); anIt.More(); anIt.Next() )
     {
         TopoDS_Shape aFreeShape;
 
@@ -533,19 +537,19 @@ static TopoDS_Shape getOneShape( Handle( XCAFDoc_ShapeTool ) aShapeTool )
 
 // Apply scaling to shapes within theLabel.
 // Based on XCAFDoc_Editor::RescaleGeometry
-static Standard_Boolean rescaleShapes( const TDF_Label& theLabel, const gp_XYZ& aScale )
+static bool rescaleShapes( const TDF_Label& theLabel, const gp_XYZ& aScale )
 {
     if( theLabel.IsNull() )
     {
         Message::SendFail( "Null label." );
-        return Standard_False;
+        return false;
     }
 
-    if( Abs( aScale.X() ) <= gp::Resolution() || Abs( aScale.Y() ) <= gp::Resolution()
-        || Abs( aScale.Z() ) <= gp::Resolution() )
+    if( std::abs( aScale.X() ) <= gp::Resolution() || std::abs( aScale.Y() ) <= gp::Resolution()
+        || std::abs( aScale.Z() ) <= gp::Resolution() )
     {
         Message::SendFail( "Scale factor is too small." );
-        return Standard_False;
+        return false;
     }
 
     Handle( XCAFDoc_ShapeTool ) aShapeTool = XCAFDoc_DocumentTool::ShapeTool( theLabel );
@@ -553,7 +557,7 @@ static Standard_Boolean rescaleShapes( const TDF_Label& theLabel, const gp_XYZ& 
     if( aShapeTool.IsNull() )
     {
         Message::SendFail( "Couldn't find XCAFDoc_ShapeTool attribute." );
-        return Standard_False;
+        return false;
     }
 
     Handle( KI_XCAFDoc_AssemblyGraph ) aG = new KI_XCAFDoc_AssemblyGraph( theLabel );
@@ -561,10 +565,10 @@ static Standard_Boolean rescaleShapes( const TDF_Label& theLabel, const gp_XYZ& 
     if( aG.IsNull() )
     {
         Message::SendFail( "Couldn't create assembly graph." );
-        return Standard_False;
+        return false;
     }
 
-    Standard_Boolean anIsDone = Standard_True;
+    bool anIsDone = true;
 
     // clang-format off
     gp_GTrsf aGTrsf;
@@ -575,7 +579,7 @@ static Standard_Boolean rescaleShapes( const TDF_Label& theLabel, const gp_XYZ& 
 
     BRepBuilderAPI_GTransform aBRepTrsf( aGTrsf );
 
-    for( Standard_Integer idx = 1; idx <= aG->NbNodes(); idx++ )
+    for( int idx = 1; idx <= aG->NbNodes(); idx++ )
     {
         const KI_XCAFDoc_AssemblyGraph::NodeType aNodeType = aG->GetNodeType( idx );
 
@@ -590,7 +594,7 @@ static Standard_Boolean rescaleShapes( const TDF_Label& theLabel, const gp_XYZ& 
         if( aNodeType == KI_XCAFDoc_AssemblyGraph::NodeType_Part )
         {
             const TopoDS_Shape aShape = aShapeTool->GetShape( aLabel );
-            aBRepTrsf.Perform( aShape, Standard_True );
+            aBRepTrsf.Perform( aShape, true );
             if( !aBRepTrsf.IsDone() )
             {
                 Standard_SStream        aSS;
@@ -598,16 +602,16 @@ static Standard_Boolean rescaleShapes( const TDF_Label& theLabel, const gp_XYZ& 
                 TDF_Tool::Entry( aLabel, anEntry );
                 aSS << "Shape " << anEntry << " is not scaled!";
                 Message::SendFail( aSS.str().c_str() );
-                anIsDone = Standard_False;
-                return Standard_False;
+                anIsDone = false;
+                return false;
             }
             TopoDS_Shape aScaledShape = aBRepTrsf.Shape();
             aShapeTool->SetShape( aLabel, aScaledShape );
 
             // Update sub-shapes
-            TDF_LabelSequence aSubshapes;
+            NCollection_Sequence<TDF_Label> aSubshapes;
             aShapeTool->GetSubShapes( aLabel, aSubshapes );
-            for( TDF_LabelSequence::Iterator anItSs( aSubshapes ); anItSs.More(); anItSs.Next() )
+            for( NCollection_Sequence<TDF_Label>::Iterator anItSs( aSubshapes ); anItSs.More(); anItSs.Next() )
             {
                 const TDF_Label&   aLSs = anItSs.Value();
                 const TopoDS_Shape aSs = aShapeTool->GetShape( aLSs );
@@ -631,7 +635,7 @@ static Standard_Boolean rescaleShapes( const TDF_Label& theLabel, const gp_XYZ& 
 
     if( !anIsDone )
     {
-        return Standard_False;
+        return false;
     }
 
     aShapeTool->UpdateAssemblies();
@@ -642,10 +646,10 @@ static Standard_Boolean rescaleShapes( const TDF_Label& theLabel, const gp_XYZ& 
 
 static bool fuseShapes( auto& aInputShapes, TopoDS_Shape& aOutShape, REPORTER* aReporter )
 {
-    BRepAlgoAPI_Fuse     mkFuse;
-    TopTools_ListOfShape shapeArguments, shapeTools;
+    BRepAlgoAPI_Fuse               mkFuse;
+    NCollection_List<TopoDS_Shape> shapeArguments, shapeTools;
 
-    for( TopoDS_Shape& sh : aInputShapes )
+    for( const TopoDS_Shape& sh : aInputShapes )
     {
         if( sh.IsNull() )
             continue;
@@ -765,8 +769,7 @@ static TopoDS_Compound makeCompound( const auto& aInputShapes )
 
 
 // Try to fuse shapes. If that fails, just add them to a compound
-static TopoDS_Shape fuseShapesOrCompound( const TopTools_ListOfShape& aInputShapes,
-                                          REPORTER* aReporter )
+static TopoDS_Shape fuseShapesOrCompound( const NCollection_List<TopoDS_Shape>& aInputShapes, REPORTER* aReporter )
 {
     TopoDS_Shape outShape;
 
@@ -781,7 +784,7 @@ static TopoDS_Shape fuseShapesOrCompound( const TopTools_ListOfShape& aInputShap
 
 
 // Sets names in assembly to <aPrefix> (<old name>), or to <aPrefix>
-static Standard_Boolean prefixNames( const TDF_Label&                  aLabel,
+static bool prefixNames( const TDF_Label&                  aLabel,
                                      const TCollection_ExtendedString& aPrefix )
 {
     Handle( KI_XCAFDoc_AssemblyGraph ) aG = new KI_XCAFDoc_AssemblyGraph( aLabel );
@@ -789,12 +792,12 @@ static Standard_Boolean prefixNames( const TDF_Label&                  aLabel,
     if( aG.IsNull() )
     {
         Message::SendFail( "Couldn't create assembly graph." );
-        return Standard_False;
+        return false;
     }
 
-    Standard_Boolean anIsDone = Standard_True;
+    bool anIsDone = true;
 
-    for( Standard_Integer idx = 1; idx <= aG->NbNodes(); idx++ )
+    for( int idx = 1; idx <= aG->NbNodes(); idx++ )
     {
         const TDF_Label& lbl = aG->GetNode( idx );
         Handle( TDataStd_Name ) nameHandle;
@@ -1003,7 +1006,7 @@ bool STEP_PCB_MODEL::AddPadShape( const PAD* aPad, const VECTOR2D& aOrigin, bool
         // Fuse pad shapes here before fusing them with tracks because OCCT sometimes has trouble
         if( m_fuseShapes )
         {
-            TopTools_ListOfShape padShapesList;
+            NCollection_List<TopoDS_Shape> padShapesList;
 
             for( const TopoDS_Shape& shape : padShapes )
                 padShapesList.Append( shape );
@@ -1672,6 +1675,85 @@ void STEP_PCB_MODEL::getBoardBodyZPlacement( double& aZPos, double& aThickness )
 }
 
 
+bool STEP_PCB_MODEL::AddExtrudedBody( const SHAPE_POLY_SET& aOutline, bool aBottom, double aStandoff, double aHeight,
+                                      const VECTOR2D& aOrigin, uint32_t aColor, EXTRUSION_MATERIAL aMaterial,
+                                      const wxString& aRefDes )
+{
+    double f_pos, f_thickness;
+    double b_pos, b_thickness;
+    getLayerZPlacement( F_Cu, f_pos, f_thickness );
+    getLayerZPlacement( B_Cu, b_pos, b_thickness );
+
+    double boardSurfaceZ;
+
+    if( !aBottom )
+        boardSurfaceZ = std::max( f_pos, f_pos + f_thickness );
+    else
+        boardSurfaceZ = std::min( b_pos, b_pos + b_thickness );
+
+    double bodyThickness = aHeight - aStandoff;
+    double zBot;
+
+    if( !aBottom )
+        zBot = boardSurfaceZ + aStandoff;
+    else
+        zBot = boardSurfaceZ - aHeight;
+
+    m_extruded_bodies.push_back( { {}, {}, aRefDes, aColor, aMaterial } );
+    return MakeShapes( m_extruded_bodies.back().bodyShapes, aOutline, m_simplifyShapes, bodyThickness, zBot, aOrigin );
+}
+
+
+bool STEP_PCB_MODEL::AddExtrudedPins( const FOOTPRINT* aFootprint, bool aBottom, double aStandoff,
+                                      const VECTOR2D& aOrigin )
+{
+    if( aStandoff <= 0.0 )
+        return false;
+
+    SHAPE_POLY_SET pinPoly;
+
+    if( !GetExtrusionPinOutline( aFootprint, pinPoly ) )
+        return false;
+
+    const EXTRUDED_3D_BODY* body = aFootprint->GetExtrudedBody();
+
+    if( body )
+    {
+        VECTOR2I fpPos = aFootprint->GetPosition();
+        ApplyExtrusionTransform( pinPoly, body, fpPos );
+    }
+
+    double f_pos, f_thickness;
+    double b_pos, b_thickness;
+    getLayerZPlacement( F_Cu, f_pos, f_thickness );
+    getLayerZPlacement( B_Cu, b_pos, b_thickness );
+
+    double boardTopZ = std::max( f_pos, f_pos + f_thickness );
+    double boardBotZ = std::min( b_pos, b_pos + b_thickness );
+
+    static const double c_protrusion = 1.0; // 1mm below opposite side
+
+    double pinZBot, pinHeight;
+
+    if( !aBottom )
+    {
+        pinZBot = boardBotZ - c_protrusion;
+        pinHeight = ( boardTopZ + aStandoff ) - pinZBot;
+    }
+    else
+    {
+        double pinZTop = boardTopZ + c_protrusion;
+        pinZBot = boardBotZ - aStandoff;
+        pinHeight = pinZTop - pinZBot;
+    }
+
+    if( m_extruded_bodies.empty() )
+        return false;
+
+    return MakeShapes( m_extruded_bodies.back().pinShapes, pinPoly, m_simplifyShapes, pinHeight, pinZBot, aOrigin );
+}
+
+
 bool STEP_PCB_MODEL::AddPolygonShapes( const SHAPE_POLY_SET* aPolyShapes, PCB_LAYER_ID aLayer,
                                        const VECTOR2D& aOrigin, const wxString& aNetname )
 {
@@ -1769,6 +1851,15 @@ bool STEP_PCB_MODEL::AddComponent( const wxString& aBaseName, const wxString& aF
     TDataStd_Name::Set( llabel, refdes );
 
     KICAD3D_INFO::Set( llabel, KICAD3D_MODEL_TYPE::COMPONENT, aRefDes.utf8_string() );
+
+    // Rebuild compound shapes for all assemblies so that the newly added component
+    // contributes to its parent's aggregate TopoDS_Shape.  This is required when the
+    // transferred sub-model was synthesized from a source label tree (via
+    // XCAFDoc_Editor::Extract), because Extract leaves the assembly shape as an empty
+    // compound until UpdateAssemblies is invoked.  Without this the downstream writers
+    // (STEPCAFControl_Writer, RWGltf_CafWriter, RWObj_CafWriter) see no geometry for
+    // the added component.
+    m_assy->UpdateAssemblies();
 
     return true;
 }
@@ -2545,14 +2636,14 @@ bool STEP_PCB_MODEL::CreatePCB( SHAPE_POLY_SET& aOutline, const VECTOR2D& aOrigi
                         Bnd_Box shapeBbox;
                         BRepBndLib::Add( shape, shapeBbox );
 
-                        TopTools_ListOfShape holelist;
+                        NCollection_List<TopoDS_Shape> holelist;
 
                         {
                             std::unique_lock lock( mutex );
 
-                            const TColStd_ListOfInteger& indices = aBSBHoles.Compare( shapeBbox );
+                            const NCollection_List<int>& indices = aBSBHoles.Compare( shapeBbox );
 
-                            for( const Standard_Integer& index : indices )
+                            for( const int& index : indices )
                                 holelist.Append( aHolesList[index] );
 
                             // Workaround for OCCT bug (https://github.com/Open-Cascade-SAS/OCCT/issues/506)
@@ -2572,7 +2663,7 @@ bool STEP_PCB_MODEL::CreatePCB( SHAPE_POLY_SET& aOutline, const VECTOR2D& aOrigi
                         if( holelist.IsEmpty() )
                             return; // nothing to cut for this shape
 
-                        TopTools_ListOfShape cutArgs;
+                        NCollection_List<TopoDS_Shape> cutArgs;
                         cutArgs.Append( shape );
 
                         BRepAlgoAPI_Cut cut;
@@ -2654,7 +2745,7 @@ bool STEP_PCB_MODEL::CreatePCB( SHAPE_POLY_SET& aOutline, const VECTOR2D& aOrigi
 
     if( m_fuseShapes )
     {
-        std::map<wxString, TopTools_ListOfShape> shapesToFuseMap;
+        std::map<wxString, NCollection_List<TopoDS_Shape>> shapesToFuseMap;
 
         auto addShapes = [&shapesToFuseMap]( const wxString&                  aNetname,
                                              const std::vector<TopoDS_Shape>& aShapes )
@@ -2880,6 +2971,93 @@ bool STEP_PCB_MODEL::CreatePCB( SHAPE_POLY_SET& aOutline, const VECTOR2D& aOrigi
     if( aPushBoardBody )
         pushToAssembly( m_board_outlines, board_mat, "PCB", false, "Body" );
 
+    Quantity_ColorRGBA pinClr( Quantity_Color( 0.75, 0.75, 0.75, Quantity_TOC_RGB ), 1.0 );
+    TDF_Label          pin_mat = makeMaterial( "extruded_pin", pinClr, 0.6, 0.3 );
+
+    for( auto& entry : m_extruded_bodies )
+    {
+        if( entry.bodyShapes.empty() && entry.pinShapes.empty() )
+            continue;
+
+        TopoDS_Compound asmCompound;
+        BRep_Builder    asmBuilder;
+        asmBuilder.MakeCompound( asmCompound );
+        TDF_Label fpLabel = m_assy->AddShape( asmCompound, true );
+        TDataStd_Name::Set( fpLabel, TCollection_ExtendedString( ( entry.refDes + " (extruded)" ).ToUTF8().data() ) );
+
+        if( !entry.bodyShapes.empty() )
+        {
+            double r = ( ( entry.colorKey >> 24 ) & 0xFF ) / 255.0;
+            double g = ( ( entry.colorKey >> 16 ) & 0xFF ) / 255.0;
+            double b = ( ( entry.colorKey >> 8 ) & 0xFF ) / 255.0;
+            double a = ( entry.colorKey & 0xFF ) / 255.0;
+
+            double metallic, roughness;
+
+            switch( entry.material )
+            {
+            default:
+            case EXTRUSION_MATERIAL::PLASTIC:
+                metallic = 0.0;
+                roughness = 0.6;
+                break;
+            case EXTRUSION_MATERIAL::MATTE:
+                metallic = 0.0;
+                roughness = 0.9;
+                break;
+            case EXTRUSION_MATERIAL::METAL:
+                metallic = 0.8;
+                roughness = 0.3;
+                break;
+            case EXTRUSION_MATERIAL::COPPER:
+                metallic = 1.0;
+                roughness = 0.4;
+                break;
+            }
+
+            Quantity_ColorRGBA bodyClr( Quantity_Color( r, g, b, Quantity_TOC_RGB ), a );
+            TDF_Label          body_mat = makeMaterial( "extruded_body", bodyClr, metallic, roughness );
+
+            TopoDS_Shape bodyCompound = makeCompound( entry.bodyShapes );
+            TDF_Label    bodyLbl = m_assy->AddComponent( fpLabel, bodyCompound, false );
+
+            Handle( TDataStd_TreeNode ) bodyNode;
+            bodyLbl.FindAttribute( XCAFDoc::ShapeRefGUID(), bodyNode );
+            TDF_Label bodyShpLbl = bodyNode->Father()->Label();
+
+            if( !bodyShpLbl.IsNull() )
+            {
+                visMatTool->SetShapeMaterial( bodyShpLbl, body_mat );
+                TDataStd_Name::Set( bodyShpLbl,
+                                    TCollection_ExtendedString( ( entry.refDes + "_body" ).ToUTF8().data() ) );
+            }
+        }
+
+        int pinIdx = 1;
+
+        for( TopoDS_Shape& pinShape : entry.pinShapes )
+        {
+            TDF_Label pinLbl = m_assy->AddComponent( fpLabel, pinShape, false );
+
+            Handle( TDataStd_TreeNode ) pinNode;
+            pinLbl.FindAttribute( XCAFDoc::ShapeRefGUID(), pinNode );
+            TDF_Label pinShpLbl = pinNode->Father()->Label();
+
+            if( !pinShpLbl.IsNull() )
+            {
+                visMatTool->SetShapeMaterial( pinShpLbl, pin_mat );
+                wxString pinName = wxString::Format( "%s_pin_%d", entry.refDes, pinIdx++ );
+                TDataStd_Name::Set( pinShpLbl, TCollection_ExtendedString( pinName.ToUTF8().data() ) );
+            }
+        }
+
+        TopLoc_Location loc;
+        TDF_Label       fpCompLbl = m_assy->AddComponent( m_assy_label, fpLabel, loc );
+        TDataStd_Name::Set( fpCompLbl, TCollection_ExtendedString( entry.refDes.ToUTF8().data() ) );
+        KICAD3D_INFO::Set( fpCompLbl, KICAD3D_MODEL_TYPE::BOARD, entry.refDes.ToStdString() );
+        m_pcb_labels.push_back( fpCompLbl );
+    }
+
 #if( defined OCC_VERSION_HEX ) && ( OCC_VERSION_HEX > 0x070101 )
     m_assy->UpdateAssemblies();
 #endif
@@ -2905,8 +3083,8 @@ bool STEP_PCB_MODEL::WriteIGES( const wxString& aFileName )
     wxFileName fn( aFileName );
     IGESControl_Controller::Init();
     IGESCAFControl_Writer writer;
-    writer.SetColorMode( Standard_True );
-    writer.SetNameMode( Standard_True );
+    writer.SetColorMode( true );
+    writer.SetNameMode( true );
     IGESData_GlobalSection header = writer.Model()->GlobalSection();
     header.SetFileName( new TCollection_HAsciiString( fn.GetFullName().ToAscii() ) );
     header.SetSendName( new TCollection_HAsciiString( "KiCad electronic assembly" ) );
@@ -2914,7 +3092,7 @@ bool STEP_PCB_MODEL::WriteIGES( const wxString& aFileName )
     header.SetCompanyName( new TCollection_HAsciiString( Interface_Static::CVal( "write.iges.header.company" ) ) );
     writer.Model()->SetGlobalSection( header );
 
-    if( Standard_False == writer.Perform( m_doc, aFileName.c_str() ) )
+    if( false == writer.Perform( m_doc, aFileName.c_str() ) )
         return false;
 
     return true;
@@ -2975,8 +3153,8 @@ bool STEP_PCB_MODEL::WriteSTEP( const wxString& aFileName, bool aOptimize, bool 
     wxFileName fn( aFileName );
 
     STEPCAFControl_Writer writer;
-    writer.SetColorMode( Standard_True );
-    writer.SetNameMode( Standard_True );
+    writer.SetColorMode( true );
+    writer.SetNameMode( true );
 
     // This must be set before we "transfer" the document.
     // Should default to kicad_pcb.general.title_block.title,
@@ -2997,7 +3175,7 @@ bool STEP_PCB_MODEL::WriteSTEP( const wxString& aFileName, bool aOptimize, bool 
                             RPT_SEVERITY_WARNING );
     }
 
-    if( Standard_False == writer.Transfer( m_doc, STEPControl_AsIs ) )
+    if( false == writer.Transfer( m_doc, STEPControl_AsIs ) )
         return false;
 
     APIHeaderSection_MakeHeader hdr( writer.ChangeWriter().Model() );
@@ -3023,7 +3201,7 @@ bool STEP_PCB_MODEL::WriteSTEP( const wxString& aFileName, bool aOptimize, bool 
 
     wxString tmpfname( "$tempfile$.step" );
 
-    if( Standard_False == writer.Write( tmpfname.c_str() ) )
+    if( false == writer.Write( tmpfname.c_str() ) )
         success = false;
 
     if( compress && success )
@@ -3171,7 +3349,7 @@ bool STEP_PCB_MODEL::WriteXAO( const wxString& aFileName )
 #if OCC_VERSION_HEX < 0x070600
     BRepTools::Write( shape, file );
 #else
-    BRepTools::Write( shape, file, Standard_True, Standard_True, TopTools_FormatVersion_VERSION_1 );
+    BRepTools::Write( shape, file, true, true, TopTools_FormatVersion_VERSION_1 );
 #endif
     file << "]]></shape>" << std::endl;
     file << "    <topology>" << std::endl;
@@ -3365,9 +3543,7 @@ bool STEP_PCB_MODEL::getModelLabel( const wxString& aBaseName, const wxString& a
                 }
                 catch( ... )
                 {
-                    m_reporter->Report(
-                            wxString::Format( wxT( "failed to decompress '%s'." ), aFileName ),
-                            RPT_SEVERITY_ERROR );
+                    // ignore - we try unzipping it below
                 }
 
                 if( expanded.empty() )
@@ -3381,6 +3557,11 @@ bool STEP_PCB_MODEL::getModelLabel( const wxString& aBaseName, const wxString& a
                     {
                         izipfile.Read( ofile );
                         success = true;
+                    }
+                    else
+                    {
+                        m_reporter->Report( wxString::Format( wxT( "failed to decompress '%s'." ), aFileName ),
+                                            RPT_SEVERITY_ERROR );
                     }
                 }
                 else
@@ -3721,197 +3902,30 @@ bool STEP_PCB_MODEL::readVRML( Handle( TDocStd_Document ) & doc, const char* fna
 }
 
 
-void STEP_PCB_MODEL::transferColors( Handle( XCAFDoc_ShapeTool )& aSrcShapeTool,
-                                     Handle( XCAFDoc_ColorTool )& aSrcColorTool,
-                                     Handle( XCAFDoc_ShapeTool )& aDstShapeTool,
-                                     Handle( XCAFDoc_ColorTool )& aDstColorTool )
-{
-    // Get all shapes from the source document
-    TDF_LabelSequence srcLabels;
-    aSrcShapeTool->GetShapes( srcLabels );
-
-    for( Standard_Integer i = 1; i <= srcLabels.Length(); i++ )
-    {
-        TDF_Label srcLabel = srcLabels.Value( i );
-        TopoDS_Shape srcShape = aSrcShapeTool->GetShape( srcLabel );
-
-        if( srcShape.IsNull() )
-            continue;
-
-        // Try to find the same shape in the destination document
-        TDF_Label dstLabel;
-
-        if( !aDstShapeTool->Search( srcShape, dstLabel, Standard_True, Standard_True, Standard_False ) )
-            continue;
-
-        // Transfer surface color
-        Quantity_ColorRGBA surfColor;
-
-        if( aSrcColorTool->GetColor( srcLabel, XCAFDoc_ColorSurf, surfColor ) )
-            aDstColorTool->SetColor( dstLabel, surfColor, XCAFDoc_ColorSurf );
-
-        // Transfer curve color
-        Quantity_ColorRGBA curvColor;
-
-        if( aSrcColorTool->GetColor( srcLabel, XCAFDoc_ColorCurv, curvColor ) )
-            aDstColorTool->SetColor( dstLabel, curvColor, XCAFDoc_ColorCurv );
-
-        // Transfer generic color
-        Quantity_ColorRGBA genColor;
-
-        if( aSrcColorTool->GetColor( srcLabel, XCAFDoc_ColorGen, genColor ) )
-            aDstColorTool->SetColor( dstLabel, genColor, XCAFDoc_ColorGen );
-
-        // Also check for colors on individual faces
-        if( aSrcShapeTool->IsSimpleShape( srcLabel ) )
-        {
-            TopoDS_Shape shape = aSrcShapeTool->GetShape( srcLabel );
-
-            for( TopExp_Explorer exp( shape, TopAbs_FACE ); exp.More(); exp.Next() )
-            {
-                TopoDS_Face face = TopoDS::Face( exp.Current() );
-                Quantity_ColorRGBA faceColor;
-
-                if( aSrcColorTool->GetColor( face, XCAFDoc_ColorSurf, faceColor ) )
-                    aDstColorTool->SetColor( face, faceColor, XCAFDoc_ColorSurf );
-                else if( aSrcColorTool->GetColor( face, XCAFDoc_ColorGen, faceColor ) )
-                    aDstColorTool->SetColor( face, faceColor, XCAFDoc_ColorGen );
-            }
-        }
-    }
-
-    // Also iterate through subshapes and components recursively
-    TDF_LabelSequence srcFreeShapes;
-    aSrcShapeTool->GetFreeShapes( srcFreeShapes );
-
-    std::function<void( const TDF_Label& )> transferColorsRecursive = [&]( const TDF_Label& aLabel )
-    {
-        TopoDS_Shape shape = aSrcShapeTool->GetShape( aLabel );
-
-        if( shape.IsNull() )
-            return;
-
-        // Find this shape in destination
-        TDF_Label dstLabel;
-
-        if( aDstShapeTool->Search( shape, dstLabel, Standard_True, Standard_True, Standard_False ) )
-        {
-            Quantity_ColorRGBA color;
-
-            if( aSrcColorTool->GetColor( aLabel, XCAFDoc_ColorSurf, color ) )
-                aDstColorTool->SetColor( dstLabel, color, XCAFDoc_ColorSurf );
-
-            if( aSrcColorTool->GetColor( aLabel, XCAFDoc_ColorCurv, color ) )
-                aDstColorTool->SetColor( dstLabel, color, XCAFDoc_ColorCurv );
-
-            if( aSrcColorTool->GetColor( aLabel, XCAFDoc_ColorGen, color ) )
-                aDstColorTool->SetColor( dstLabel, color, XCAFDoc_ColorGen );
-        }
-
-        // Process children
-        for( TDF_ChildIterator it( aLabel ); it.More(); it.Next() )
-            transferColorsRecursive( it.Value() );
-
-        // Process components if this is an assembly
-        if( aSrcShapeTool->IsAssembly( aLabel ) )
-        {
-            TDF_LabelSequence components;
-            aSrcShapeTool->GetComponents( aLabel, components );
-
-            for( Standard_Integer j = 1; j <= components.Length(); j++ )
-            {
-                TDF_Label compLabel = components.Value( j );
-                TDF_Label refLabel;
-
-                if( aSrcShapeTool->GetReferredShape( compLabel, refLabel ) )
-                    transferColorsRecursive( refLabel );
-            }
-        }
-    };
-
-    for( Standard_Integer i = 1; i <= srcFreeShapes.Length(); i++ )
-        transferColorsRecursive( srcFreeShapes.Value( i ) );
-}
-
-
 TDF_Label STEP_PCB_MODEL::transferModel( Handle( TDocStd_Document ) & source,
                                          Handle( TDocStd_Document ) & dest, const VECTOR3D& aScale )
 {
-    // transfer data from Source into a top level component of Dest
-    // s_assy = shape tool for the source
     Handle( XCAFDoc_ShapeTool ) s_assy = XCAFDoc_DocumentTool::ShapeTool( source->Main() );
-    Handle( XCAFDoc_ColorTool ) s_color = XCAFDoc_DocumentTool::ColorTool( source->Main() );
 
-    // retrieve all free shapes within the assembly
-    TDF_LabelSequence frshapes;
+    NCollection_Sequence<TDF_Label> frshapes;
     s_assy->GetFreeShapes( frshapes );
 
-    // d_assy = shape tool for the destination
     Handle( XCAFDoc_ShapeTool ) d_assy = XCAFDoc_DocumentTool::ShapeTool( dest->Main() );
-    Handle( XCAFDoc_ColorTool ) d_color = XCAFDoc_DocumentTool::ColorTool( dest->Main() );
 
-    // create a new shape within the destination and set the assembly tool to point to it
+    // Create a new top-level assembly in the destination and clone the source's free shapes
+    // into it with XCAFDoc_Editor::Extract.  Extract rebuilds the XDE label tree by walking
+    // the component reference graph, so it preserves colors, names and sub-assembly structure
+    // even when the source root does not directly own the part labels (as is the case with
+    // default KiCad 3D models produced by CadQuery).  It is also immune to the
+    // "not self-contained" restriction of TDocStd_XLinkTool::Copy, so Fusion 360 STEP files
+    // with linked components work as well.
     TDF_Label d_targetLabel = d_assy->NewShape();
 
-    auto copyLabel = [&]( TDF_Label& d_label, const TDF_Label& s_label ) -> bool
+    if( !XCAFDoc_Editor::Extract( frshapes, d_targetLabel, false ) )
     {
-        // TDocStd_XLinkTool::Copy requires the source to be "self-contained", meaning it has
-        // no external references. Some STEP files (e.g. from Fusion 360 with linked components)
-        // may contain internal references that violate this constraint. In such cases, we fall
-        // back to extracting just the geometric shape without the full XDE document structure.
-        if( TDF_Tool::IsSelfContained( s_label ) )
-        {
-            TDocStd_XLinkTool link;
-            link.Copy( d_label, s_label );
-            return true;
-        }
-        else
-        {
-            // The source label is not self-contained. Extract the shape directly.
-            TopoDS_Shape shape = s_assy->GetShape( s_label );
-
-            if( shape.IsNull() )
-                return false;
-
-            // Add the shape directly without the XDE structure. This loses some metadata
-            // like colors and names, but allows the model to be successfully transferred.
-            d_assy->SetShape( d_label, shape );
-
-            m_reporter->Report( wxT( "Model contains non-self-contained data; some metadata may be lost." ),
-                                RPT_SEVERITY_INFO );
-            return true;
-        }
-    };
-
-    if( frshapes.Size() == 1 )
-    {
-        if( !copyLabel( d_targetLabel, frshapes.First() ) )
-        {
-            m_reporter->Report( wxT( "Failed to transfer model." ), RPT_SEVERITY_ERROR );
-            return TDF_Label();
-        }
+        m_reporter->Report( wxT( "Failed to transfer model." ), RPT_SEVERITY_ERROR );
+        return TDF_Label();
     }
-    else
-    {
-        // Rare case with multiple free shapes
-        for( TDF_Label& s_shapeLabel : frshapes )
-        {
-            TDF_Label d_component = d_assy->NewShape();
-
-            if( !copyLabel( d_component, s_shapeLabel ) )
-            {
-                m_reporter->Report( wxT( "Failed to transfer model component." ), RPT_SEVERITY_ERROR );
-                return TDF_Label();
-            }
-
-            d_assy->AddComponent( d_targetLabel, d_component, TopLoc_Location() );
-        }
-    }
-
-    // Transfer colors from source to destination document
-    // This is necessary because TDocStd_XLinkTool::Copy may not properly transfer
-    // color associations which are stored separately in the ColorTool section
-    transferColors( s_assy, s_color, d_assy, d_color );
 
     if( aScale.x != 1.0 || aScale.y != 1.0 || aScale.z != 1.0 )
         rescaleShapes( d_targetLabel, gp_XYZ( aScale.x, aScale.y, aScale.z ) );
@@ -3922,14 +3936,14 @@ TDF_Label STEP_PCB_MODEL::transferModel( Handle( TDocStd_Document ) & source,
 
 bool STEP_PCB_MODEL::performMeshing( Handle( XCAFDoc_ShapeTool ) & aShapeTool )
 {
-    TDF_LabelSequence freeShapes;
+    NCollection_Sequence<TDF_Label> freeShapes;
     aShapeTool->GetFreeShapes( freeShapes );
 
     m_reporter->Report( wxT( "Meshing model" ), RPT_SEVERITY_DEBUG );
 
     // GLTF is a mesh format, we have to trigger opencascade to mesh the shapes we composited into the asesmbly
     // To mesh models, lets just grab the free shape root and execute on them
-    for( Standard_Integer i = 1; i <= freeShapes.Length(); ++i )
+    for( int i = 1; i <= freeShapes.Length(); ++i )
     {
         TDF_Label    label = freeShapes.Value( i );
         TopoDS_Shape shape;
@@ -3938,10 +3952,10 @@ bool STEP_PCB_MODEL::performMeshing( Handle( XCAFDoc_ShapeTool ) & aShapeTool )
         // These deflection values basically affect the accuracy of the mesh generated, a tighter
         // deflection will result in larger meshes
         // We could make this a tunable parameter, but for now fix it
-        const Standard_Real      linearDeflection = 0.14;
-        const Standard_Real      angularDeflection = DEG2RAD( 30.0 );
-        BRepMesh_IncrementalMesh mesh( shape, linearDeflection, Standard_False, angularDeflection,
-                                       Standard_True );
+        const double      linearDeflection = 0.14;
+        const double      angularDeflection = DEG2RAD( 30.0 );
+        BRepMesh_IncrementalMesh mesh( shape, linearDeflection, false, angularDeflection,
+                                       true );
     }
 
     return true;

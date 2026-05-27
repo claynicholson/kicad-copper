@@ -35,6 +35,7 @@
 #include <gal/graphics_abstraction_layer.h>
 #include <geometry/geometry_utils.h>
 #include <pad.h>
+#include <padstack.h>
 #include <pcb_group.h>
 #include <pcb_generator.h>
 #include <pcb_edit_frame.h>
@@ -130,6 +131,8 @@ int EDIT_TOOL::Swap( const TOOL_EVENT& aEvent )
                 sTool->FilterCollectorForLockedItems( aCollector );
             } );
 
+    m_selectionTool->ReportFilteredLockedItems();
+
     if( selection.Size() < 2 )
         return 0;
 
@@ -155,6 +158,20 @@ int EDIT_TOOL::Swap( const TOOL_EVENT& aEvent )
 
         BOARD_ITEM* a = static_cast<BOARD_ITEM*>( edaItemA );
         BOARD_ITEM* b = static_cast<BOARD_ITEM*>( edaItemB );
+
+        // Pads may have a copper shape offset from the anchor/hole, so swap visible shape
+        // centers rather than anchor positions.  See PAD::SwapShapePositions.
+        if( a->Type() == PCB_PAD_T && b->Type() == PCB_PAD_T )
+        {
+            PAD::SwapShapePositions( static_cast<PAD*>( a ), static_cast<PAD*>( b ) );
+
+            PCB_LAYER_ID aLayer = a->GetLayer(), bLayer = b->GetLayer();
+            std::swap( aLayer, bLayer );
+            a->SetLayer( aLayer );
+            b->SetLayer( bLayer );
+
+            continue;
+        }
 
         // Swap X,Y position
         VECTOR2I aPos = a->GetPosition(), bPos = b->GetPosition();
@@ -691,6 +708,8 @@ int EDIT_TOOL::PackAndMoveFootprints( const TOOL_EVENT& aEvent )
                 sTool->FilterCollectorForLockedItems( aCollector );
             } );
 
+    m_selectionTool->ReportFilteredLockedItems();
+
     std::vector<FOOTPRINT*> footprintsToPack;
 
     for( EDA_ITEM* item : selection )
@@ -824,7 +843,12 @@ bool EDIT_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, BOARD_COMMIT* aCommit
                 sTool->FilterCollectorForLockedItems( aCollector );
             } );
 
-    if( m_dragging || selection.Empty() )
+    if( m_dragging )
+        return false;
+
+    m_selectionTool->ReportFilteredLockedItems();
+
+    if( selection.Empty() )
         return false;
 
     TOOL_EVENT pushedEvent = aEvent;
@@ -927,6 +951,8 @@ bool EDIT_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, BOARD_COMMIT* aCommit
         editFrame->PopTool( pushedEvent );
         return false;
     }
+
+    m_inMoveWithReference = moveWithReference;
 
     if( moveIndividually )
     {
@@ -1496,5 +1522,6 @@ bool EDIT_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, BOARD_COMMIT* aCommit
     editFrame->PopTool( pushedEvent );
     editFrame->GetCanvas()->SetCurrentCursor( KICURSOR::ARROW );
 
+    m_inMoveWithReference = false;
     return !restore_state;
 }

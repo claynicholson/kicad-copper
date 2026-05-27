@@ -25,6 +25,7 @@
 
 #include <connection_graph.h>
 #include <locale_io.h>
+#include <project/project_file.h>
 #include <schematic.h>
 #include <sch_commit.h>
 #include <sch_edit_frame.h>
@@ -121,10 +122,31 @@ SCHEMATIC* EESCHEMA_HELPERS::LoadSchematic( const wxString& aFileName,
     {
         SCH_SHEET* rootSheet = pi->LoadSchematicFile( schFile.GetFullPath(), schematic );
 
-        if( rootSheet )
-            schematic->SetTopLevelSheets( { rootSheet } );
-        else
+        if( !rootSheet )
             return nullptr;
+
+        schematic->SetTopLevelSheets( { rootSheet } );
+
+        // Make ${SHEETNAME} work on the root sheet until we properly support naming the root
+        // sheet.  Prefer the display name from the matching schematic.top_level_sheets entry in
+        // the project file so CLI/API exports show the same name the GUI does.
+        if( rootSheet->GetName().IsEmpty() )
+        {
+            wxString rootName = _( "Root" );
+
+            for( const TOP_LEVEL_SHEET_INFO& info : project->GetProjectFile().GetTopLevelSheets() )
+            {
+                wxFileName candidate( project->GetProjectPath(), info.filename );
+
+                if( candidate.SameAs( schFile ) && !info.name.IsEmpty() )
+                {
+                    rootName = info.name;
+                    break;
+                }
+            }
+
+            rootSheet->SetName( rootName );
+        }
     }
     catch( ... )
     {
@@ -147,6 +169,19 @@ SCHEMATIC* EESCHEMA_HELPERS::LoadSchematic( const wxString& aFileName,
 
     for( SCH_SCREEN* screen = screens.GetFirst(); screen; screen = screens.GetNext() )
         screen->MigrateSimModels();
+
+    schematic->LoadVariants();
+
+    wxString projectName = project->GetProjectName();
+
+    if( projectName.IsEmpty() )
+        projectName = schFile.GetName();
+
+    // Check must run before pruning so variant data on a stale instance path is migrated
+    // onto the new instance before the orphan is removed.
+    sheetList.CheckForMissingSymbolInstances( projectName );
+    screens.PruneOrphanedSymbolInstances( projectName, sheetList );
+    screens.PruneOrphanedSheetInstances( projectName, sheetList );
 
     sheetList.AnnotatePowerSymbols();
 

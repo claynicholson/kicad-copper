@@ -96,6 +96,7 @@ DIALOG_FOOTPRINT_PROPERTIES::DIALOG_FOOTPRINT_PROPERTIES( PCB_EDIT_FRAME* aParen
     SetIcon( icon );
 
     m_itemsGrid->SetTable( m_fields );
+    m_itemsGrid->OverrideMinSize( 1.0, 1.0 );
     m_itemsGrid->PushEventHandler( new GRID_TRICKS( m_itemsGrid ) );
     m_itemsGrid->SetupColumnAutosizer( PFC_VALUE );
     m_itemsGrid->ShowHideColumns( "0 1 2 3 4 5 7" );
@@ -156,9 +157,9 @@ DIALOG_FOOTPRINT_PROPERTIES::DIALOG_FOOTPRINT_PROPERTIES( PCB_EDIT_FRAME* aParen
         m_cbLocked,
         m_componentType,
         m_boardOnly,
-        m_excludeFromPosFiles,
-        m_excludeFromBOM,
         m_cbDNP,
+        m_excludeFromBOM,
+        m_excludeFromPosFiles,
       	m_NetClearanceCtrl,
         m_SolderMaskMarginCtrl,
       	m_allowSolderMaskBridges,

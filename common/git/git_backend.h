@@ -30,6 +30,8 @@
 #include <vector>
 #include <wx/string.h>
 
+#include "kigit_orphan_registry.h"
+
 class GIT_CLONE_HANDLER;
 class GIT_COMMIT_HANDLER;
 class GIT_PUSH_HANDLER;
@@ -65,6 +67,15 @@ public:
     virtual void Init() = 0;
     virtual void Shutdown() = 0;
 
+    /**
+     * Return the process-wide orphan thread registry owned by this backend.
+     *
+     * Callers that abandon a long-running git operation must route their
+     * cleanup thread through this registry so the shutdown path can wait for
+     * libgit2 workers to finish before calling git_libgit2_shutdown().
+     */
+    KIGIT_ORPHAN_REGISTRY& OrphanRegistry() { return m_orphanRegistry; }
+
     // Whether the libgit2 library is available/initialized enough for use
     virtual bool IsLibraryAvailable() = 0;
 
@@ -76,7 +87,11 @@ public:
                                  const wxString& aAuthorName,
                                  const wxString& aAuthorEmail ) = 0;
 
-    virtual PushResult Push( GIT_PUSH_HANDLER* aHandler ) = 0;
+    virtual CommitResult Amend( GIT_COMMIT_HANDLER* aHandler, const std::vector<wxString>& aFiles,
+                                const wxString& aMessage, const wxString& aAuthorName,
+                                const wxString& aAuthorEmail ) = 0;
+
+    virtual PushResult Push( GIT_PUSH_HANDLER* aHandler, bool aForce = false ) = 0;
 
     virtual bool HasChangedFiles( GIT_STATUS_HANDLER* aHandler ) = 0;
 
@@ -105,6 +120,8 @@ public:
 
     virtual bool PerformFetch( GIT_PULL_HANDLER* aHandler, bool aSkipLock ) = 0;
     virtual PullResult PerformPull( GIT_PULL_HANDLER* aHandler ) = 0;
+    virtual bool       ResetToUpstream( GIT_PULL_HANDLER* aHandler ) = 0;
+    virtual PullResult RebaseOntoUpstream( GIT_PULL_HANDLER* aHandler ) = 0;
 
     virtual void PerformRevert( GIT_REVERT_HANDLER* aHandler ) = 0;
 
@@ -120,6 +137,9 @@ public:
     virtual bool RemoveFromIndex( GIT_REMOVE_FROM_INDEX_HANDLER* aHandler, const wxString& aFilePath ) = 0;
 
     virtual void PerformRemoveFromIndex( GIT_REMOVE_FROM_INDEX_HANDLER* aHandler ) = 0;
+
+protected:
+    KIGIT_ORPHAN_REGISTRY m_orphanRegistry;
 };
 
 APIEXPORT GIT_BACKEND* GetGitBackend();

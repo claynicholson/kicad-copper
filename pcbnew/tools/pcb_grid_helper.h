@@ -28,7 +28,6 @@
 
 #include <vector>
 
-#include <pcb_item_containers.h>
 #include <tool/grid_helper.h>
 #include <geometry/intersection.h>
 #include <geometry/nearest.h>

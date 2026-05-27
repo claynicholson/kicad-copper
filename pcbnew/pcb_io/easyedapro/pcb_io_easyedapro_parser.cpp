@@ -587,6 +587,23 @@ PCB_IO_EASYEDAPRO_PARSER::ParseContour( nlohmann::json polyData, bool aInFill,
 }
 
 
+NETINFO_ITEM* PCB_IO_EASYEDAPRO_PARSER::getNet( BOARD* aBoard, const wxString& aNetName )
+{
+    if( !aBoard || aNetName.empty() )
+        return nullptr;
+
+    NETINFO_ITEM* net = aBoard->FindNet( aNetName );
+
+    if( !net )
+    {
+        net = new NETINFO_ITEM( aBoard, aNetName, static_cast<int>( aBoard->GetNetCount() ) + 1 );
+        aBoard->Add( net );
+    }
+
+    return net;
+}
+
+
 std::unique_ptr<PAD> PCB_IO_EASYEDAPRO_PARSER::createPAD( FOOTPRINT*            aFootprint,
                                                           const nlohmann::json& line )
 {
@@ -1052,22 +1069,63 @@ void PCB_IO_EASYEDAPRO_PARSER::ParseBoard(
             if( ruleType == wxS( "3" ) && isDefault ) // Track width
             {
                 wxString units = ruleData.at( 0 );
-                double   minVal = ruleData.at( 1 );
 
-                bds.m_TrackMinWidth = ScaleSize( minVal );
+                if( ruleData.at( 1 ).is_number() )
+                {
+                    // ["RULE","3","trackWidth",1,["mil",5,10,100]]
+                    double minVal = ruleData.at( 1 );
+                    // double optVal = ruleData.at( 2 );
+                    // double maxVal = ruleData.at( 3 );
+
+                    bds.m_TrackMinWidth = ScaleSize( minVal );
+                }
+                else
+                {
+                    // ["RULE","3","trackWidth",1,["mil",{"1":[10,10,150]}]]
+                    nlohmann::json table = ruleData.at( 1 );
+
+                    for( auto& [key, arr] : table.items() )
+                    {
+                        double minVal = arr.at( 0 );
+                        // double optVal = arr.at( 1 );
+                        // double maxVal = arr.at( 2 );
+
+                        bds.m_TrackMinWidth = ScaleSize( minVal );
+                    }
+                }
             }
             else if( ruleType == wxS( "1" ) && isDefault )
             {
                 wxString       units = ruleData.at( 0 );
                 nlohmann::json table = ruleData.at( 1 );
+                int            minVal = INT_MAX;
 
-                int minVal = INT_MAX;
-                for( const auto& arr : table )
+                if( table.is_array() && !table.empty() && table.at( 0 ).is_array() )
                 {
-                    for( int val : arr )
+                    // ["RULE","1","safeClearance",1,["mil",[[6],[6,6],[6,6,6],[6,6,6,6],[6,6,6,6,6],[6,6,6,6,6,6],[6,6,6,6,6,6,6],[11.8,11.8,11.8,11.8,11.8,11.8,11.8]]]]
+                    for( const auto& arr : table )
                     {
-                        if( val < minVal )
-                            minVal = val;
+                        for( int val : arr )
+                        {
+                            if( val != 0 && val < minVal )
+                                minVal = val;
+                        }
+                    }
+                }
+                else if( table.is_object() )
+                {
+                    // ["RULE","1","safeClearance",1,["mil",{"1":[[8,8,6,8,20,0,0,6,10,10],[8,6,8,8,12,0,0,6,10,10],[6,8,6,8,12,0,0,6,10,10],[8,8,8,8,12,0,0,6,10,10],
+                    //  [20,12,12,12,20,0,0,0,10,10],[0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0],[6,6,6,6,0,0,0,0,0,0],[10,10,10,10,10,0,0,0,0,0],[10,10,10,10,10,0,0,0,0,6]]}]]
+                    for( auto& [key, arr] : table.items() )
+                    {
+                        for( const auto& subarr : arr )
+                        {
+                            for( int val : subarr )
+                            {
+                                if( val != 0 && val < minVal )
+                                    minVal = val;
+                            }
+                        }
                     }
                 }
 
@@ -1111,7 +1169,7 @@ void PCB_IO_EASYEDAPRO_PARSER::ParseBoard(
                 via->SetDrill( ScaleSize( drill ) );
                 via->SetWidth( PADSTACK::ALL_LAYERS, ScaleSize( dia ) );
 
-                via->SetNet( aBoard->FindNet( netname ) );
+                via->SetNet( getNet( aBoard, netname ) );
 
                 aBoard->Add( via.release(), ADD_MODE::APPEND );
             }
@@ -1137,7 +1195,7 @@ void PCB_IO_EASYEDAPRO_PARSER::ParseBoard(
                 track->SetEnd( ScalePos( end ) );
                 track->SetWidth( ScaleSize( width ) );
 
-                track->SetNet( aBoard->FindNet( netname ) );
+                track->SetNet( getNet( aBoard, netname ) );
 
                 aBoard->Add( track.release(), ADD_MODE::APPEND );
             }
@@ -1173,7 +1231,7 @@ void PCB_IO_EASYEDAPRO_PARSER::ParseBoard(
                 arc->SetWidth( ScaleSize( width ) );
 
                 arc->SetLayer( klayer );
-                arc->SetNet( aBoard->FindNet( netname ) );
+                arc->SetNet( getNet( aBoard, netname ) );
 
                 aBoard->Add( arc.release(), ADD_MODE::APPEND );
             }
@@ -1206,7 +1264,7 @@ void PCB_IO_EASYEDAPRO_PARSER::ParseBoard(
 
                 std::unique_ptr<ZONE> zone = std::make_unique<ZONE>( aBoard );
 
-                zone->SetNet( aBoard->FindNet( netname ) );
+                zone->SetNet( getNet( aBoard, netname ) );
                 zone->SetLayer( klayer );
                 zone->Outline()->Append( SHAPE_RECT( zoneFillPoly.BBox() ).Outline() );
                 zone->SetFilledPolysList( klayer, zoneFillPoly );
@@ -1249,7 +1307,7 @@ void PCB_IO_EASYEDAPRO_PARSER::ParseBoard(
 
                 std::unique_ptr<ZONE> zone = std::make_unique<ZONE>( aBoard );
 
-                zone->SetNet( aBoard->FindNet( netname ) );
+                zone->SetNet( getNet( aBoard, netname ) );
                 zone->SetLayer( klayer );
                 zone->SetAssignedPriority( 500 - fillOrder );
                 zone->SetLocalClearance( bds.m_MinClearance );
@@ -1284,7 +1342,7 @@ void PCB_IO_EASYEDAPRO_PARSER::ParseBoard(
 
             std::unique_ptr<ZONE> zone = std::make_unique<ZONE>( aBoard );
 
-            zone->SetNet( aBoard->FindNet( netname ) );
+            zone->SetNet( getNet( aBoard, netname ) );
             zone->SetLayer( klayer );
             zone->Outline()->Append( contour );
             zone->SetFilledPolysList( klayer, contour );
@@ -1341,7 +1399,7 @@ void PCB_IO_EASYEDAPRO_PARSER::ParseBoard(
             std::unique_ptr<FOOTPRINT> footprint = std::make_unique<FOOTPRINT>( aBoard );
             std::unique_ptr<PAD>       pad = createPAD( footprint.get(), line );
 
-            pad->SetNet( aBoard->FindNet( netname ) );
+            pad->SetNet( getNet( aBoard, netname ) );
 
             VECTOR2I  pos = pad->GetPosition();
             EDA_ANGLE orient = pad->GetOrientation();
@@ -1763,7 +1821,7 @@ void PCB_IO_EASYEDAPRO_PARSER::ParseBoard(
                 PAD* pad = footprint->FindPadByNumber( padNumber );
                 if( pad )
                 {
-                    pad->SetNet( aBoard->FindNet( padNet ) );
+                    pad->SetNet( getNet( aBoard, padNet ) );
                 }
                 else
                 {

@@ -146,10 +146,6 @@ message DocumentSpecifier
 
     // If type == DT_PCB, identifies a PCB with a given filename, e.g. "board.kicad_pcb"
     string board_filename = 4;
-
-    // If type == DT_SCHEMATIC, identifies a single schematic file. This is relevant
-    // instead of `sheet_path` when specifying a top-level schematic to open or work with.
-    string schematic_filename = 6;
   }
 
   ProjectSpecifier project = 5;
@@ -310,6 +306,9 @@ message TextAttributes
   bool                        multiline            = 12;
   bool                        keep_upright         = 13;
   kiapi.common.types.Vector2  size                 = 14;
+
+  // May be present for schematic text; meaningless for board text
+  optional kiapi.common.types.Color color = 15;
 }
 
 message Text
@@ -347,9 +346,14 @@ message StrokeAttributes
 
 enum GraphicFillType
 {
-  GFT_UNKNOWN  = 0;
-  GFT_UNFILLED = 1;
-  GFT_FILLED   = 2;
+  GFT_UNKNOWN                           = 0;
+  GFT_UNFILLED                          = 1;
+  GFT_FILLED                            = 2;
+  GFT_FILLED_WITH_COLOR                 = 3;
+  GFT_FILLED_WITH_BACKGROUND_BODY_COLOR = 4;
+  GFT_HATCH                             = 5;
+  GFT_REVERSE_HATCH                     = 6;
+  GFT_CROSS_HATCH                       = 7;
 }
 
 message GraphicFillAttributes
@@ -403,6 +407,24 @@ message GraphicBezierAttributes
   kiapi.common.types.Vector2  end      = 4;
 }
 
+message GraphicEllipseAttributes
+{
+  kiapi.common.types.Vector2  center       = 1;
+  kiapi.common.types.Distance major_radius = 2;
+  kiapi.common.types.Distance minor_radius = 3;
+  kiapi.common.types.Angle    rotation     = 4;
+}
+
+message GraphicEllipseArcAttributes
+{
+  kiapi.common.types.Vector2  center       = 1;
+  kiapi.common.types.Distance major_radius = 2;
+  kiapi.common.types.Distance minor_radius = 3;
+  kiapi.common.types.Angle    rotation     = 4;
+  kiapi.common.types.Angle    start_angle  = 5;
+  kiapi.common.types.Angle    end_angle    = 6;
+}
+
 message GraphicShape
 {
   // Reserved for future use; base EDA_SHAPE doesn't have an ID or locked state right now
@@ -411,12 +433,14 @@ message GraphicShape
   GraphicAttributes attributes = 3;
 
   oneof geometry {
-    GraphicSegmentAttributes     segment    = 4;
-    GraphicRectangleAttributes   rectangle  = 5;
-    GraphicArcAttributes         arc        = 6;
-    GraphicCircleAttributes      circle     = 7;
-    PolySet                      polygon    = 8;
-    GraphicBezierAttributes      bezier     = 9;
+    GraphicSegmentAttributes     segment      = 4;
+    GraphicRectangleAttributes   rectangle    = 5;
+    GraphicArcAttributes         arc          = 6;
+    GraphicCircleAttributes      circle       = 7;
+    PolySet                      polygon      = 8;
+    GraphicBezierAttributes      bezier       = 9;
+    GraphicEllipseAttributes     ellipse      = 10;
+    GraphicEllipseArcAttributes  ellipse_arc  = 11;
   }
 }
 
@@ -484,4 +508,76 @@ enum ElectricalPinType
 
   // A no-connect pin should not be connected to any net
   EPT_NO_CONNECT = 12;
+}
+
+message RuleCheckerMarkerID
+{
+  string opaque_id = 1;
+}
+
+message RuleCheckerMarker
+{
+  RuleCheckerMarkerID id = 1;
+}
+
+enum RuleSeverity
+{
+  RS_UNKNOWN = 0;
+  RS_WARNING = 1;
+  RS_ERROR = 2;
+  RS_EXCLUSION = 3;
+  RS_IGNORE = 4;
+  RS_INFO = 5;
+  RS_ACTION = 6;
+  RS_DEBUG = 7;
+  RS_UNDEFINED = 8;
+}
+
+message MinOptMax
+{
+  optional int32 min = 1;
+  optional int32 opt = 2;
+  optional int32 max = 3;
+}
+
+enum PageSize
+{
+  PS_UNKNOWN = 0;
+  PS_A5 = 1;
+  PS_A4 = 2;
+  PS_A3 = 3;
+  PS_A2 = 4;
+  PS_A1 = 5;
+  PS_A0 = 6;
+  PS_ANSI_A = 7;   // ANSI A (8.5 x 11 in)
+  PS_ANSI_B = 8;   // ANSI B (11 x 17 in)
+  PS_ANSI_C = 9;   // ANSI C (17 x 22 in)
+  PS_ANSI_D = 10;  // ANSI D (22 x 34 in)
+  PS_ANSI_E = 11;  // ANSI E (34 x 44 in)
+  PS_GERBER = 12;  // 32 x 32 in
+  PS_US_LETTER = 13;
+  PS_US_LEGAL = 14;
+  PS_US_LEDGER = 15;
+  PS_USER = 16;
+}
+
+enum PageOrientation
+{
+  PO_UNKNOWN = 0;
+  PO_LANDSCAPE = 1;
+  PO_PORTRAIT = 2;
+}
+
+message PageSettings
+{
+  PageSize page_size = 1;
+
+  // Relevant only when page_size == PS_USER
+  Vector2 user_page_size = 2;
+
+  PageOrientation orientation = 4;
+
+  // Path to a .kicad_wks drawing sheet file.
+  // Empty string means the default (built-in) drawing sheet is used.
+  string drawing_sheet = 5;
 }

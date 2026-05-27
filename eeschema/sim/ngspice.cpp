@@ -330,7 +330,16 @@ bool NGSPICE::LoadNetlist( const std::string& aNetlist )
     lines.push_back( nullptr ); // sentinel, as requested in ngSpice_Circ description
 
     Command( "remcirc" );
+
+    // ngspice 46+ stopped substituting "gnd" with node 0 inside subcircuits when a PSpice
+    // compatibility mode is active. The mode flag is sampled once when the netlist is parsed,
+    // so clear it across the parse and restore it afterwards. The runtime PSpice features
+    // (.probe handling, etc.) are not gated on compat mode at parse time and continue to work.
+    Command( "unset ngbehavior" );
     bool success = !m_ngSpice_Circ( lines.data() );
+
+    if( Settings() )
+        updateNgspiceSettings();
 
     for( char* line : lines )
         free( line );
@@ -376,7 +385,9 @@ bool NGSPICE::IsRunning()
         restoreSignalHandlers();
 
         // Report the crash to the user
-        if( m_reporter )
+        std::lock_guard<std::mutex> lock( m_reporterMutex );
+
+        if( SIMULATOR_REPORTER* reporter = m_reporter.load( std::memory_order_acquire ) )
         {
             wxString signalName;
 
@@ -389,7 +400,7 @@ bool NGSPICE::IsRunning()
             default:      signalName = wxString::Format( wxT( "signal %d" ), signal ); break;
             }
 
-            m_reporter->Report( wxString::Format(
+            reporter->Report( wxString::Format(
                     _( "Simulation crashed (%s). This is usually caused by a bug in ngspice "
                        "or an invalid netlist. The simulator will be reset." ),
                     signalName ) );
@@ -727,7 +738,10 @@ int NGSPICE::cbSendChar( char* aWhat, int aId, void* aUser )
 {
     NGSPICE* sim = reinterpret_cast<NGSPICE*>( aUser );
 
-    if( sim->m_reporter )
+    std::lock_guard<std::mutex> lock( sim->m_reporterMutex );
+    SIMULATOR_REPORTER* reporter = sim->m_reporter.load( std::memory_order_acquire );
+
+    if( reporter )
     {
         // strip stdout/stderr from the line
         if( ( strncasecmp( aWhat, "stdout ", 7 ) == 0 )
@@ -736,7 +750,7 @@ int NGSPICE::cbSendChar( char* aWhat, int aId, void* aUser )
             aWhat += 7;
         }
 
-        sim->m_reporter->Report( aWhat );
+        reporter->Report( aWhat );
     }
 
     return 0;
@@ -757,8 +771,12 @@ int NGSPICE::cbBGThreadRunning( NG_BOOL aFinished, int aId, void* aUser )
     if( aFinished )
         sim->restoreSignalHandlers();
 
-    if( sim->m_reporter )
-        sim->m_reporter->OnSimStateChange( sim, aFinished ? SIM_IDLE : SIM_RUNNING );
+    // Hold the reporter mutex while invoking the reporter so SetReporter(nullptr)
+    // can serve as a barrier before the caller destroys the reporter.
+    std::lock_guard<std::mutex> lock( sim->m_reporterMutex );
+
+    if( SIMULATOR_REPORTER* reporter = sim->m_reporter.load( std::memory_order_acquire ) )
+        reporter->OnSimStateChange( sim, aFinished ? SIM_IDLE : SIM_RUNNING );
 
     return 0;
 }
@@ -767,9 +785,23 @@ int NGSPICE::cbBGThreadRunning( NG_BOOL aFinished, int aId, void* aUser )
 int NGSPICE::cbControlledExit( int aStatus, NG_BOOL aImmediate, NG_BOOL aExitOnQuit, int aId,
                                void* aUser )
 {
-    // Something went wrong, reload the dll
     NGSPICE* sim = reinterpret_cast<NGSPICE*>( aUser );
     sim->m_error = true;
+
+    // ngspice calls this when it encounters a fatal error (e.g. out of memory) or receives a
+    // 'quit' command. For error exits, we must notify the UI before ngspice crashes during
+    // cleanup, since cbBGThreadRunning may never fire if the background thread is terminated.
+    std::lock_guard<std::mutex> lock( sim->m_reporterMutex );
+    SIMULATOR_REPORTER* reporter = sim->m_reporter.load( std::memory_order_acquire );
+
+    if( !aExitOnQuit && reporter )
+    {
+        reporter->Report(
+                _( "Simulation terminated by ngspice. This may be caused by insufficient "
+                   "memory or an internal error. The simulator will be reset." ) );
+
+        reporter->OnSimStateChange( sim, SIM_IDLE );
+    }
 
     return 0;
 }

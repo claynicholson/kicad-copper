@@ -40,7 +40,7 @@
 # and will need the following tools findable in your PATH:
 #
 # 1) inkscape - command line mode is used, must be on your PATH
-# 2) pngcrush - this program must be on your PATH
+# 2) zopflipng or pngcrush - one of these programs must be on your PATH
 #
 
 # lower case is used for local variables, uppercase for global variables
@@ -175,6 +175,8 @@ set( BMAPS_MID
     add_corner
     add_dashed_line
     add_document
+    add_ellipse
+    add_ellipse_arc
     add_glabel
     add_graphical_segments
     add_graphical_polygon
@@ -502,6 +504,7 @@ set( BMAPS_MID
     rotate_cw_z
     save_as
     save
+    save_all
     select_layer_pair
     select_w_layer
     select_same_sheet
@@ -855,11 +858,12 @@ endfunction()
 
 
 # Function png2png
-# converts a basic PNG to one
+# Optimizes a PNG file, stripping metadata and reducing file size.
+# Uses zopflipng if available, otherwise falls back to pngcrush.
 function( png2png inputFile outFile )
 
     if( CREATE_LOG_FILES )
-        set( logfile "${TMP_DIR}/${bmn}.pngcrush.log" )
+        set( logfile "${TMP_DIR}/${bmn}.pngopt.log" )
     else()
         if( MSVC )
             set( logfile "nul" )
@@ -868,16 +872,22 @@ function( png2png inputFile outFile )
         endif()
     endif()
 
-    add_custom_command(
-        OUTPUT  ${outFile}
+    if( zopflipng_EXECUTABLE )
+        add_custom_command(
+            OUTPUT  ${outFile}
+            COMMAND ${zopflipng_EXECUTABLE} -m ${inputFile} ${outFile} > ${logfile}
+            DEPENDS ${inputFile}
+            COMMENT "Optimizing ${outFile}"
+            )
+    else()
+        add_custom_command(
+            OUTPUT  ${outFile}
+            COMMAND ${pngcrush_EXECUTABLE} -rem alla ${inputFile} ${outFile} > ${logfile}
+            DEPENDS ${inputFile}
+            COMMENT "Optimizing ${outFile}"
+            )
+    endif()
 
-        # pngcrush all icons without background to remove any extraneous text records.
-        COMMAND ${pngcrush_EXECUTABLE} -rem alla ${inputFile} ${outFile} > ${logfile}
-
-        DEPENDS ${inputFile}
-
-        COMMENT "Creating cleaned file ${outFile}"
-        )
 endfunction()
 
 
@@ -1075,21 +1085,26 @@ if( MAINTAIN_PNGS )
         endif( NOT Inkscape_EXECUTABLE )
     endif( NOT Inkscape_FOUND )
 
-    # pngcrush is required to reduce the size of the converted PNG files.
-    set( pngcrush_FOUND FALSE )
+    # A PNG optimizer is required to reduce the size of the converted PNG files.
+    # Prefer zopflipng (better compression) but fall back to pngcrush.
+    find_program( zopflipng_EXECUTABLE zopflipng DOC "The zopflipng PNG optimization program." )
 
-    if( NOT pngcrush_FOUND )
-        find_program( pngcrush_EXECUTABLE pngcrush DOC "The PNG size reduction program." )
+    if( zopflipng_EXECUTABLE )
+        set( zopflipng_EXECUTABLE ${zopflipng_EXECUTABLE}
+             CACHE FILEPATH "Path and file name of the zopflipng program." )
+        message( STATUS "The zopflipng PNG optimization program found." )
+    else()
+        find_program( pngcrush_EXECUTABLE pngcrush DOC "The pngcrush PNG size reduction program." )
 
-        if( NOT pngcrush_EXECUTABLE )
-            message( FATAL_ERROR "Could not find the pngcrush PNG size reduction program." )
-        else( NOT pngcrush_EXECUTABLE )
-            set( pngcrush_FOUND TRUE )
+        if( pngcrush_EXECUTABLE )
             set( pngcrush_EXECUTABLE ${pngcrush_EXECUTABLE}
                  CACHE FILEPATH "Path and file name of the pngcrush program." )
             message( STATUS "The pngcrush PNG size reduction program found." )
-        endif( NOT pngcrush_EXECUTABLE )
-    endif( NOT pngcrush_FOUND )
+        else()
+            message( FATAL_ERROR "Could not find zopflipng or pngcrush. "
+                     "One of these PNG optimization programs is required." )
+        endif()
+    endif()
 
     # these 3 cmake commands for each desired bitmap size set, repeat as needed:
     bitmap_dir( 16 16 "${BMAPS_SMALL}" )

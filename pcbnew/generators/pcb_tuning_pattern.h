@@ -60,8 +60,10 @@ public:
     void     SetPosition( const VECTOR2I& aPos ) override;
 
     void SetMinMax( const double aMin, const double aMax );
+    void SetChainMinMax( const double aMin, const double aMax );
 
     void ClearMinMax();
+    void ClearChainMinMax();
 
     void SetCurrent( const double aCurrent, const wxString& aLabel );
 
@@ -79,11 +81,27 @@ protected:
     double          m_min;
     double          m_max;
     double          m_current;
-    wxString        m_currentLabel;
-    wxString        m_currentText;
+    wxString        m_currentLabel;   // Header line label ("current length" etc.)
+    wxString        m_currentText;    // (unused now for dual-line layout but kept for compatibility)
     wxString        m_minText;
     wxString        m_maxText;
+    double          m_chainMin = 0.0;
+    double          m_chainMax = 0.0;
+    wxString        m_chainMinText;
+    wxString        m_chainMaxText;
     bool            m_isTimeDomain;
+    wxString        m_scopeLine;
+    wxString        m_netValue;
+    wxString        m_chainValue;
+    bool            m_hasSignalValue = false;
+public:
+    void SetScopeLine( const wxString& aLine ) { m_scopeLine = aLine; }
+    void SetNetAndSignalValues( const wxString& aNetVal, const wxString& aSignalVal, bool aHasSignal )
+    {
+        m_netValue = aNetVal;
+        m_chainValue = aSignalVal;
+        m_hasSignalValue = aHasSignal;
+    }
 };
 
 
@@ -571,4 +589,15 @@ protected:
     PNS::MEANDER_PLACER_BASE::TUNING_STATUS m_tuningStatus;
 
     bool                  m_updateSideFromEnd;
+
+    // Bridging cache (pad-to-pad gaps across 2-net series components in a chain)
+public:
+    long long GetCachedBridgingLength( BOARD* aBoard, const wxString& aNetChain, double* aDelayIUOut );
+
+private:
+    long long    m_cachedBridgingLen;
+    double       m_cachedBridgingDelayIU;
+    wxString     m_cachedBridgingSignal;
+    const BOARD* m_cachedBridgingBoardPtr = nullptr;
+    size_t       m_cachedBridgingPadCount;
 };

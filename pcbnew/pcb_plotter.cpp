@@ -34,10 +34,12 @@
 #include <jobs/job_export_pcb_dxf.h>
 #include <jobs/job_export_pcb_pdf.h>
 #include <jobs/job_export_pcb_plot.h>
+#include <jobs/job_export_pcb_png.h>
 #include <jobs/job_export_pcb_ps.h>
 #include <jobs/job_export_pcb_svg.h>
 #include <pgm_base.h>
 #include <pcbnew_settings.h>
+#include <geometry/shape_poly_set.h>
 #include <math/util.h> // for KiROUND
 
 
@@ -87,6 +89,12 @@ bool PCB_PLOTTER::Plot( const wxString& aOutputPath, const LSEQ& aLayersToPlot,
     if( m_plotOpts.GetFormat() == PLOT_FORMAT::SVG && m_plotOpts.GetSvgFitPagetoBoard() ) // Page is board boundary size
     {
         BOX2I     bbox = m_board->ComputeBoundingBox( false, false );
+        SHAPE_POLY_SET boardOutlines;
+
+        // Board outline geometry is better if it exists so that origin is not influenced by Edge.Cuts line width
+        if( m_board->GetBoardPolygonOutlines( boardOutlines, false ) && boardOutlines.OutlineCount() > 0 )
+            bbox = boardOutlines.BBox();
+
         PAGE_INFO currPageInfo = m_board->GetPageSettings();
 
         currPageInfo.SetWidthMils( bbox.GetWidth() / pcbIUScale.IU_PER_MILS );
@@ -239,6 +247,9 @@ bool PCB_PLOTTER::Plot( const wxString& aOutputPath, const LSEQ& aLayersToPlot,
             catch( ... )
             {
                 success = false;
+                delete plotter->RenderSettings();
+                delete plotter;
+                plotter = nullptr;
                 break;
             }
 
@@ -458,6 +469,13 @@ void PCB_PLOTTER::PlotJobToPlotOpts( PCB_PLOT_PARAMS& aOpts, JOB_EXPORT_PCB_PLOT
         aOpts.SetA4Output( psJob->m_forceA4 );
     }
 
+    if( aJob->m_plotFormat == JOB_EXPORT_PCB_PLOT::PLOT_FORMAT::PNG )
+    {
+        JOB_EXPORT_PCB_PNG* pngJob = static_cast<JOB_EXPORT_PCB_PNG*>( aJob );
+        aOpts.SetPngDPI( pngJob->m_dpi );
+        aOpts.SetPngAntialias( pngJob->m_antialias );
+    }
+
     aOpts.SetUseAuxOrigin( aJob->m_useDrillOrigin );
     aOpts.SetPlotFrameRef( aJob->m_plotDrawingSheet );
     aOpts.SetSubtractMaskFromSilk( aJob->m_subtractSolderMaskFromSilk );
@@ -485,6 +503,7 @@ void PCB_PLOTTER::PlotJobToPlotOpts( PCB_PLOT_PARAMS& aOpts, JOB_EXPORT_PCB_PLOT
     case JOB_EXPORT_PCB_PLOT::PLOT_FORMAT::DXF:    aOpts.SetFormat( PLOT_FORMAT::DXF );    break;
     case JOB_EXPORT_PCB_PLOT::PLOT_FORMAT::HPGL:   /* no longer supported */               break;
     case JOB_EXPORT_PCB_PLOT::PLOT_FORMAT::PDF:    aOpts.SetFormat( PLOT_FORMAT::PDF );    break;
+    case JOB_EXPORT_PCB_PLOT::PLOT_FORMAT::PNG:    aOpts.SetFormat( PLOT_FORMAT::PNG );    break;
     }
 
     wxString theme = aJob->m_colorTheme;

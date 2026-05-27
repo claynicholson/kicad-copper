@@ -32,7 +32,6 @@
 #include <bitmaps.h>
 #include <eeschema_id.h>
 #include <pgm_base.h>
-#include <python_scripting.h>
 #include <tool/action_menu.h>
 #include <tool/tool_manager.h>
 #include <settings/common_settings.h>
@@ -137,8 +136,12 @@ std::optional<TOOLBAR_CONFIGURATION> SCH_EDIT_TOOLBAR_SETTINGS::DefaultToolbarCo
               .AppendAction( SCH_ACTIONS::drawTextBox )
               .AppendAction( SCH_ACTIONS::drawTable )
               .AppendAction( SCH_ACTIONS::drawRectangle )
-              .AppendAction( SCH_ACTIONS::drawCircle )
-              .AppendAction( SCH_ACTIONS::drawArc )
+              .AppendGroup( TOOLBAR_GROUP_CONFIG( _( "Circle" ) )
+                            .AddAction( SCH_ACTIONS::drawCircle )
+                            .AddAction( SCH_ACTIONS::drawEllipse ) )
+              .AppendGroup( TOOLBAR_GROUP_CONFIG( _( "Arc" ) )
+                            .AddAction( SCH_ACTIONS::drawArc )
+                            .AddAction( SCH_ACTIONS::drawEllipseArc ) )
               .AppendAction( SCH_ACTIONS::drawBezier )
               .AppendAction( SCH_ACTIONS::drawLines )
               .AppendAction( SCH_ACTIONS::placeImage )
@@ -217,6 +220,8 @@ std::optional<TOOLBAR_CONFIGURATION> SCH_EDIT_TOOLBAR_SETTINGS::DefaultToolbarCo
         // TODO (ISM): Move this to individual actions for each script
         config.AppendControl( ACTION_TOOLBAR_CONTROLS::ipcScripting );
 
+        config.AppendControl( ACTION_TOOLBAR_CONTROLS::overrideLocks );
+
         break;
     }
 
@@ -253,8 +258,6 @@ void SCH_EDIT_FRAME::configureToolbars()
     auto pluginControlFactory =
             [this]( ACTION_TOOLBAR* aToolbar )
             {
-                // Add scripting console and API plugins
-                bool scriptingAvailable = SCRIPTING::IsWxAvailable();
 
 #ifdef KICAD_IPC_API
                 bool haveApiPlugins = Pgm().GetCommonSettings()->m_Api.enable_server
@@ -263,12 +266,10 @@ void SCH_EDIT_FRAME::configureToolbars()
                 bool haveApiPlugins = false;
 #endif
 
-                if( scriptingAvailable || haveApiPlugins )
+                if( haveApiPlugins )
                 {
                     aToolbar->AddScaledSeparator( aToolbar->GetParent() );
-
-                    if( haveApiPlugins )
-                        AddApiPluginTools( aToolbar );
+                    AddApiPluginTools( aToolbar );
                 }
             };
 

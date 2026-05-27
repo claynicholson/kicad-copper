@@ -34,6 +34,8 @@
 #include <settings/color_settings.h>
 #include <sch_painter.h>
 #include <schematic.h>
+#include <schematic_text_var_adapter.h>
+#include <text_var_dependency.h>
 #include <widgets/hierarchy_pane.h>
 #include <widgets/sch_design_block_pane.h>
 #include <widgets/sch_search_pane.h>
@@ -59,8 +61,6 @@ COLOR4D GetLayerColor( SCH_LAYER_ID aLayer )
 bool SCH_EDIT_FRAME::LoadProjectSettings()
 {
     SCHEMATIC_SETTINGS& settings = Schematic().Settings();
-    settings.m_JunctionSize = GetSchematicJunctionSize();
-    settings.m_HopOverScale = GetSchematicHopOverScale();
 
     GetRenderSettings()->SetDefaultPenWidth( settings.m_DefaultLineWidth );
     GetRenderSettings()->m_LabelSizeRatio  = settings.m_LabelSizeRatio;
@@ -137,6 +137,12 @@ void SCH_EDIT_FRAME::ShowSchematicSetupDialog( const wxString& aInitialPage )
 
         Prj().IncrementTextVarsTicker();
         Prj().IncrementNetclassesTicker();
+
+        // CROSS_REF keys deliberately excluded — those are driven by per-item
+        // SCH_COMMIT changes.
+        if( SCHEMATIC_TEXT_VAR_ADAPTER* adapter = Schematic().GetTextVarAdapter() )
+            adapter->Tracker().InvalidateProjectScoped();
+
         Pgm().GetSettingsManager().SaveProject();
 
         GetRenderSettings()->SetDefaultPenWidth( Schematic().Settings().m_DefaultLineWidth );
@@ -159,26 +165,6 @@ void SCH_EDIT_FRAME::ShowSchematicSetupDialog( const wxString& aInitialPage )
         RefreshOperatingPointDisplay();
         GetCanvas()->Refresh();
     }
-}
-
-
-int SCH_EDIT_FRAME::GetSchematicJunctionSize()
-{
-    std::vector<double>& sizeMultipliers = eeconfig()->m_Drawing.junction_size_mult_list;
-
-    PROJECT_FILE& projectFile = Prj().GetProjectFile();
-    double        multiplier = sizeMultipliers[projectFile.m_SchematicSettings->m_JunctionSizeChoice];
-    int           dotSize = KiROUND( projectFile.NetSettings()->GetDefaultNetclass()->GetWireWidth() * multiplier );
-
-    return std::max( dotSize, 1 );
-}
-
-
-double SCH_EDIT_FRAME::GetSchematicHopOverScale()
-{
-    std::vector<double>& sizeMultipliers = eeconfig()->m_Drawing.junction_size_mult_list;
-
-    return sizeMultipliers[Prj().GetProjectFile().m_SchematicSettings->m_HopOverSizeChoice];
 }
 
 
@@ -219,7 +205,17 @@ void SCH_EDIT_FRAME::saveProjectSettings()
         if( success && layoutfn.IsOk() && !layoutfn.FileExists() && layoutfn.HasName() )
         {
             if( layoutfn.DirExists() && layoutfn.IsDirWritable() )
-                DS_DATA_MODEL::GetTheInstance().Save( layoutfn.GetFullPath() );
+            {
+                try
+                {
+                    DS_DATA_MODEL::GetTheInstance().Save( layoutfn.GetFullPath() );
+                }
+                catch( const IO_ERROR& ioe )
+                {
+                    wxLogError( _( "Failed to save drawing sheet '%s': %s" ),
+                                layoutfn.GetFullPath(), ioe.What() );
+                }
+            }
         }
     }
 

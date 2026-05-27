@@ -107,6 +107,18 @@ private:
     HANDLER_RESULT<GraphicsDefaultsResponse> handleGetGraphicsDefaults(
             const HANDLER_CONTEXT<GetGraphicsDefaults>& aCtx );
 
+    HANDLER_RESULT<BoardDesignRulesResponse> handleGetBoardDesignRules(
+            const HANDLER_CONTEXT<GetBoardDesignRules>& aCtx );
+
+    HANDLER_RESULT<BoardDesignRulesResponse> handleSetBoardDesignRules(
+            const HANDLER_CONTEXT<SetBoardDesignRules>& aCtx );
+
+    HANDLER_RESULT<CustomRulesResponse> handleGetCustomDesignRules(
+            const HANDLER_CONTEXT<GetCustomDesignRules>& aCtx );
+
+    HANDLER_RESULT<CustomRulesResponse> handleSetCustomDesignRules(
+            const HANDLER_CONTEXT<SetCustomDesignRules>& aCtx );
+
     HANDLER_RESULT<types::Vector2> handleGetBoardOrigin(
             const HANDLER_CONTEXT<GetBoardOrigin>& aCtx );
 
@@ -124,15 +136,21 @@ private:
     HANDLER_RESULT<PadstackPresenceResponse> handleCheckPadstackPresenceOnLayers(
             const HANDLER_CONTEXT<CheckPadstackPresenceOnLayers>& aCtx );
 
-    HANDLER_RESULT<types::TitleBlockInfo> handleGetTitleBlockInfo(
-            const HANDLER_CONTEXT<commands::GetTitleBlockInfo>& aCtx );
-
     HANDLER_RESULT<commands::ExpandTextVariablesResponse> handleExpandTextVariables(
             const HANDLER_CONTEXT<commands::ExpandTextVariables>& aCtx );
 
     HANDLER_RESULT<Empty> handleInteractiveMoveItems( const HANDLER_CONTEXT<InteractiveMoveItems>& aCtx );
 
     HANDLER_RESULT<NetsResponse> handleGetNets( const HANDLER_CONTEXT<GetNets>& aCtx );
+
+    HANDLER_RESULT<commands::GetItemsResponse> handleGetConnectedItems(
+            const HANDLER_CONTEXT<GetConnectedItems>& aCtx );
+
+    HANDLER_RESULT<commands::GetItemsResponse> handleGetItemsByNet(
+            const HANDLER_CONTEXT<GetItemsByNet>& aCtx );
+
+    HANDLER_RESULT<commands::GetItemsResponse> handleGetItemsByNetClass(
+            const HANDLER_CONTEXT<GetItemsByNetClass>& aCtx );
 
     HANDLER_RESULT<NetClassForNetsResponse> handleGetNetClassForNets(
             const HANDLER_CONTEXT<GetNetClassForNets>& aCtx );
@@ -213,12 +231,24 @@ protected:
         return kiapi::common::types::DOCTYPE_PCB;
     }
 
-    bool validateDocumentInternal( const DocumentSpecifier& aDocument ) const override;
+    tl::expected<bool, ApiResponseStatus> validateDocumentInternal( const DocumentSpecifier& aDocument ) const override;
 
     void deleteItemsInternal( std::map<KIID, ItemDeletionStatus>& aItemsToDelete,
                               const std::string& aClientName ) override;
 
     std::optional<EDA_ITEM*> getItemFromDocument( const DocumentSpecifier& aDocument, const KIID& aId ) override;
+
+    std::optional<TITLE_BLOCK*> getTitleBlock() override;
+
+    std::optional<PAGE_INFO> getPageSettings() override;
+
+    bool setPageSettings( const PAGE_INFO& aPageInfo ) override;
+
+    wxString getDrawingSheetFileName() override;
+
+    void setDrawingSheetFileName( const wxString& aFileName ) override;
+
+    void onModified() override;
 
 private:
     BOARD_CONTEXT* context() const { return m_context.get(); }

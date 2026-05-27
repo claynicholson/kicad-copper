@@ -99,6 +99,10 @@ EESCHEMA_JOBS_HANDLER::EESCHEMA_JOBS_HANDLER( KIWAY* aKiway ) :
                   wxCHECK( bomJob && editFrame, false );
 
                   DIALOG_SYMBOL_FIELDS_TABLE dlg( editFrame, bomJob );
+
+                  if( dlg.WasAborted() )
+                      return false;
+
                   return dlg.ShowModal() == wxID_OK;
               } );
     Register( "pythonbom",
@@ -169,6 +173,13 @@ EESCHEMA_JOBS_HANDLER::EESCHEMA_JOBS_HANDLER( KIWAY* aKiway ) :
               {
                   return true;
               } );
+}
+
+
+void EESCHEMA_JOBS_HANDLER::ClearCachedSchematic()
+{
+    delete m_cliSchematic;
+    m_cliSchematic = nullptr;
 }
 
 
@@ -285,14 +296,15 @@ int EESCHEMA_JOBS_HANDLER::JobExportPlot( JOB* aJob )
     aJob->SetTitleBlock( sch->RootScreen()->GetTitleBlock() );
     sch->Project().ApplyTextVars( aJob->GetVarOverrides() );
 
-    // Determine the variant to use. The CLI path populates m_variantNames directly, while
-    // the jobset path serializes into m_variant. Use whichever is available.
+    // Determine the variant to use.  The dialog edit path writes m_variant (the scalar),
+    // while the CLI path populates m_variantNames directly.  Prefer the scalar so a
+    // dialog-edited selection always wins over a stale list left over from CLI input.
     wxString variantName;
 
-    if( !aPlotJob->m_variantNames.empty() )
-        variantName = aPlotJob->m_variantNames.front();
-    else if( !aPlotJob->m_variant.IsEmpty() )
+    if( !aPlotJob->m_variant.IsEmpty() )
         variantName = aPlotJob->m_variant;
+    else if( !aPlotJob->m_variantNames.empty() )
+        variantName = aPlotJob->m_variantNames.front();
 
     if( !variantName.IsEmpty() && variantName != wxS( "all" ) )
         sch->SetCurrentVariant( variantName );
@@ -335,6 +347,7 @@ int EESCHEMA_JOBS_HANDLER::JobExportPlot( JOB* aJob )
     case SCH_PLOT_FORMAT::PDF:    format = PLOT_FORMAT::PDF;    break;
     case SCH_PLOT_FORMAT::SVG:    format = PLOT_FORMAT::SVG;    break;
     case SCH_PLOT_FORMAT::POST:   format = PLOT_FORMAT::POST;   break;
+    case SCH_PLOT_FORMAT::PNG:    format = PLOT_FORMAT::PNG;    break;
     case SCH_PLOT_FORMAT::HPGL:   /* no longer supported */     break;
     }
 
@@ -395,6 +408,13 @@ int EESCHEMA_JOBS_HANDLER::JobExportPlot( JOB* aJob )
     // Always export dxf in mm by kicad-cli (similar to Pcbnew)
     plotOpts.m_DXF_File_Unit = DXF_UNITS::MM;
 
+    if( aPlotJob->m_plotFormat == SCH_PLOT_FORMAT::PNG )
+    {
+        JOB_EXPORT_SCH_PLOT_PNG* pngJob = static_cast<JOB_EXPORT_SCH_PLOT_PNG*>( aPlotJob );
+        plotOpts.m_pngDPI = pngJob->m_dpi;
+        plotOpts.m_pngAntialias = pngJob->m_antialias;
+    }
+
     schPlotter->Plot( format, plotOpts, renderSettings.get(), m_reporter );
 
     if( m_reporter->HasMessageOfSeverity( RPT_SEVERITY_ERROR ) )
@@ -433,7 +453,7 @@ int EESCHEMA_JOBS_HANDLER::JobExportNetlist( JOB* aJob )
 
     // Annotation warning check
     SCH_REFERENCE_LIST referenceList;
-    sch->Hierarchy().GetSymbols( referenceList );
+    sch->Hierarchy().GetSymbols( referenceList, SYMBOL_FILTER_ALL );
 
     if( referenceList.GetCount() > 0 )
     {
@@ -563,7 +583,7 @@ int EESCHEMA_JOBS_HANDLER::JobExportBom( JOB* aJob )
 
     // Annotation warning check
     SCH_REFERENCE_LIST referenceList;
-    sch->Hierarchy().GetSymbols( referenceList, false, false );
+    sch->Hierarchy().GetSymbols( referenceList, SYMBOL_FILTER_NON_POWER, false );
 
     if( referenceList.GetCount() > 0 )
     {
@@ -924,7 +944,7 @@ int EESCHEMA_JOBS_HANDLER::JobExportPythonBom( JOB* aJob )
 
     // Annotation warning check
     SCH_REFERENCE_LIST referenceList;
-    sch->Hierarchy().GetSymbols( referenceList );
+    sch->Hierarchy().GetSymbols( referenceList, SYMBOL_FILTER_ALL );
 
     if( referenceList.GetCount() > 0 )
     {
@@ -1292,7 +1312,9 @@ int EESCHEMA_JOBS_HANDLER::JobSchErc( JOB* aJob )
         else
             fn.SetExt( FILEEXT::ReportFileExtension );
 
-        ercJob->SetConfiguredOutputPath( fn.GetFullName() );
+        // Use a transient working path so an empty configured output filename isn't persisted
+        // back into the jobset file. Mirrors the PCB DRC handler.
+        ercJob->SetWorkingOutputPath( fn.GetFullName() );
     }
 
     wxString outPath = ercJob->GetFullOutputPath( &sch->Project() );

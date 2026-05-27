@@ -36,6 +36,9 @@
 #include <schematic_lexer.h>
 #include <sch_file_versions.h>
 #include <default_values.h>    // For some default values
+#include <map>
+#include <set>
+#include <wx/string.h>
 
 
 class SCH_PIN;
@@ -119,6 +122,34 @@ public:
      */
     const std::vector<wxString>& GetParseWarnings() const { return m_parseWarnings; }
 
+    // Access parsed per-chain netclass overrides (chain name -> netclass name).
+    const std::map<wxString, wxString>& GetNetChainNetClasses() const
+    {
+        return m_netChainNetClasses;
+    }
+
+    // Access parsed per-chain colour overrides (chain name -> RGBA).
+    const std::map<wxString, COLOR4D>& GetNetChainColors() const
+    {
+        return m_netChainColors;
+    }
+
+    struct CHAIN_TERMINAL
+    {
+        wxString ref;
+        wxString pin;
+    };
+    using CHAIN_TERMINALS = std::pair<CHAIN_TERMINAL, CHAIN_TERMINAL>;
+
+    const std::map<wxString, CHAIN_TERMINALS>& GetNetChainTerminalRefs() const { return m_netChainTerminalRefs; }
+
+    // Access parsed per-chain member-net lists.  Used to reconstruct manually force-created
+    // chains on reload, since those have no underlying inferred potential.
+    const std::map<wxString, std::set<wxString>>& GetNetChainMemberNets() const
+    {
+        return m_netChainMemberNets;
+    }
+
 private:
     // Group membership info refers to other Uuids in the file.
     // We don't want to rely on group declarations being last in the file, so
@@ -132,6 +163,7 @@ private:
         KIID              uuid;
         LIB_ID            libId;
         std::vector<KIID> memberUuids;
+        bool              locked = false;
     };
 
     void checkpoint();
@@ -217,9 +249,13 @@ private:
 
     SCH_FIELD* parseProperty( std::unique_ptr<LIB_SYMBOL>& aSymbol );
 
+    void parseEllipseBody( SCH_SHAPE* aShape, bool aIsArc, bool aIsSchematic, TSCHEMATIC_T::T aFirstTok );
+
     SCH_SHAPE* parseSymbolArc();
     SCH_SHAPE* parseSymbolBezier();
     SCH_SHAPE* parseSymbolCircle();
+    SCH_SHAPE*   parseSymbolEllipse();
+    SCH_SHAPE*   parseSymbolEllipseArc();
     SCH_PIN* parseSymbolPin();
     SCH_SHAPE* parseSymbolPolyLine();
     SCH_SHAPE* parseSymbolRectangle();
@@ -246,6 +282,8 @@ private:
     SCH_SHAPE* parseSchPolyLine();
     SCH_SHAPE* parseSchArc();
     SCH_SHAPE* parseSchCircle();
+    SCH_SHAPE*          parseSchEllipse();
+    SCH_SHAPE*          parseSchEllipseArc();
     SCH_SHAPE* parseSchRectangle();
     SCH_SHAPE* parseSchBezier();
     SCH_RULE_AREA* parseSchRuleArea();
@@ -255,6 +293,7 @@ private:
     SCH_TABLECELL* parseSchTableCell();
     SCH_TABLE* parseSchTable();
     void parseBusAlias( SCH_SCREEN* aScreen );
+    void parseSchNetChain();
 
     void resolveGroups( SCH_SCREEN* aParent );
 
@@ -295,6 +334,11 @@ private:
     std::vector<GROUP_INFO> m_groupInfos;
 
     std::vector<wxString>   m_parseWarnings;    ///< Non-fatal warnings collected during parsing
+
+    std::map<wxString, wxString>              m_netChainNetClasses;
+    std::map<wxString, COLOR4D>               m_netChainColors;
+    std::map<wxString, CHAIN_TERMINALS>       m_netChainTerminalRefs;
+    std::map<wxString, std::set<wxString>>    m_netChainMemberNets;
 };
 
 #endif    // SCH_IO_KICAD_SEXPR_PARSER_H_

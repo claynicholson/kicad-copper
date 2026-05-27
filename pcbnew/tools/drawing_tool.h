@@ -27,6 +27,7 @@
 #ifndef __DRAWING_TOOL_H
 #define __DRAWING_TOOL_H
 
+#include <functional>
 #include <stack>
 #include <optional>
 #include <tool/tool_menu.h>
@@ -71,19 +72,23 @@ public:
         LINE,
         RECTANGLE,
         CIRCLE,
+        ELLIPSE,
+        ELLIPSE_ARC,
         ARC,
         BEZIER,
         IMAGE,
         TEXT,
         ANCHOR,
-        MD_POINT,           // Do not use POINT: it collide with a Windows header define
+        MD_POINT, // Do not use POINT: it collide with a Windows header define
         DXF,
         DIMENSION,
         KEEPOUT,
         ZONE,
         GRAPHIC_POLYGON,
         VIA,
-        TUNING
+        TUNING,
+        TABLE,
+        BARCODE
     };
 
     /**
@@ -129,6 +134,10 @@ public:
      * to be used as the center of the circle. The second click determines the circle radius.
      */
     int DrawCircle( const TOOL_EVENT& aEvent );
+
+    int DrawEllipse( const TOOL_EVENT& aEvent );
+
+    int DrawEllipseArc( const TOOL_EVENT& aEvent );
 
     /**
      * Start interactively drawing an arc.
@@ -271,6 +280,9 @@ private:
                     std::optional<VECTOR2D> aStartingPoint,
                     std::stack<PCB_SHAPE*>* aCommittedGraphics );
 
+    int runSimpleShapeDraw( const TOOL_EVENT& aEvent, SHAPE_T aShapeType, MODE aMode, const wxString& aCommitLabel,
+                            std::function<bool( const TOOL_EVENT&, PCB_SHAPE**, std::optional<VECTOR2D> )> aDrawer );
+
     /**
      * Start drawing an arc.
      *
@@ -281,6 +293,7 @@ private:
      */
     bool drawArc( const TOOL_EVENT& aTool, PCB_SHAPE** aGraphic,
                   std::optional<VECTOR2D> aStartingPoint );
+
 
     /**
      * Draw a bezier curve.

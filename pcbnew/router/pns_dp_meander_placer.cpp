@@ -20,6 +20,7 @@
  */
 
 #include <optional>
+#include <algorithm>
 
 #include <core/typeinfo.h>
 
@@ -159,6 +160,11 @@ bool DP_MEANDER_PLACER::Start( const VECTOR2I& aP, ITEM* aStartItem )
     const BOARD_CONNECTED_ITEM* conItem = static_cast<BOARD_CONNECTED_ITEM*>( aStartItem->GetSourceItem() );
     m_netClass = conItem->GetEffectiveNetClass();
 
+    m_baselineLength = origPathLength();
+    m_baselineDelay = m_settings.m_isTimeDomain ? origPathDelay() : 0;
+
+    initChainExtras();
+
     calculateTimeDomainTargets();
 
     return true;
@@ -181,7 +187,7 @@ long long int DP_MEANDER_PLACER::origPathLength() const
 int64_t DP_MEANDER_PLACER::origPathDelay() const
 {
     const int64_t totalP = m_padToDieDelayP + lineDelay( m_tunedPathP, m_startPad_p, m_endPad_p );
-    const int64_t totalN = m_padToDieDelayP + lineDelay( m_tunedPathN, m_startPad_n, m_endPad_n );
+    const int64_t totalN = m_padToDieDelayN + lineDelay( m_tunedPathN, m_startPad_n, m_endPad_n );
     return std::max( totalP, totalN );
 }
 
@@ -207,6 +213,36 @@ bool DP_MEANDER_PLACER::pairOrientation( const DIFF_PAIR::COUPLED_SEGMENTS& aPai
 
 bool DP_MEANDER_PLACER::Move( const VECTOR2I& aP, ITEM* aEndItem )
 {
+    // Reuse the chain-extras aggregate captured at Start(). Other nets in the chain are
+    // not edited during a tuning session, so we don't need to walk the BOARD again.
+    const long long extraDelay = m_chainExtrasValid ? m_chainExtrasDelay : 0;
+
+    m_settings.m_signalExtraDelay = extraDelay;
+
+    // Derive per-net budget from chain target, accounting for stubs not in the PNS path.
+    // Take the tighter of chain budget and existing per-net constraint.
+    if( m_settings.m_targetSignalLength.Opt() != MEANDER_SETTINGS::LENGTH_UNCONSTRAINED )
+    {
+        const long long otherLen = chainNarrowingOffset();
+
+        long long budgetMin = std::max( 0LL, m_settings.m_targetSignalLength.Min() - otherLen );
+        long long budgetOpt = std::max( 0LL, m_settings.m_targetSignalLength.Opt() - otherLen );
+        long long budgetMax = std::max( budgetOpt, m_settings.m_targetSignalLength.Max() - otherLen );
+
+        if( m_settings.m_targetLength.Opt() == MEANDER_SETTINGS::LENGTH_UNCONSTRAINED )
+        {
+            m_settings.m_targetLength.SetMin( budgetMin );
+            m_settings.m_targetLength.SetOpt( budgetOpt );
+            m_settings.m_targetLength.SetMax( budgetMax );
+        }
+        else
+        {
+            m_settings.m_targetLength.SetMin( std::max( m_settings.m_targetLength.Min(), budgetMin ) );
+            m_settings.m_targetLength.SetOpt( std::min( m_settings.m_targetLength.Opt(), budgetOpt ) );
+            m_settings.m_targetLength.SetMax( std::min( m_settings.m_targetLength.Max(), budgetMax ) );
+        }
+    }
+
     calculateTimeDomainTargets();
 
     if( m_currentStart == aP )
@@ -224,6 +260,9 @@ bool DP_MEANDER_PLACER::Move( const VECTOR2I& aP, ITEM* aEndItem )
 
     m_originPair.CP().Split( m_currentStart, aP, preP, tunedP, postP );
     m_originPair.CN().Split( m_currentStart, aP, preN, tunedN, postN );
+
+    tunedP.Simplify();
+    tunedN.Simplify();
 
     // Bail out early if the tuned sections are empty (issue #22041). This can happen when the
     // split points are too close together or outside the line chain.
@@ -297,7 +336,116 @@ bool DP_MEANDER_PLACER::Move( const VECTOR2I& aP, ITEM* aEndItem )
         }
     }
 
+    struct GET_ITEM_RET
+    {
+        std::optional<SHAPE_ARC> arc;
+        VECTOR2I                 startPt;
+        VECTOR2I                 endPt;
+    };
+
+    auto getItem = [&]( const SHAPE_LINE_CHAIN& aChain, int aIndex, int aLastIndex )
+    {
+        std::optional<SHAPE_ARC> optArc;
+        VECTOR2I                 startPt;
+        VECTOR2I                 endPt;
+
+        if( aChain.IsArcSegment( aIndex ) )
+        {
+            SHAPE_ARC arc = aChain.Arc( aChain.ArcIndex( aIndex ) );
+            optArc = arc;
+            startPt = arc.GetStart();
+            endPt = arc.GetEnd();
+        }
+        else
+        {
+            SEG seg = aChain.GetSegment( aIndex );
+            startPt = seg.A;
+            endPt = seg.B;
+        }
+
+        return GET_ITEM_RET{ optArc, startPt, endPt };
+    };
+
+    auto checkIndex = [&]( bool& aOk, int aCurIndex, int aLastIndex ) -> bool
+    {
+        aOk = aCurIndex <= aLastIndex && aCurIndex != -1;
+        return aOk;
+    };
+
     int curIndexP = 0, curIndexN = 0;
+
+    auto addCornersUntilIndex = [&]( int aLastIndexP, int aLastIndexN )
+    {
+        while( true )
+        {
+            bool p_ok, n_ok;
+            checkIndex( p_ok, curIndexP, aLastIndexP );
+            checkIndex( n_ok, curIndexN, aLastIndexN );
+
+            if( !p_ok && !n_ok )
+                break;
+
+            auto p_item = getItem( tunedP, curIndexP, aLastIndexP );
+            auto n_item = getItem( tunedN, curIndexN, aLastIndexN );
+
+            if( !p_item.arc && !n_item.arc )
+            {
+                m_result.AddCorner( p_item.startPt, n_item.startPt );
+            }
+            else if( p_item.arc && n_item.arc )
+            {
+                m_result.AddArc( *p_item.arc, *n_item.arc );
+            }
+            else if( p_item.arc && !n_item.arc )
+            {
+                m_result.AddCorner( p_item.startPt, n_item.startPt );
+
+                // Find arc in N
+                while( checkIndex( n_ok, curIndexN, aLastIndexN ) )
+                {
+                    curIndexN = tunedN.NextShape( curIndexN );
+                    n_item = getItem( tunedN, curIndexN, aLastIndexN );
+
+                    if( n_item.arc )
+                    {
+                        m_result.AddArc( *p_item.arc, *n_item.arc );
+                        break;
+                    }
+                    else
+                    {
+                        m_result.AddCorner( p_item.startPt, n_item.startPt );
+                    }
+                }
+            }
+            else if( !p_item.arc && n_item.arc )
+            {
+                m_result.AddCorner( p_item.startPt, n_item.startPt );
+
+                // Find arc in P
+                while( checkIndex( p_ok, curIndexP, aLastIndexP ) )
+                {
+                    curIndexP = tunedP.NextShape( curIndexP );
+                    p_item = getItem( tunedP, curIndexP, aLastIndexP );
+
+                    if( p_item.arc )
+                    {
+                        m_result.AddArc( *p_item.arc, *n_item.arc );
+                        break;
+                    }
+                    else
+                    {
+                        m_result.AddCorner( p_item.startPt, n_item.startPt );
+                    }
+                }
+            }
+
+            if( p_ok )
+                curIndexP = tunedP.NextShape( curIndexP );
+
+            if( n_ok )
+                curIndexN = tunedN.NextShape( curIndexN );
+        }
+    };
 
     for( const DIFF_PAIR::COUPLED_SEGMENTS& sp : coupledSegments )
     {
@@ -311,72 +459,12 @@ bool DP_MEANDER_PLACER::Move( const VECTOR2I& aP, ITEM* aEndItem )
 
         PNS_DBG( Dbg(), AddShape, base, GREEN, 10000, wxT( "dp-baseline" ) );
 
-        while( sp.indexP >= curIndexP && curIndexP != -1 )
-        {
-            if( tunedP.IsArcSegment( curIndexP ) )
-            {
-                ssize_t arcIndex = tunedP.ArcIndex( curIndexP );
-
-                m_result.AddArcAndPt( tunedP.Arc( arcIndex ), tunedN.CPoint( curIndexN ) );
-            }
-            else
-            {
-                m_result.AddCorner( tunedP.CPoint( curIndexP ), tunedN.CPoint( curIndexN ) );
-            }
-
-            curIndexP = tunedP.NextShape( curIndexP );
-        }
-
-        while( sp.indexN >= curIndexN && curIndexN != -1 )
-        {
-            if( tunedN.IsArcSegment( curIndexN ) )
-            {
-                ssize_t arcIndex = tunedN.ArcIndex( curIndexN );
-
-                m_result.AddPtAndArc( tunedP.CPoint( sp.indexP ), tunedN.Arc( arcIndex ) );
-            }
-            else
-            {
-                m_result.AddCorner( tunedP.CPoint( sp.indexP ), tunedN.CPoint( curIndexN ) );
-            }
-
-            curIndexN = tunedN.NextShape( curIndexN );
-        }
+        addCornersUntilIndex( sp.indexP, sp.indexN );
 
         m_result.MeanderSegment( base, side );
     }
 
-    while( curIndexP < tunedP.PointCount() && curIndexP != -1 )
-    {
-        if( tunedP.IsArcSegment( curIndexP ) )
-        {
-            ssize_t arcIndex = tunedP.ArcIndex( curIndexP );
-
-            m_result.AddArcAndPt( tunedP.Arc( arcIndex ), tunedN.CPoint( curIndexN ) );
-        }
-        else
-        {
-            m_result.AddCorner( tunedP.CPoint( curIndexP ), tunedN.CPoint( curIndexN ) );
-        }
-
-        curIndexP = tunedP.NextShape( curIndexP );
-    }
-
-    while( curIndexN < tunedN.PointCount() && curIndexN != -1 )
-    {
-        if( tunedN.IsArcSegment( curIndexN ) )
-        {
-            ssize_t arcIndex = tunedN.ArcIndex( curIndexN );
-
-            m_result.AddPtAndArc( tunedP.CLastPoint(), tunedN.Arc( arcIndex ) );
-        }
-        else
-        {
-            m_result.AddCorner( tunedP.CLastPoint(), tunedN.CPoint( curIndexN ) );
-        }
-
-        curIndexN = tunedN.NextShape( curIndexN );
-    }
+    addCornersUntilIndex( tunedP.PointCount() - 1, tunedN.PointCount() - 1 );
 
     m_result.AddCorner( tunedP.CLastPoint(), tunedN.CLastPoint() );
 
@@ -618,11 +706,25 @@ void DP_MEANDER_PLACER::calculateTimeDomainTargets()
     // If this is a time domain tuning, calculate the target length for the desired total delay
     if( m_settings.m_isTimeDomain )
     {
-        const int64_t curDelay = origPathDelay();
+        const int64_t curDelayChain = origPathDelay();
+        const int64_t curDelayPair = curDelayChain - m_settings.m_signalExtraDelay; // subtract other nets
 
-        const int64_t desiredDelayMin = m_settings.m_targetLengthDelay.Min();
-        const int64_t desiredDelayOpt = m_settings.m_targetLengthDelay.Opt();
-        const int64_t desiredDelayMax = m_settings.m_targetLengthDelay.Max();
+        bool useSignalTarget = ( m_settings.m_targetSignalLengthDelay.Opt() != MEANDER_SETTINGS::DELAY_UNCONSTRAINED );
+        const MINOPTMAX<long long int>& targetDelaySet = useSignalTarget ? m_settings.m_targetSignalLengthDelay
+                                                                         : m_settings.m_targetLengthDelay;
+
+        int64_t desiredDelayMin = targetDelaySet.Min();
+        int64_t desiredDelayOpt = targetDelaySet.Opt();
+        int64_t desiredDelayMax = targetDelaySet.Max();
+
+        if( useSignalTarget )
+        {
+            desiredDelayMin = std::max<int64_t>( 0, desiredDelayMin - m_settings.m_signalExtraDelay );
+            desiredDelayOpt = std::max<int64_t>( 0, desiredDelayOpt - m_settings.m_signalExtraDelay );
+            desiredDelayMax = std::max<int64_t>( desiredDelayOpt, desiredDelayMax - m_settings.m_signalExtraDelay );
+        }
+
+        const int64_t curDelay = useSignalTarget ? curDelayPair : curDelayChain;
 
         const int64_t delayDifferenceOpt = desiredDelayOpt - curDelay;
 

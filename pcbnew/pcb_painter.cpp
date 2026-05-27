@@ -27,6 +27,7 @@
 
 #include <advanced_config.h>
 #include <board.h>
+#include <netinfo.h>
 #include <board_design_settings.h>
 #include <pcb_track.h>
 #include <pcb_group.h>
@@ -71,6 +72,7 @@
 #include <geometry/shape_simple.h>
 #include <geometry/shape_circle.h>
 #include <geometry/shape_arc.h>
+#include <geometry/shape_ellipse.h>
 #include <stroke_params.h>
 #include <bezier_curves.h>
 #include <kiface_base.h>
@@ -328,14 +330,14 @@ COLOR4D PCB_RENDER_SETTINGS::GetColor( const BOARD_ITEM* aItem, int aLayer ) con
         return color;
 
     // Selection disambiguation
-    if( aItem->IsBrightened() )
+    if( aItem->IsBrightened() || ( aItem->Type() == PCB_MARKER_T && aItem->IsSelected() ) )
     {
         if( aItem->Type() == PCB_MARKER_T )
         {
-            auto it = m_layerColors.find( LAYER_DRC_HIGHLIGHTED );
+            auto itemLayerIter = m_layerColors.find( LAYER_DRC_HIGHLIGHTED );
 
-            if( it != m_layerColors.end() )
-                return it->second;
+            if( itemLayerIter != m_layerColors.end() )
+                return itemLayerIter->second;
         }
 
         return color.Brightened( m_selectFactor ).WithAlpha( 0.8 );
@@ -830,6 +832,28 @@ void PCB_PAINTER::draw( const PCB_TRACK* aTrack, int aLayer )
     int      track_width = aTrack->GetWidth();
     COLOR4D  color       = m_pcbSettings.GetColor( aTrack, aLayer );
 
+    // If a chain highlight is active and the track belongs to the highlighted
+    // chain, and the chain has a colour override configured on the board,
+    // prefer that colour.  Only do this when we're drawing the actual copper
+    // (not netname labels, clearance outlines, etc.).
+    if( IsCopperLayer( aLayer ) && !m_pcbSettings.m_highlightedNetChain.IsEmpty() )
+    {
+        if( NETINFO_ITEM* netinfo = aTrack->GetNet() )
+        {
+            if( netinfo->GetNetChain() == m_pcbSettings.m_highlightedNetChain )
+            {
+                if( const BOARD* board = aTrack->GetBoard() )
+                {
+                    COLOR4D chainColor =
+                            board->GetNetChainColor( m_pcbSettings.m_highlightedNetChain );
+
+                    if( chainColor != COLOR4D::UNSPECIFIED )
+                        color = chainColor.WithAlpha( color.a );
+                }
+            }
+        }
+    }
+
     if( IsNetnameLayer( aLayer ) )
     {
         if( !pcbconfig() || pcbconfig()->m_Display.m_NetNames < 2 )
@@ -1068,6 +1092,24 @@ void PCB_PAINTER::draw( const PCB_VIA* aVia, int aLayer )
     if( color == COLOR4D::CLEAR )
         return;
 
+    // Chain highlight colour override for copper/hole layers.
+    if( board && !m_pcbSettings.m_highlightedNetChain.IsEmpty()
+        && ( IsCopperLayer( aLayer ) || IsViaCopperLayer( aLayer )
+             || aLayer == LAYER_VIA_HOLES ) )
+    {
+        if( NETINFO_ITEM* netinfo = aVia->GetNet() )
+        {
+            if( netinfo->GetNetChain() == m_pcbSettings.m_highlightedNetChain )
+            {
+                COLOR4D chainColor =
+                        board->GetNetChainColor( m_pcbSettings.m_highlightedNetChain );
+
+                if( chainColor != COLOR4D::UNSPECIFIED )
+                    color = chainColor.WithAlpha( color.a );
+            }
+        }
+    }
+
     const int copperLayer = IsViaCopperLayer( aLayer ) ? aLayer - LAYER_VIA_COPPER_START : aLayer;
 
     PCB_LAYER_ID currentLayer = ToLAYER_ID( copperLayer );
@@ -1222,6 +1264,28 @@ void PCB_PAINTER::draw( const PCB_VIA* aVia, int aLayer )
         m_gal->SetIsFill( true );
 
         m_gal->DrawCircle( center, radius );
+
+        // Draw backdrill indicators (semi-circles extending into the hole) on top of the
+        // hole wall so they remain visible regardless of layer rendering order
+        if( !m_pcbSettings.IsPrinting() )
+        {
+            std::optional<int> secDrill = aVia->GetSecondaryDrillSize();
+            std::optional<int> terDrill = aVia->GetTertiaryDrillSize();
+
+            if( secDrill.value_or( 0 ) > 0 )
+            {
+                drawBackdrillIndicator( aVia, center, *secDrill,
+                                        aVia->GetSecondaryDrillStartLayer(),
+                                        aVia->GetSecondaryDrillEndLayer() );
+            }
+
+            if( terDrill.value_or( 0 ) > 0 )
+            {
+                drawBackdrillIndicator( aVia, center, *terDrill,
+                                        aVia->GetTertiaryDrillStartLayer(),
+                                        aVia->GetTertiaryDrillEndLayer() );
+            }
+        }
     }
     else if( aLayer == LAYER_VIA_HOLES )
     {
@@ -1290,28 +1354,6 @@ void PCB_PAINTER::draw( const PCB_VIA* aVia, int aLayer )
 
         if( draw )
             m_gal->DrawCircle( center, radius );
-
-        // Draw backdrill indicators (semi-circles extending into the hole)
-        // Drawn on copper layer so they appear above the annular ring
-        if( !m_pcbSettings.IsPrinting() && draw )
-        {
-            std::optional<int> secDrill = aVia->GetSecondaryDrillSize();
-            std::optional<int> terDrill = aVia->GetTertiaryDrillSize();
-
-            if( secDrill.value_or( 0 ) > 0 )
-            {
-                drawBackdrillIndicator( aVia, center, *secDrill,
-                                        aVia->GetSecondaryDrillStartLayer(),
-                                        aVia->GetSecondaryDrillEndLayer() );
-            }
-
-            if( terDrill.value_or( 0 ) > 0 )
-            {
-                drawBackdrillIndicator( aVia, center, *terDrill,
-                                        aVia->GetTertiaryDrillStartLayer(),
-                                        aVia->GetTertiaryDrillEndLayer() );
-            }
-        }
 
         // Draw post-machining indicator if this layer is post-machined
         if( !m_pcbSettings.IsPrinting() && draw )
@@ -1578,6 +1620,29 @@ void PCB_PAINTER::draw( const PAD* aPad, int aLayer )
         }
 
         m_gal->SetMinLineWidth( 1.0 );
+
+        // Draw backdrill indicators on top of the hole wall so they remain visible
+        // regardless of layer rendering order
+        if( !m_pcbSettings.IsPrinting() && aPad->GetDrillSizeX() > 0 )
+        {
+            VECTOR2I holePos = slot->GetSeg().A;
+            VECTOR2I secDrill = aPad->GetSecondaryDrillSize();
+            VECTOR2I terDrill = aPad->GetTertiaryDrillSize();
+
+            if( secDrill.x > 0 )
+            {
+                drawBackdrillIndicator( aPad, holePos, secDrill.x,
+                                        aPad->GetSecondaryDrillStartLayer(),
+                                        aPad->GetSecondaryDrillEndLayer() );
+            }
+
+            if( terDrill.x > 0 )
+            {
+                drawBackdrillIndicator( aPad, holePos, terDrill.x,
+                                        aPad->GetTertiaryDrillStartLayer(),
+                                        aPad->GetTertiaryDrillEndLayer() );
+            }
+        }
 
         return;
     }
@@ -1895,28 +1960,6 @@ void PCB_PAINTER::draw( const PAD* aPad, int aLayer )
             m_gal->DrawPolygon( polySet );
         }
 
-        // Draw backdrill indicators (semi-circles extending into the hole)
-        // Drawn on copper layer so they appear above the annular ring
-        if( !m_pcbSettings.IsPrinting() && aPad->GetDrillSizeX() > 0 )
-        {
-            VECTOR2D holePos = aPad->GetPosition() + aPad->GetOffset( pcbLayer );
-            VECTOR2I secDrill = aPad->GetSecondaryDrillSize();
-            VECTOR2I terDrill = aPad->GetTertiaryDrillSize();
-
-            if( secDrill.x > 0 )
-            {
-                drawBackdrillIndicator( aPad, holePos, secDrill.x,
-                                        aPad->GetSecondaryDrillStartLayer(),
-                                        aPad->GetSecondaryDrillEndLayer() );
-            }
-
-            if( terDrill.x > 0 )
-            {
-                drawBackdrillIndicator( aPad, holePos, terDrill.x,
-                                        aPad->GetTertiaryDrillStartLayer(),
-                                        aPad->GetTertiaryDrillEndLayer() );
-            }
-        }
     }
 
     if( !m_pcbSettings.IsPrinting() && IsCopperLayer( pcbLayer ) && aPad->GetDrillSizeX() > 0 )
@@ -1973,6 +2016,65 @@ void PCB_PAINTER::draw( const PAD* aPad, int aLayer )
             std::shared_ptr<SHAPE_SEGMENT> slot = aPad->GetEffectiveHoleShape();
             m_gal->DrawSegment( slot->GetSeg().A, slot->GetSeg().B,
                                 slot->GetWidth() + 2 * clearance );
+        }
+    }
+
+    if( m_pcbSettings.IsHighlightEnabled()
+            && m_pcbSettings.GetHighlightNetCodes().contains( aPad->GetNetCode() ) )
+    {
+        NETINFO_ITEM* net = aPad->GetNet();
+        if( net && ( net->GetTerminalPad( 0 ) == aPad || net->GetTerminalPad( 1 ) == aPad ) )
+        {
+            BOX2I box = aPad->GetBoundingBox();
+            m_gal->SetIsFill( false );
+            m_gal->SetIsStroke( true );
+
+            // Base emphasis (net highlight)
+            COLOR4D termColor = color.Brightened( 0.2 );
+            int baseWidth = m_pcbSettings.m_outlineWidth * 2;
+
+            // If a grouped chain highlight is active and this pad belongs to that chain,
+            // make the emphasis stronger (brighter + thicker + inset second rectangle).
+            if( !m_pcbSettings.m_highlightedNetChain.IsEmpty()
+                    && net && net->GetNetChain() == m_pcbSettings.m_highlightedNetChain )
+            {
+                // Prefer the chain's own colour override if the board has one.
+                if( const BOARD* board = aPad->GetBoard() )
+                {
+                    COLOR4D chainColor =
+                            board->GetNetChainColor( m_pcbSettings.m_highlightedNetChain );
+
+                    if( chainColor != COLOR4D::UNSPECIFIED )
+                        termColor = chainColor;
+                    else
+                        termColor = termColor.Brightened( 0.25 );
+                }
+                else
+                {
+                    termColor = termColor.Brightened( 0.25 );
+                }
+
+                baseWidth = m_pcbSettings.m_outlineWidth * 3;
+            }
+
+            m_gal->SetStrokeColor( termColor );
+            m_gal->SetLineWidth( baseWidth );
+            m_gal->DrawRectangle( box.GetOrigin(), box.GetEnd() );
+
+            if( !m_pcbSettings.m_highlightedNetChain.IsEmpty()
+                    && net && net->GetNetChain() == m_pcbSettings.m_highlightedNetChain )
+            {
+                // Draw an inner rectangle for additional visual distinction.
+                // Shrink by one outline width equivalent to avoid excessive size.
+                int inset = baseWidth * 2; // screen-space approx; acceptable heuristic
+                BOX2I inner = box;
+                inner.Inflate( -inset, -inset );
+                if( inner.GetWidth() > 0 && inner.GetHeight() > 0 )
+                {
+                    m_gal->SetLineWidth( m_pcbSettings.m_outlineWidth );
+                    m_gal->DrawRectangle( inner.GetOrigin(), inner.GetEnd() );
+                }
+            }
         }
     }
 }
@@ -2333,6 +2435,59 @@ void PCB_PAINTER::draw( const PCB_SHAPE* aShape, int aLayer )
 
             break;
 
+        case SHAPE_T::ELLIPSE:
+        {
+            const VECTOR2D   center( aShape->GetEllipseCenter() );
+            const int        majorR = aShape->GetEllipseMajorRadius();
+            const int        minorR = aShape->GetEllipseMinorRadius();
+            const EDA_ANGLE& rot = aShape->GetEllipseRotation();
+
+            if( outline_mode )
+            {
+                m_gal->DrawEllipse( center, majorR - thickness / 2, minorR - thickness / 2, rot );
+                m_gal->DrawEllipse( center, majorR + thickness / 2, minorR + thickness / 2, rot );
+            }
+            else
+            {
+                m_gal->SetIsFill( aShape->IsSolidFill() );
+                m_gal->SetIsStroke( lineStyle == LINE_STYLE::SOLID && thickness > 0 );
+                m_gal->SetLineWidth( thickness );
+
+                if( lineStyle == LINE_STYLE::SOLID && thickness > 0 )
+                    m_gal->DrawEllipse( center, majorR, minorR, rot );
+                else if( isSolidFill )
+                    m_gal->DrawEllipse( center, majorR, minorR, rot );
+            }
+
+            break;
+        }
+
+        case SHAPE_T::ELLIPSE_ARC:
+        {
+            const VECTOR2D   center( aShape->GetEllipseCenter() );
+            const int        majorR = aShape->GetEllipseMajorRadius();
+            const int        minorR = aShape->GetEllipseMinorRadius();
+            const EDA_ANGLE& rot = aShape->GetEllipseRotation();
+            const EDA_ANGLE& start = aShape->GetEllipseStartAngle();
+            const EDA_ANGLE& end = aShape->GetEllipseEndAngle();
+
+            if( outline_mode )
+            {
+                m_gal->DrawEllipseArc( center, majorR - thickness / 2, minorR - thickness / 2, rot, start, end );
+                m_gal->DrawEllipseArc( center, majorR + thickness / 2, minorR + thickness / 2, rot, start, end );
+            }
+            else if( lineStyle == LINE_STYLE::SOLID )
+            {
+                // no interior fill for arcs
+                m_gal->SetIsFill( false );
+                m_gal->SetIsStroke( thickness > 0 );
+                m_gal->SetLineWidth( thickness );
+                m_gal->DrawEllipseArc( center, majorR, minorR, rot, start, end );
+            }
+
+            break;
+        }
+
         case SHAPE_T::UNDEFINED:
             break;
         }
@@ -2346,7 +2501,25 @@ void PCB_PAINTER::draw( const PCB_SHAPE* aShape, int aLayer )
             m_gal->SetIsStroke( false );
         }
 
-        std::vector<SHAPE*> shapes = aShape->MakeEffectiveShapes( true );
+        std::vector<SHAPE*> shapes;
+
+        // For ellipses, use SHAPE_ELLIPSE directly so STROKE_PARAMS::Stroke can
+        // distribute dashes uniformly by arc length instead of per-tessellation-segment.
+        if( aShape->GetShape() == SHAPE_T::ELLIPSE )
+        {
+            shapes.push_back( new SHAPE_ELLIPSE( aShape->GetEllipseCenter(), aShape->GetEllipseMajorRadius(),
+                                                 aShape->GetEllipseMinorRadius(), aShape->GetEllipseRotation() ) );
+        }
+        else if( aShape->GetShape() == SHAPE_T::ELLIPSE_ARC )
+        {
+            shapes.push_back( new SHAPE_ELLIPSE( aShape->GetEllipseCenter(), aShape->GetEllipseMajorRadius(),
+                                                 aShape->GetEllipseMinorRadius(), aShape->GetEllipseRotation(),
+                                                 aShape->GetEllipseStartAngle(), aShape->GetEllipseEndAngle() ) );
+        }
+        else
+        {
+            shapes = aShape->MakeEffectiveShapes( true );
+        }
 
         for( SHAPE* shape : shapes )
         {
@@ -2813,7 +2986,7 @@ void PCB_PAINTER::draw( const FOOTPRINT* aFootprint, int aLayer )
 #endif
     }
 
-    if( aLayer == LAYER_CONFLICTS_SHADOW )
+    if( aLayer == LAYER_CONFLICTS_SHADOW && aFootprint->IsConflicting() )
     {
         const SHAPE_POLY_SET& frontpoly = aFootprint->GetCourtyard( F_CrtYd );
         const SHAPE_POLY_SET& backpoly = aFootprint->GetCourtyard( B_CrtYd );
@@ -2905,13 +3078,17 @@ void PCB_PAINTER::draw( const ZONE* aZone, int aLayer )
 {
     if( aLayer == LAYER_CONFLICTS_SHADOW )
     {
-        COLOR4D color = m_pcbSettings.GetColor( aZone, aLayer );
+        if( aZone->IsConflicting() && aZone->GetIsRuleArea() )
+        {
+            COLOR4D color = m_pcbSettings.GetColor( aZone, aLayer );
 
-        m_gal->SetIsFill( true );
-        m_gal->SetIsStroke( false );
-        m_gal->SetFillColor( color );
+            m_gal->SetIsFill( true );
+            m_gal->SetIsStroke( false );
+            m_gal->SetFillColor( color );
 
-        m_gal->DrawPolygon( aZone->Outline()->Outline( 0 ) );
+            m_gal->DrawPolygon( aZone->Outline()->Outline( 0 ) );
+        }
+
         return;
     }
 
@@ -3206,7 +3383,13 @@ void PCB_PAINTER::draw( const PCB_MARKER* aMarker, int aLayer )
     case LAYER_DRC_ERROR:
     case LAYER_DRC_WARNING:
     case LAYER_DRC_EXCLUSION:
+    case LAYER_DRC_HIGHLIGHTED:
     {
+        // The active marker is redrawn on LAYER_DRC_HIGHLIGHTED so it lands on top of any
+        // neighbouring inactive markers
+        if( aLayer == LAYER_DRC_HIGHLIGHTED && !aMarker->IsBrightened() && !aMarker->IsSelected() )
+            return;
+
         bool isShadow = aLayer == LAYER_MARKER_SHADOWS;
 
         SHAPE_LINE_CHAIN polygon;
@@ -3233,7 +3416,7 @@ void PCB_PAINTER::draw( const PCB_MARKER* aMarker, int aLayer )
     }
 
     case LAYER_DRC_SHAPES:
-        if( !aMarker->IsBrightened() )
+        if( !aMarker->IsBrightened() && !aMarker->IsSelected() )
             return;
 
         for( const PCB_SHAPE& shape : aMarker->GetShapes() )

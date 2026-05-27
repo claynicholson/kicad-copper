@@ -28,7 +28,6 @@
 
 #include <kicommon.h>
 #include <boost/uuid/uuid.hpp>
-#include <macros_swig.h>
 #include <nlohmann/json_fwd.hpp>
 
 #include <string>
@@ -145,10 +144,7 @@ extern KICOMMON_API KIID niluuid;
 
 KICOMMON_API KIID& NilUuid();
 
-// declare KIID_VECT_LIST as std::vector<KIID> both for c++ and swig:
-DECL_VEC_FOR_SWIG( KIID_VECT_LIST, KIID )
-
-class KICOMMON_API KIID_PATH : public KIID_VECT_LIST
+class KICOMMON_API KIID_PATH : public std::vector<KIID>
 {
 public:
     KIID_PATH()

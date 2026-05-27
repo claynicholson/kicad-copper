@@ -28,6 +28,7 @@
 #include "pns_topology.h"
 
 #include <board_connected_item.h>
+#include <algorithm>
 
 #include <length_delay_calculation/tuning_profile_parameters_iface.h>
 
@@ -104,6 +105,11 @@ bool MEANDER_PLACER::Start( const VECTOR2I& aP, ITEM* aStartItem )
     const BOARD_CONNECTED_ITEM* conItem = static_cast<BOARD_CONNECTED_ITEM*>( aStartItem->GetSourceItem() );
     m_netClass = conItem->GetEffectiveNetClass();
 
+    m_baselineLength = origPathLength();
+    m_baselineDelay = m_settings.m_isTimeDomain ? origPathDelay() : 0;
+
+    initChainExtras();
+
     calculateTimeDomainTargets();
 
     return true;
@@ -112,13 +118,15 @@ bool MEANDER_PLACER::Start( const VECTOR2I& aP, ITEM* aStartItem )
 
 long long int MEANDER_PLACER::origPathLength() const
 {
-    return m_padToDieLength + lineLength( m_tunedPath, m_startPad_n, m_endPad_n );
+    return m_padToDieLength + m_settings.m_signalExtraLength
+            + lineLength( m_tunedPath, m_startPad_n, m_endPad_n );
 }
 
 
 int64_t MEANDER_PLACER::origPathDelay() const
 {
-    return m_padToDieDelay + lineDelay( m_tunedPath, m_startPad_n, m_endPad_n );
+    return m_padToDieDelay + m_settings.m_signalExtraDelay
+            + lineDelay( m_tunedPath, m_startPad_n, m_endPad_n );
 }
 
 
@@ -127,11 +135,31 @@ void MEANDER_PLACER::calculateTimeDomainTargets()
     // If this is a time domain tuning, calculate the target length for the desired total delay
     if( m_settings.m_isTimeDomain )
     {
-        const int64_t curDelay = origPathDelay();
+        // curDelayChain includes other nets (chain aggregate). curDelayNet excludes extras.
+        const int64_t curDelayChain = origPathDelay();
+        const int64_t curDelayNet = curDelayChain - m_settings.m_signalExtraDelay;
 
-        const int64_t desiredDelayMin = m_settings.m_targetLengthDelay.Min();
-        const int64_t desiredDelayOpt = m_settings.m_targetLengthDelay.Opt();
-        const int64_t desiredDelayMax = m_settings.m_targetLengthDelay.Max();
+        // Prefer chain-level target if explicitly set (i.e. not unconstrained and differs from net target)
+        bool useSignalTarget = ( m_settings.m_targetSignalLengthDelay.Opt() != MEANDER_SETTINGS::DELAY_UNCONSTRAINED );
+
+        const MINOPTMAX<long long int>& targetDelaySet = useSignalTarget ? m_settings.m_targetSignalLengthDelay
+                                                                         : m_settings.m_targetLengthDelay;
+
+        // Desired overall chain delay values
+        int64_t desiredDelayMin = targetDelaySet.Min();
+        int64_t desiredDelayOpt = targetDelaySet.Opt();
+        int64_t desiredDelayMax = targetDelaySet.Max();
+
+        // If using chain target, convert desired overall chain delay into desired per-net contribution
+        if( useSignalTarget )
+        {
+            desiredDelayMin = std::max<int64_t>( 0, desiredDelayMin - m_settings.m_signalExtraDelay );
+            desiredDelayOpt = std::max<int64_t>( 0, desiredDelayOpt - m_settings.m_signalExtraDelay );
+            desiredDelayMax = std::max<int64_t>( desiredDelayOpt, desiredDelayMax - m_settings.m_signalExtraDelay );
+        }
+
+        // Current delay basis for comparison (per-net when using chain target else aggregate)
+        const int64_t curDelay = useSignalTarget ? curDelayNet : curDelayChain;
 
         const int64_t delayDifferenceOpt = desiredDelayOpt - curDelay;
 
@@ -157,10 +185,41 @@ void MEANDER_PLACER::calculateTimeDomainTargets()
 
 bool MEANDER_PLACER::Move( const VECTOR2I& aP, ITEM* aEndItem )
 {
+    // Reuse the chain-extras aggregate captured at Start(). Other nets in the chain are
+    // not edited during a tuning session, so we don't need to walk the BOARD again.
+    const long long extraDelay = m_chainExtrasValid ? m_chainExtrasDelay : 0;
+
+    // m_signalExtraDelay is needed for calculateTimeDomainTargets().
+    m_settings.m_signalExtraDelay = extraDelay;
+
+    // Derive per-net budget from chain target, accounting for stubs not in the PNS path.
+    // Take the tighter of chain budget and existing per-net constraint (from EditStart).
+    if( m_settings.m_targetSignalLength.Opt() != MEANDER_SETTINGS::LENGTH_UNCONSTRAINED )
+    {
+        const long long otherLen = chainNarrowingOffset();
+
+        long long budgetMin = std::max( 0LL, m_settings.m_targetSignalLength.Min() - otherLen );
+        long long budgetOpt = std::max( 0LL, m_settings.m_targetSignalLength.Opt() - otherLen );
+        long long budgetMax = std::max( budgetOpt, m_settings.m_targetSignalLength.Max() - otherLen );
+
+        if( m_settings.m_targetLength.Opt() == MEANDER_SETTINGS::LENGTH_UNCONSTRAINED )
+        {
+            m_settings.m_targetLength.SetMin( budgetMin );
+            m_settings.m_targetLength.SetOpt( budgetOpt );
+            m_settings.m_targetLength.SetMax( budgetMax );
+        }
+        else
+        {
+            m_settings.m_targetLength.SetMin( std::max( m_settings.m_targetLength.Min(), budgetMin ) );
+            m_settings.m_targetLength.SetOpt( std::min( m_settings.m_targetLength.Opt(), budgetOpt ) );
+            m_settings.m_targetLength.SetMax( std::min( m_settings.m_targetLength.Max(), budgetMax ) );
+        }
+    }
+
     calculateTimeDomainTargets();
 
     return doMove( aP, aEndItem, m_settings.m_targetLength.Opt(), m_settings.m_targetLength.Min(),
-                   m_settings.m_targetLength.Max() );
+                    m_settings.m_targetLength.Max() );
 }
 
 

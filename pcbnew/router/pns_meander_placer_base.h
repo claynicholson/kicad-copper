@@ -65,6 +65,11 @@ public:
      */
     virtual int64_t TuningDelayResult() const { return 0; };
 
+    bool HasBaseline() const { return m_baselineLength != 0 || m_baselineDelay != 0; }
+
+    long long int TuningLengthDelta() const { return TuningLengthResult() - m_baselineLength; }
+    int64_t TuningDelayDelta() const { return TuningDelayResult() - m_baselineDelay; }
+
     /**
      * Return the tuning status (too short, too long, etc.) of the trace(s) being tuned.
      */
@@ -141,6 +146,34 @@ protected:
      * @return
      */
     int64_t lineDelay( const ITEM_SET& aLine, const SOLID* aStartPad, const SOLID* aEndPad ) const;
+
+    /**
+     * Cache the per-session chain-extras length/delay (other nets in the same chain) so per-Move
+     * use does not re-walk the live BOARD. Called from Start() of each derived placer.
+     */
+    void initChainExtras();
+
+    /**
+     * Return the length offset to subtract when converting a user-facing total signal length
+     * target into a meander-only doMove target. The offset combines the chain-extras aggregate
+     * (other nets in the same chain) with any unmeasured stub on the actively-tuned net that
+     * lives outside the PNS-measured baseline.
+     *
+     * Single-ended and skew tuning both rely on this so the meander does not over-correct by
+     * the chain budget already absorbed by sibling nets.
+     */
+    long long int chainNarrowingOffset() const;
+
+    ///< Original path length/delay captured at Start().
+    long long int m_baselineLength = 0;
+    int64_t       m_baselineDelay = 0;
+
+    ///< Aggregate length/delay of other nets in the same chain, cached at Start().
+    ///< The non-edited members of a chain don't change during a tuning session, so we avoid
+    ///< walking the live BOARD on every Move event.
+    long long int m_chainExtrasLength = 0;
+    long long int m_chainExtrasDelay = 0;
+    bool          m_chainExtrasValid = false;
 
     ///< Pointer to world to search colliding items.
     NODE* m_world;

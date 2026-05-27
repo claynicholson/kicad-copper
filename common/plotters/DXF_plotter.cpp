@@ -757,18 +757,76 @@ void DXF_PLOTTER::SetViewport( const VECTOR2I& aOffset, double aIusPerDecimil,
 }
 
 
+std::string DXF_PLOTTER::nextHandle()
+{
+    return fmt::format( "{:X}", ++m_handle );
+}
+
+
+std::string DXF_PLOTTER::emitEntityHandle( const char* aEntityType, const char* aSubclass,
+                                           const std::string& aLayerName,
+                                           const std::string& aOwner )
+{
+    std::string        handle = nextHandle();
+    const std::string& owner = aOwner.empty() ? m_modelSpaceHandle : aOwner;
+
+    fmt::print( m_outputFile,
+                "  0\n{}\n"
+                "  5\n{}\n"
+                "330\n{}\n"
+                "100\nAcDbEntity\n"
+                "  8\n{}\n",
+                aEntityType, handle, owner, aLayerName );
+
+    if( aSubclass )
+        fmt::print( m_outputFile, "100\n{}\n", aSubclass );
+
+    return handle;
+}
+
+
+std::string DXF_PLOTTER::emitSymbolTableHeader( const char* aTableName, int aCount )
+{
+    std::string handle = nextHandle();
+
+    fmt::print( m_outputFile,
+                "  0\n"
+                "TABLE\n"
+                "  2\n{}\n"
+                "  5\n{}\n"
+                "330\n0\n"
+                "100\nAcDbSymbolTable\n"
+                " 70\n{}\n",
+                aTableName, handle, aCount );
+
+    return handle;
+}
+
+
 bool DXF_PLOTTER::StartPlot( const wxString& aPageNumber )
 {
     wxASSERT( m_outputFile );
 
-    // DXF HEADER - Boilerplate
-    // Defines the minimum for drawing i.e. the angle system and the
-    // 4 linetypes (CONTINUOUS, DOTDASH, DASHED and DOTTED)
+    // Reset state so a single DXF_PLOTTER instance can be reused for multiple plots.
+    m_handle = 0;
+    m_modelSpaceHandle.clear();
+
+    // Tagged AC1018 (R2004) because the LAYER table emits the 420 true-color group,
+    // which AutoCAD only accepts in R2004+.  That in turn requires handles on every
+    // record and entity plus a full R2000 table and blocks skeleton.
     fmt::print( m_outputFile,
                 "  0\n"
                 "SECTION\n"
                 "  2\n"
                 "HEADER\n"
+                "  9\n"
+                "$ACADVER\n"
+                "  1\n"
+                "AC1018\n"
+                "  9\n"
+                "$HANDSEED\n"
+                "  5\n"
+                "FFFFFFFF\n"
                 "  9\n"
                 "$ANGBASE\n"
                 "  50\n"
@@ -786,157 +844,149 @@ bool DXF_PLOTTER::StartPlot( const wxString& aPageNumber )
                 "  70\n"
                 "{}\n"
                 "  0\n"
-                "ENDSEC\n"
+                "ENDSEC\n",
+                GetMeasurementDirective(), GetInsUnits() );
+
+    fmt::print( m_outputFile,
                 "  0\n"
                 "SECTION\n"
                 "  2\n"
-                "TABLES\n"
+                "TABLES\n" );
+
+    // AutoCAD refuses to load R2000+ files lacking an ACAD APPID entry.
+    std::string appidTableHandle = emitSymbolTableHeader( "APPID", 1 );
+
+    fmt::print( m_outputFile,
                 "  0\n"
-                "TABLE\n"
-                "  2\n"
-                "LTYPE\n"
-                "  70\n"
-                "4\n"
-                "  0\n"
-                "LTYPE\n"
-                "  5\n"
-                "40F\n"
-                "  2\n"
-                "CONTINUOUS\n"
-                "  70\n"
-                "0\n"
-                "  3\n"
-                "Solid line\n"
-                "  72\n"
-                "65\n"
-                "  73\n"
-                "0\n"
-                "  40\n"
-                "0.0\n"
-                "  0\n"
-                "LTYPE\n"
-                "  5\n"
-                "410\n"
-                "  2\n"
-                "DASHDOT\n"
-                " 70\n"
-                "0\n"
-                "  3\n"
-                "Dash Dot ____ _ ____ _\n"
-                " 72\n"
-                "65\n"
-                " 73\n"
-                "4\n"
-                " 40\n"
-                "2.0\n"
-                " 49\n"
-                "1.25\n"
-                " 49\n"
-                "-0.25\n"
-                " 49\n"
-                "0.25\n"
-                " 49\n"
-                "-0.25\n"
-                "  0\n"
-                "LTYPE\n"
-                "  5\n"
-                "411\n"
-                "  2\n"
-                "DASHED\n"
-                " 70\n"
-                "0\n"
-                "  3\n"
-                "Dashed __ __ __ __ __\n"
-                " 72\n"
-                "65\n"
-                " 73\n"
-                "2\n"
-                " 40\n"
-                "0.75\n"
-                " 49\n"
-                "0.5\n"
-                " 49\n"
-                "-0.25\n"
-                "  0\n"
-                "LTYPE\n"
-                "  5\n"
-                "43B\n"
-                "  2\n"
-                "DOTTED\n"
-                " 70\n"
-                "0\n"
-                "  3\n"
-                "Dotted .  .  .  .\n"
-                " 72\n"
-                "65\n"
-                " 73\n"
-                "2\n"
-                " 40\n"
-                "0.2\n"
-                " 49\n"
-                "0.0\n"
-                " 49\n"
-                "-0.2\n"
+                "APPID\n"
+                "  5\n{}\n"
+                "330\n{}\n"
+                "100\nAcDbSymbolTableRecord\n"
+                "100\nAcDbRegAppTableRecord\n"
+                "  2\nACAD\n"
+                " 70\n0\n"
                 "  0\n"
                 "ENDTAB\n",
-                GetMeasurementDirective(), GetInsUnits() );
+                nextHandle(), appidTableHandle );
 
-    // Text styles table
-    // Defines 4 text styles, one for each bold/italic combination
-    fmt::print( m_outputFile,
-	            "  0\n"
-	            "TABLE\n"
-	            "  2\n"
-	            "STYLE\n"
-	            "  70\n"
-	            "4\n" );
+    // CONTINUOUS, DASHDOT, DASHED and DOTTED cover every LINE_STYLE we emit via the
+    // 6/<name> group on LINE entities.  The 49 group is the per-element dash length
+    // (positive) or gap length (negative); each 49 must be followed by a 74 (complex
+    // linetype element type, 0 = plain) in R2000+ files.
+    struct LtypePattern
+    {
+        const char* name;
+        const char* description;
+        int         elementCount;
+        double      patternLength;
+        const char* dashes;
+    };
 
-    static const char *style_name[4] = {"KICAD", "KICADB", "KICADI", "KICADBI"};
+    // AutoCAD looks up ByBlock and ByLayer by name and aborts when either is absent.
+    // Both are zero-element solid patterns; the actual appearance is inherited from
+    // the owning block or layer at render time.
+    static const LtypePattern ltypes[] = {
+        { "ByBlock",    "",                       0, 0.0,  ""                                  },
+        { "ByLayer",    "",                       0, 0.0,  ""                                  },
+        { "CONTINUOUS", "Solid line",             0, 0.0,  ""                                  },
+        { "DASHDOT",    "Dash Dot ____ _ ____ _", 4, 2.0,  " 49\n1.25\n 74\n0\n 49\n-0.25\n 74\n0\n"
+                                                          " 49\n0.25\n 74\n0\n 49\n-0.25\n 74\n0\n" },
+        { "DASHED",     "Dashed __ __ __ __ __",  2, 0.75, " 49\n0.5\n 74\n0\n 49\n-0.25\n 74\n0\n" },
+        { "DOTTED",     "Dotted .  .  .  .",      2, 0.2,  " 49\n0.0\n 74\n0\n 49\n-0.2\n 74\n0\n"  },
+    };
 
-    for(int i = 0; i < 4; i++ )
+    std::string ltypeTableHandle = emitSymbolTableHeader( "LTYPE",
+                                                          static_cast<int>( std::size( ltypes ) ) );
+
+    for( const LtypePattern& lt : ltypes )
     {
         fmt::print( m_outputFile,
-                 "  0\n"
-                 "STYLE\n"
-                 "  2\n"
-                 "{}\n"         // Style name
-                 "  70\n"
-                 "0\n"          // Standard flags
-                 "  40\n"
-                 "0\n"          // Non-fixed height text
-                 "  41\n"
-                 "1\n"          // Width factor (base)
-                 "  42\n"
-                 "1\n"          // Last height (mandatory)
-                 "  50\n"
-                 "{:g}\n"         // Oblique angle
-                 "  71\n"
-                 "0\n"          // Generation flags (default)
-                 "  3\n"
-                 // The standard ISO font (when kicad is build with it
-                 // the dxf text in acad matches *perfectly*)
-                 "isocp.shx\n", // Font name (when not bigfont)
-                 // Apply a 15 degree angle to italic text
-                 style_name[i], i < 2 ? 0 : DXF_OBLIQUE_ANGLE );
+                    "  0\n"
+                    "LTYPE\n"
+                    "  5\n{}\n"
+                    "330\n{}\n"
+                    "100\nAcDbSymbolTableRecord\n"
+                    "100\nAcDbLinetypeTableRecord\n"
+                    "  2\n{}\n"
+                    " 70\n0\n"
+                    "  3\n{}\n"
+                    " 72\n65\n"
+                    " 73\n{}\n"
+                    " 40\n{}\n"
+                    "{}",
+                    nextHandle(), ltypeTableHandle,
+                    lt.name, lt.description, lt.elementCount, lt.patternLength, lt.dashes );
     }
 
-    int numLayers = static_cast<int>( !m_layersToExport.empty() ? m_layersToExport.size() : static_cast<int>(DXF_COLOR_T::NBCOLORS) );
+    fmt::print( m_outputFile,
+                "  0\n"
+                "ENDTAB\n" );
+
+    // STYLE table - one entry per bold/italic combination.
+    std::string styleTableHandle = emitSymbolTableHeader( "STYLE", 4 );
+
+    static const char* style_name[4] = { "KICAD", "KICADB", "KICADI", "KICADBI" };
+
+    for( int i = 0; i < 4; i++ )
+    {
+        fmt::print( m_outputFile,
+                    "  0\n"
+                    "STYLE\n"
+                    "  5\n{}\n"
+                    "330\n{}\n"
+                    "100\nAcDbSymbolTableRecord\n"
+                    "100\nAcDbTextStyleTableRecord\n"
+                    "  2\n{}\n"
+                    " 70\n0\n"
+                    " 40\n0\n"
+                    " 41\n1\n"
+                    " 42\n1\n"
+                    " 50\n{:g}\n"
+                    " 71\n0\n"
+                    // The standard ISO font (when kicad is built with it the dxf text in
+                    // acad matches *perfectly*)
+                    "  3\nisocp.shx\n",
+                    nextHandle(), styleTableHandle,
+                    style_name[i],
+                    i < 2 ? 0 : DXF_OBLIQUE_ANGLE );
+    }
+
+    fmt::print( m_outputFile,
+                "  0\n"
+                "ENDTAB\n" );
+
+    int numLayers = m_layersToExport.empty() ? static_cast<int>( DXF_COLOR_T::NBCOLORS )
+                                              : static_cast<int>( m_layersToExport.size() );
 
     // If printing in monochrome, only output the black layer
     if( !GetColorMode() && m_layersToExport.empty() )
         numLayers = 1;
 
+    // Every LAYER record must carry a 390 hard-pointer to a PlotStyleName object.
+    // We share one ACDBPLACEHOLDER named "Normal" across every layer; allocate its
+    // handle (and that of its owning dictionary) now so the LAYER records can cite it.
+    // The +1 on the count is the default layer "0" emitted next.
+    std::string layerTableHandle = emitSymbolTableHeader( "LAYER", numLayers + 1 );
 
-    // Layer table - one layer per color
+    m_plotStyleNormalHandle = nextHandle();
+    m_plotStyleNameDictHandle = nextHandle();
+
+    // Default layer "0" is required by name in the LAYER table.  Entities may
+    // reference undeclared layers (spec page 230) but the "0" entry itself must
+    // exist.  Color 7 / CONTINUOUS are the conventional defaults.
     fmt::print( m_outputFile,
-             "  0\n"
-             "ENDTAB\n"
-             "  0\n"
-             "TABLE\n"
-             "  2\n"
-             "LAYER\n"
-             "  70\n"
-             "{}\n", (int)numLayers );
+                "  0\n"
+                "LAYER\n"
+                "  5\n{}\n"
+                "330\n{}\n"
+                "100\nAcDbSymbolTableRecord\n"
+                "100\nAcDbLayerTableRecord\n"
+                "  2\n0\n"
+                " 70\n0\n"
+                " 62\n7\n"
+                "  6\nCONTINUOUS\n"
+                "390\n{}\n",
+                nextHandle(), layerTableHandle, m_plotStyleNormalHandle );
 
     /* The layer/colors palette. The acad/DXF palette is divided in 3 zones:
 
@@ -946,9 +996,9 @@ bool DXF_PLOTTER::StartPlot( const wxString& aPageNumber )
      */
 
     wxString layerName;
-    int colorNumber;
+    int      colorNumber;
 
-    bool hasActualColor = false;
+    bool    hasActualColor = false;
     COLOR4D actualColor;
 
     for( int i = 0; i < numLayers; i++ )
@@ -981,47 +1031,312 @@ bool DXF_PLOTTER::StartPlot( const wxString& aPageNumber )
         fmt::print( m_outputFile,
                     "  0\n"
                     "LAYER\n"
-                    "  2\n"
-                    "{}\n"         // Layer name
-                    "  70\n"
-                    "0\n"          // Standard flags
-                    "  62\n"
-                    "{}\n",        // Color number
-                    TO_UTF8( layerName ),
-                    colorNumber );
+                    "  5\n{}\n"
+                    "330\n{}\n"
+                    "100\nAcDbSymbolTableRecord\n"
+                    "100\nAcDbLayerTableRecord\n"
+                    "  2\n{}\n"
+                    " 70\n0\n"
+                    " 62\n{}\n",
+                    nextHandle(), layerTableHandle,
+                    TO_UTF8( layerName ), colorNumber );
 
         if( hasActualColor )
         {
-            // Add the true color value as an extended data entry
+            // Group 420 carries the 24-bit true color introduced in R2004; the legacy
+            // 62 color index alone would otherwise lose the user-chosen layer colour.
             int r = static_cast<int>( actualColor.r * 255 );
             int g = static_cast<int>( actualColor.g * 255 );
             int b = static_cast<int>( actualColor.b * 255 );
 
             int trueColorValue = ( r << 16 ) | ( g << 8 ) | b;
 
-            fmt::print( m_outputFile,
-                        "  420\n"
-                        "{}\n",
-                        trueColorValue );
+            fmt::print( m_outputFile, "420\n{}\n", trueColorValue );
         }
 
+        // 6 (linetype) and 390 (plot style) are mandatory on every R2000+ LAYER.
         fmt::print( m_outputFile,
-                    "  6\n"
-                    "CONTINUOUS\n");// Linetype name
+                    "  6\nCONTINUOUS\n"
+                    "390\n{}\n",
+                    m_plotStyleNormalHandle );
     }
 
-    // End of layer table, begin entities
     fmt::print( m_outputFile,
-           "  0\n"
-           "ENDTAB\n"
-           "  0\n"
-           "ENDSEC\n"
-           "  0\n"
-           "SECTION\n"
-           "  2\n"
-           "ENTITIES\n" );
+                "  0\n"
+                "ENDTAB\n" );
+
+    // AutoCAD's R2000+ reader walks a fixed list of expected symbol tables and aborts
+    // when one is absent.  Empty headers satisfy the parser.  Spec page 35 only
+    // constrains table order via LTYPE preceding LAYER, which is already true above.
+    for( const char* tableName : { "VPORT", "VIEW", "UCS" } )
+    {
+        emitSymbolTableHeader( tableName, 0 );
+        fmt::print( m_outputFile, "  0\nENDTAB\n" );
+    }
+
+    // DIMSTYLE is the only symbol table whose record handle uses group code 105
+    // instead of 5, and whose header carries an extra AcDbDimStyleTable subclass
+    // marker (spec page 35).  AutoCAD requires the Standard entry.
+    std::string dimstyleTableHandle = emitSymbolTableHeader( "DIMSTYLE", 1 );
+
+    fmt::print( m_outputFile,
+                "100\nAcDbDimStyleTable\n"
+                " 71\n0\n"
+                "  0\n"
+                "DIMSTYLE\n"
+                "105\n{}\n"
+                "330\n{}\n"
+                "100\nAcDbSymbolTableRecord\n"
+                "100\nAcDbDimStyleTableRecord\n"
+                "  2\nStandard\n"
+                " 70\n0\n"
+                "  0\n"
+                "ENDTAB\n",
+                nextHandle(), dimstyleTableHandle );
+
+    // R2004 mandates three empty layout blocks (*Model_Space, *Paper_Space,
+    // *Paper_Space0); each BLOCK_RECORD entry carries a 340 hard-pointer to its
+    // associated LAYOUT object.  Pre-allocate the LAYOUT handles now so EndPlot()
+    // can emit the back-pointers when it writes OBJECTS.
+    std::string blockRecordTableHandle = emitSymbolTableHeader( "BLOCK_RECORD", 3 );
+
+    m_modelSpaceHandle = nextHandle();
+    std::string paperSpaceBR = nextHandle();
+    std::string paperSpace0BR = nextHandle();
+
+    m_dxfLayouts.clear();
+    m_dxfLayouts.reserve( 3 );
+    m_dxfLayouts.push_back( { "Model",   "*Model_Space",  m_modelSpaceHandle, nextHandle(), false } );
+    m_dxfLayouts.push_back( { "Layout1", "*Paper_Space",  paperSpaceBR,       nextHandle(), true  } );
+    m_dxfLayouts.push_back( { "Layout2", "*Paper_Space0", paperSpace0BR,      nextHandle(), true  } );
+
+    // The root Named Object Dictionary and ACAD_LAYOUT live in OBJECTS, but their
+    // handles are referenced from LAYOUT objects via 330, so allocate them now.
+    m_namedObjectDictHandle = nextHandle();
+    m_layoutDictHandle = nextHandle();
+
+    for( const DxfLayout& l : m_dxfLayouts )
+    {
+        fmt::print( m_outputFile,
+                    "  0\n"
+                    "BLOCK_RECORD\n"
+                    "  5\n{}\n"
+                    "330\n{}\n"
+                    "100\nAcDbSymbolTableRecord\n"
+                    "100\nAcDbBlockTableRecord\n"
+                    "  2\n{}\n"
+                    "340\n{}\n"
+                    " 70\n0\n"
+                    "280\n1\n"
+                    "281\n0\n",
+                    l.blockRecordHandle, blockRecordTableHandle, l.blockName, l.layoutHandle );
+    }
+
+    fmt::print( m_outputFile,
+                "  0\n"
+                "ENDTAB\n"
+                "  0\n"
+                "ENDSEC\n" );
+
+    // Three empty BLOCK/ENDBLK pairs back the three BLOCK_RECORD entries.  Paperspace
+    // blocks carry the 67/1 paperspace flag inside AcDbEntity.
+    fmt::print( m_outputFile,
+                "  0\n"
+                "SECTION\n"
+                "  2\n"
+                "BLOCKS\n" );
+
+    for( const DxfLayout& l : m_dxfLayouts )
+    {
+        fmt::print( m_outputFile,
+                    "  0\n"
+                    "BLOCK\n"
+                    "  5\n{}\n"
+                    "330\n{}\n"
+                    "100\nAcDbEntity\n"
+                    "{}"
+                    "  8\n0\n"
+                    "100\nAcDbBlockBegin\n"
+                    "  2\n{}\n"
+                    " 70\n0\n"
+                    " 10\n0.0\n 20\n0.0\n 30\n0.0\n"
+                    "  3\n{}\n"
+                    "  1\n\n"
+                    "  0\n"
+                    "ENDBLK\n"
+                    "  5\n{}\n"
+                    "330\n{}\n"
+                    "100\nAcDbEntity\n"
+                    "{}"
+                    "  8\n0\n"
+                    "100\nAcDbBlockEnd\n",
+                    nextHandle(), l.blockRecordHandle,
+                    l.isPaperSpace ? " 67\n1\n" : "",
+                    l.blockName, l.blockName,
+                    nextHandle(), l.blockRecordHandle,
+                    l.isPaperSpace ? " 67\n1\n" : "" );
+    }
+
+    fmt::print( m_outputFile,
+                "  0\n"
+                "ENDSEC\n" );
+
+    // Begin ENTITIES section
+    fmt::print( m_outputFile,
+                "  0\n"
+                "SECTION\n"
+                "  2\n"
+                "ENTITIES\n" );
 
     return true;
+}
+
+
+void DXF_PLOTTER::writeObjectsSection()
+{
+    // Root Named Object Dictionary.  281/1 marks dict elements as hard-owned, matching
+    // AutoCAD.  The empty ACAD_GROUP dict is required by the named-object root, and
+    // the ACAD_PLOTSTYLENAME dict resolves the 390 plot-style references on LAYER
+    // records.
+    std::string acadGroupDictHandle = nextHandle();
+
+    fmt::print( m_outputFile,
+                "  0\n"
+                "SECTION\n"
+                "  2\n"
+                "OBJECTS\n"
+                "  0\n"
+                "DICTIONARY\n"
+                "  5\n{}\n"
+                "330\n0\n"
+                "100\nAcDbDictionary\n"
+                "281\n1\n"
+                "  3\nACAD_GROUP\n"
+                "350\n{}\n"
+                "  3\nACAD_LAYOUT\n"
+                "350\n{}\n"
+                "  3\nACAD_PLOTSTYLENAME\n"
+                "350\n{}\n",
+                m_namedObjectDictHandle, acadGroupDictHandle, m_layoutDictHandle,
+                m_plotStyleNameDictHandle );
+
+    // ACAD_GROUP - empty, but the named-object root requires it.
+    fmt::print( m_outputFile,
+                "  0\n"
+                "DICTIONARY\n"
+                "  5\n{}\n"
+                "330\n{}\n"
+                "100\nAcDbDictionary\n"
+                "281\n1\n",
+                acadGroupDictHandle, m_namedObjectDictHandle );
+
+    // ACDBDICTIONARYWDFLT is a dictionary with a default entry; the 340 points to the
+    // same Normal placeholder as the dict's "Normal" entry, and every LAYER's 390
+    // resolves through here.
+    fmt::print( m_outputFile,
+                "  0\n"
+                "ACDBDICTIONARYWDFLT\n"
+                "  5\n{}\n"
+                "330\n{}\n"
+                "100\nAcDbDictionary\n"
+                "281\n1\n"
+                "  3\nNormal\n"
+                "350\n{}\n"
+                "100\nAcDbDictionaryWithDefault\n"
+                "340\n{}\n",
+                m_plotStyleNameDictHandle, m_namedObjectDictHandle,
+                m_plotStyleNormalHandle, m_plotStyleNormalHandle );
+
+    // ACDBPLACEHOLDER carries no payload; it just gives the "Normal" plot style a
+    // handle that LAYER's 390 can resolve.
+    fmt::print( m_outputFile,
+                "  0\n"
+                "ACDBPLACEHOLDER\n"
+                "  5\n{}\n"
+                "330\n{}\n",
+                m_plotStyleNormalHandle, m_plotStyleNameDictHandle );
+
+    // ACAD_LAYOUT names every LAYOUT object emitted below.
+    fmt::print( m_outputFile,
+                "  0\n"
+                "DICTIONARY\n"
+                "  5\n{}\n"
+                "330\n{}\n"
+                "100\nAcDbDictionary\n"
+                "281\n1\n",
+                m_layoutDictHandle, m_namedObjectDictHandle );
+
+    for( const DxfLayout& l : m_dxfLayouts )
+    {
+        fmt::print( m_outputFile,
+                    "  3\n{}\n"
+                    "350\n{}\n",
+                    l.name, l.layoutHandle );
+    }
+
+    // The 4/<name> and 44/45 (width/height) fields are correlated and must change
+    // together.  ±1e+20 in extmin/extmax is the AcDbLayout sentinel for uninitialised
+    // extents.
+    static constexpr const char* PAPER_NAME = "A3";
+    static constexpr double      PAPER_WIDTH_MM = 420.0;
+    static constexpr double      PAPER_HEIGHT_MM = 297.0;
+    static constexpr int         PLOT_FLAG_MODELTYPE = 1024;
+
+    // Field set and ordering match what ODA File Converter writes for R2004.  The
+    // reader is order-sensitive here and rejects deviations like a missing group 2,
+    // ModelType set on a paperspace layout, or 147 appearing before 76/77/78.
+    for( std::size_t i = 0; i < m_dxfLayouts.size(); ++i )
+    {
+        const DxfLayout& l = m_dxfLayouts[i];
+        int plotLayoutFlag = l.isPaperSpace ? 0 : PLOT_FLAG_MODELTYPE;
+
+        fmt::print( m_outputFile,
+                    "  0\n"
+                    "LAYOUT\n"
+                    "  5\n{}\n"
+                    "330\n{}\n"
+                    "100\nAcDbPlotSettings\n"
+                    "  1\n\n"
+                    "  2\nnone_device\n"
+                    "  4\n{}\n"
+                    "  6\n\n"
+                    " 40\n0.0\n 41\n0.0\n 42\n0.0\n 43\n0.0\n"
+                    " 44\n{:.1f}\n 45\n{:.1f}\n 46\n0.0\n 47\n0.0\n"
+                    " 48\n0.0\n 49\n0.0\n"
+                    "140\n0.0\n141\n0.0\n142\n1.0\n143\n1.0\n"
+                    " 70\n{}\n"
+                    " 72\n1\n 73\n0\n 74\n5\n"
+                    "  7\n\n"
+                    " 75\n16\n"
+                    " 76\n0\n 77\n2\n 78\n300\n"
+                    "147\n1.0\n"
+                    "148\n0.0\n149\n0.0\n"
+                    "100\nAcDbLayout\n"
+                    "  1\n{}\n"
+                    " 70\n1\n"
+                    " 71\n{}\n"
+                    " 10\n0.0\n 20\n0.0\n"
+                    " 11\n{:.1f}\n 21\n{:.1f}\n"
+                    " 12\n0.0\n 22\n0.0\n 32\n0.0\n"
+                    " 14\n1e+20\n 24\n1e+20\n 34\n1e+20\n"
+                    " 15\n-1e+20\n 25\n-1e+20\n 35\n-1e+20\n"
+                    "146\n0.0\n"
+                    " 13\n0.0\n 23\n0.0\n 33\n0.0\n"
+                    " 16\n1.0\n 26\n0.0\n 36\n0.0\n"
+                    " 17\n0.0\n 27\n1.0\n 37\n0.0\n"
+                    " 76\n0\n"
+                    "330\n{}\n",
+                    l.layoutHandle, m_layoutDictHandle,
+                    PAPER_NAME, PAPER_WIDTH_MM, PAPER_HEIGHT_MM,
+                    plotLayoutFlag,
+                    l.name, static_cast<int>( i ),
+                    PAPER_WIDTH_MM, PAPER_HEIGHT_MM,
+                    l.blockRecordHandle );
+    }
+
+    fmt::print( m_outputFile,
+                "  0\n"
+                "ENDSEC\n" );
 }
 
 
@@ -1029,12 +1344,15 @@ bool DXF_PLOTTER::EndPlot()
 {
     wxASSERT( m_outputFile );
 
-    // DXF FOOTER
     fmt::print( m_outputFile,
-            "  0\n"
-           "ENDSEC\n"
-           "  0\n"
-           "EOF\n" );
+                "  0\n"
+                "ENDSEC\n" );
+
+    writeObjectsSection();
+
+    fmt::print( m_outputFile,
+                "  0\n"
+                "EOF\n" );
     fclose( m_outputFile );
     m_outputFile = nullptr;
 
@@ -1087,8 +1405,8 @@ void DXF_PLOTTER::Rect( const VECTOR2I& p1, const VECTOR2I& p2, FILL_T fill, int
 
         VECTOR2D point_dev = userToDeviceCoordinates( p1 );
 
-        fmt::print( m_outputFile, "0\nPOINT\n8\n{}\n10\n{}\n20\n",
-                    TO_UTF8( cLayerName ),
+        emitEntityHandle( "POINT", "AcDbPoint", TO_UTF8( cLayerName ) );
+        fmt::print( m_outputFile, " 10\n{}\n 20\n{}\n 30\n0\n",
                     formatCoord( point_dev.x ),
                     formatCoord( point_dev.y ) );
     }
@@ -1103,12 +1421,14 @@ void DXF_PLOTTER::Circle( const VECTOR2I& centre, int diameter, FILL_T fill, int
 
     wxString cLayerName = GetCurrentLayerName( DXF_LAYER_OUTPUT_MODE::Current_Layer_Name );
 
+    std::string layer = TO_UTF8( cLayerName );
+
     if( radius > 0 )
     {
         if( fill == FILL_T::NO_FILL )
         {
-            fmt::print( m_outputFile, "0\nCIRCLE\n8\n{}\n10\n{}\n20\n{}\n40\n{}\n",
-                        TO_UTF8( cLayerName ),
+            emitEntityHandle( "CIRCLE", "AcDbCircle", layer );
+            fmt::print( m_outputFile, " 10\n{}\n 20\n{}\n 30\n0\n 40\n{}\n",
                         formatCoord( centre_dev.x ),
                         formatCoord( centre_dev.y ),
                         formatCoord( radius ) );
@@ -1116,26 +1436,37 @@ void DXF_PLOTTER::Circle( const VECTOR2I& centre, int diameter, FILL_T fill, int
         else if( fill == FILL_T::FILLED_SHAPE )
         {
             double r = radius * 0.5;
-            fmt::print( m_outputFile, "0\nPOLYLINE\n" );
-            fmt::print( m_outputFile, "8\n{}\n66\n1\n70\n1\n", TO_UTF8( cLayerName ) );
-            fmt::print( m_outputFile, "40\n{}\n41\n{}\n",
-                                        formatCoord( radius ),
-                                        formatCoord( radius ) );
-            fmt::print( m_outputFile, "0\nVERTEX\n8\n{}\n", TO_UTF8( cLayerName ) );
-            fmt::print( m_outputFile, "10\n{}\n 20\n{}\n42\n1.0\n",
-                                        formatCoord( centre_dev.x-r ),
-                                        formatCoord( centre_dev.y ) );
-            fmt::print( m_outputFile, "0\nVERTEX\n8\n{}\n", TO_UTF8( cLayerName ) );
-            fmt::print( m_outputFile, "10\n{}\n 20\n{}\n42\n1.0\n",
-                                        formatCoord( centre_dev.x+r ),
-                                        formatCoord( centre_dev.y ) );
-            fmt::print( m_outputFile, "0\nSEQEND\n" );
+
+            // 10/20/30 is the 2D polyline elevation dummy point; AutoCAD rejects the
+            // entity when it's missing.  Owner of the VERTEX records and the terminating
+            // SEQEND is the POLYLINE handle, not *Model_Space.
+            std::string polyHandle = emitEntityHandle( "POLYLINE", "AcDb2dPolyline", layer );
+            std::string rStr = formatCoord( radius );
+
+            fmt::print( m_outputFile,
+                        " 66\n1\n"
+                        " 10\n0\n 20\n0\n 30\n0\n"
+                        " 70\n1\n 40\n{}\n 41\n{}\n",
+                        rStr, rStr );
+
+            for( double offset : { -r, r } )
+            {
+                emitEntityHandle( "VERTEX", "AcDbVertex", layer, polyHandle );
+                fmt::print( m_outputFile,
+                            "100\nAcDb2dVertex\n"
+                            " 10\n{}\n 20\n{}\n 30\n0\n 42\n1.0\n",
+                            formatCoord( centre_dev.x + offset ),
+                            formatCoord( centre_dev.y ) );
+            }
+
+            emitEntityHandle( "SEQEND", nullptr, layer, polyHandle );
         }
     }
     else
     {
         // Draw as a point
-        fmt::print( m_outputFile, "0\nPOINT\n8\n{}\n10\n{}\n20\n{}\n", TO_UTF8( cLayerName ),
+        emitEntityHandle( "POINT", "AcDbPoint", layer );
+        fmt::print( m_outputFile, " 10\n{}\n 20\n{}\n 30\n0\n",
                     formatCoord( centre_dev.x ),
                     formatCoord( centre_dev.y ) );
     }
@@ -1320,11 +1651,22 @@ void DXF_PLOTTER::PenTo( const VECTOR2I& pos, char plume )
                   && m_currentLineType <= LINE_STYLE::LAST_TYPE );
 
         // DXF LINE
-        wxString cLayerName = GetCurrentLayerName( DXF_LAYER_OUTPUT_MODE::Current_Layer_Name );
-
+        wxString    cLayerName = GetCurrentLayerName( DXF_LAYER_OUTPUT_MODE::Current_Layer_Name );
+        std::string layer = TO_UTF8( cLayerName );
         const char* lname = getDXFLineType( static_cast<LINE_STYLE>( m_currentLineType ) );
-        fmt::print( m_outputFile, "0\nLINE\n8\n{}\n6\n{}\n10\n{}\n20\n{}\n11\n{}\n21\n{}\n",
-                    TO_UTF8( cLayerName ), lname,
+
+        // The linetype name (6) sits on the AcDbEntity side, before the AcDbLine
+        // marker.  Emitted inline so group 6 can interleave between the two markers.
+        fmt::print( m_outputFile,
+                    "  0\nLINE\n"
+                    "  5\n{}\n"
+                    "330\n{}\n"
+                    "100\nAcDbEntity\n"
+                    "  8\n{}\n"
+                    "  6\n{}\n"
+                    "100\nAcDbLine\n"
+                    " 10\n{}\n 20\n{}\n 30\n0\n 11\n{}\n 21\n{}\n 31\n0\n",
+                    nextHandle(), m_modelSpaceHandle, layer, lname,
                     formatCoord( pen_lastpos_dev.x ),
                     formatCoord( pen_lastpos_dev.y ),
                     formatCoord( pos_dev.x ),
@@ -1363,11 +1705,16 @@ void DXF_PLOTTER::Arc( const VECTOR2D& aCenter, const EDA_ANGLE& aStartAngle,
     VECTOR2D centre_device = userToDeviceCoordinates( aCenter );
     double   radius_device = userToDeviceSize( aRadius );
 
-    // Emit a DXF ARC entity
-    wxString cLayerName = GetCurrentLayerName( DXF_LAYER_OUTPUT_MODE::Current_Layer_Name );
+    // ARC carries two subclass markers, AcDbCircle (centre and radius) then AcDbArc
+    // (angle pair).  Reversing them trips AutoCAD's AcDb validator.
+    wxString    cLayerName = GetCurrentLayerName( DXF_LAYER_OUTPUT_MODE::Current_Layer_Name );
+    std::string layer = TO_UTF8( cLayerName );
+
+    emitEntityHandle( "ARC", "AcDbCircle", layer );
     fmt::print( m_outputFile,
-                "0\nARC\n8\n{}\n10\n{}\n20\n{}\n40\n{}\n50\n{:.8f}\n51\n{:.8f}\n",
-                TO_UTF8( cLayerName ),
+                " 10\n{}\n 20\n{}\n 30\n0\n 40\n{}\n"
+                "100\nAcDbArc\n"
+                " 50\n{:.8f}\n 51\n{:.8f}\n",
                 formatCoord( centre_device.x ),
                 formatCoord( centre_device.y ),
                 formatCoord( radius_device ),
@@ -1782,51 +2129,17 @@ void DXF_PLOTTER::plotOneLineOfText( const VECTOR2I& aPos, const COLOR4D& aColor
     else if( aAttributes.m_Italic )
         textStyle = "KICADI";
 
-    // Position, size, rotation and alignment
-    // The two alignment point usages is somewhat idiot (see the DXF ref)
-    // Anyway since we don't use the fit/aligned options, they're the same
+    // The DXF spec requires two AcDbText subclass markers on TEXT, with group 73
+    // (vertical alignment) scoped under the second one.  The text string (group 1)
+    // sits between height and rotation inside the first AcDbText scope.
+    emitEntityHandle( "TEXT", "AcDbText", TO_UTF8( cLayerName ) );
+
     fmt::print( m_outputFile,
-             "  0\n"
-             "TEXT\n"
-             "  7\n"
-             "{}\n"          // Text style
-             "  8\n"
-             "{}\n"          // Layer name
-             "  10\n"
-             "{}\n"          // First point X
-             "  11\n"
-             "{}\n"          // Second point X
-             "  20\n"
-             "{}\n"          // First point Y
-             "  21\n"
-             "{}\n"          // Second point Y
-             "  40\n"
-             "{}\n"          // Text height
-             "  41\n"
-             "{}\n"          // Width factor
-             "  50\n"
-             "{:.8f}\n"        // Rotation
-             "  51\n"
-             "{:.8f}\n"        // Oblique angle
-             "  71\n"
-             "{}\n"          // Mirror flags
-             "  72\n"
-             "{}\n"          // H alignment
-             "  73\n"
-             "{}\n",         // V alignment
-             aAttributes.m_Bold ? ( aAttributes.m_Italic ? "KICADBI" : "KICADB" )
-                                : ( aAttributes.m_Italic ? "KICADI" : "KICAD" ),
-             TO_UTF8( cLayerName ),
-             formatCoord( origin_dev.x ),
-             formatCoord( origin_dev.x ),
-             formatCoord( origin_dev.y ),
-             formatCoord( origin_dev.y ),
-             formatCoord( size_dev.y ),
-             formatCoord( fabs( size_dev.x / size_dev.y ) ),
-             aAttributes.m_Angle.AsDegrees(),
-             aAttributes.m_Italic ? DXF_OBLIQUE_ANGLE : 0,
-             aAttributes.m_Mirrored ? 2 : 0, // X mirror flag
-             h_code, v_code );
+                " 10\n{}\n 20\n{}\n 30\n0\n"
+                " 40\n{}\n",
+                formatCoord( origin_dev.x ),
+                formatCoord( origin_dev.y ),
+                formatCoord( size_dev.y ) );
 
     /* There are two issue in emitting the text:
        - Our overline character (~) must be converted to the appropriate
@@ -1903,4 +2216,25 @@ void DXF_PLOTTER::plotOneLineOfText( const VECTOR2I& aPos, const COLOR4D& aColor
     }
 
     fmt::print( m_outputFile, "\n" );
+
+    // Remaining AcDbText fields, plus the second AcDbText marker scoping vertical align.
+    fmt::print( m_outputFile,
+                " 50\n{:.8f}\n"
+                " 41\n{}\n"
+                " 51\n{:.8f}\n"
+                "  7\n{}\n"
+                " 71\n{}\n"
+                " 72\n{}\n"
+                " 11\n{}\n 21\n{}\n 31\n0\n"
+                "100\nAcDbText\n"
+                " 73\n{}\n",
+                aAttributes.m_Angle.AsDegrees(),
+                formatCoord( fabs( size_dev.x / size_dev.y ) ),
+                aAttributes.m_Italic ? DXF_OBLIQUE_ANGLE : 0,
+                textStyle,
+                aAttributes.m_Mirrored ? 2 : 0,
+                h_code,
+                formatCoord( origin_dev.x ),
+                formatCoord( origin_dev.y ),
+                v_code );
 }

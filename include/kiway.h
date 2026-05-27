@@ -116,7 +116,6 @@ class KICAD_API_SERVER;
 // be mangled.
 #define KIFACE_INSTANCE_NAME_AND_VERSION   "KIFACE_1"
 
-#ifndef SWIG
 #if defined(__linux__) || defined(__FreeBSD__)
  #define LIB_ENV_VAR    wxT( "LD_LIBRARY_PATH" )
 #elif defined(__WXMAC__)
@@ -126,7 +125,6 @@ class KICAD_API_SERVER;
 #else
  #error Platform support missing
 #endif
-#endif  // SWIG
 
 class wxConfigBase;
 class wxWindow;
@@ -328,7 +326,6 @@ public:
         FACE_PL_EDITOR,
         FACE_PCB_CALCULATOR,
         FACE_BMP2CMP,
-        FACE_PYTHON,
 
         KIWAY_FACE_COUNT
     };
@@ -538,11 +535,7 @@ private:
 };
 
 
-#ifndef SWIG
-// provided by single_top.cpp and kicad.cpp;
 extern KIWAY Kiway;
-// whereas python launchers: single_top.py and project manager instantiate as a python object
-#endif
 
 
 /**
@@ -560,8 +553,6 @@ extern KIWAY Kiway;
 typedef KIFACE* KIFACE_GETTER_FUNC( int* aKIFACEversion, int aKIWAYversion, PGM_BASE* aProgram );
 
 
-#ifndef SWIG
-
 /// No name mangling.  Each KIFACE (DSO/DLL) will implement this once.
 extern "C" {
 #if defined(BUILD_KIWAY_DLL)
@@ -570,7 +561,5 @@ extern "C" {
     KIFACE* KIFACE_GETTER(  int* aKIFACEversion, int aKIWAYversion, PGM_BASE* aProgram );
 #endif
 }
-
-#endif  // SWIG
 
 #endif  // KIWAY_H_

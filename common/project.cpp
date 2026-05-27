@@ -97,6 +97,16 @@ bool PROJECT::TextVarResolver( wxString* aToken ) const
         *aToken = TITLE_BLOCK::GetCurrentDate();
         return true;
     }
+    else if( aToken->IsSameAs( wxT( "CURRENT_TIME_HH_MM_SS" ) ) )
+    {
+        *aToken = TITLE_BLOCK::GetCurrentTimeHHMMSS();
+        return true;
+    }
+    else if( aToken->IsSameAs( wxT( "CURRENT_TIME_LOCALE" ) ) )
+    {
+        *aToken = TITLE_BLOCK::GetCurrentTimeLocale();
+        return true;
+    }
     else if( aToken->IsSameAs( wxT( "VCSHASH" ) ) )
     {
         *aToken = KIGIT::PROJECT_GIT_UTILS::GetCurrentHash( GetProjectFullName(), false );
@@ -478,33 +488,18 @@ void PROJECT::SaveToHistory( const wxString& aProjectPath, std::vector<HISTORY_F
     if( projectFn.GetFullPath() != requestedFn.GetFullPath() )
         return;
 
-    wxFileName historyDir( projectFn.GetPath(), wxS( ".history" ) );
-
-    if( !historyDir.DirExists() )
-    {
-        if( !historyDir.Mkdir( wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL ) )
-            return;
-    }
-
-    // Save project file (.kicad_pro) via file-copy
-    wxFileName historyProFile( historyDir.GetFullPath(), projectFn.GetName(),
-                               projectFn.GetExt() );
-
     HISTORY_FILE_DATA proEntry;
-    proEntry.path = historyProFile.GetFullPath();
+    proEntry.relativePath = projectFn.GetFullName();
     proEntry.sourcePath = projectFile;
     aFileData.push_back( std::move( proEntry ) );
 
-    // Save project local settings (.kicad_prl) if it exists
-    wxFileName prlFile( projectFn.GetPath(), projectFn.GetName(), FILEEXT::ProjectLocalSettingsFileExtension );
+    wxFileName prlFile( projectFn.GetPath(), projectFn.GetName(),
+                        FILEEXT::ProjectLocalSettingsFileExtension );
 
     if( prlFile.FileExists() )
     {
-        wxFileName historyPrlFile( historyDir.GetFullPath(), prlFile.GetName(),
-                                   prlFile.GetExt() );
-
         HISTORY_FILE_DATA prlEntry;
-        prlEntry.path = historyPrlFile.GetFullPath();
+        prlEntry.relativePath = prlFile.GetFullName();
         prlEntry.sourcePath = prlFile.GetFullPath();
         aFileData.push_back( std::move( prlEntry ) );
     }

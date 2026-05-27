@@ -38,8 +38,10 @@
 #include <geometry/shape_poly_set.h>
 #include <geometry/geometry_utils.h>
 #include <geometry/roundrect.h>
+#include <geometry/shape_ellipse.h>
 #include <convert_shape_list_to_polygon.h>
 #include <board.h>
+#include <board_design_settings.h>
 #include <collectors.h>
 
 #include <nanoflann.hpp>
@@ -259,6 +261,23 @@ static void processClosedShape( PCB_SHAPE* aShape, SHAPE_LINE_CHAIN& aContour,
         aContour.SetClosed( true );
         break;
     }
+    case SHAPE_T::ELLIPSE:
+    {
+        // Tessellate the ellipse outline and append it as a closed contour.
+        SHAPE_ELLIPSE e( aShape->GetEllipseCenter(), aShape->GetEllipseMajorRadius(), aShape->GetEllipseMinorRadius(),
+                         aShape->GetEllipseRotation() );
+
+        SHAPE_LINE_CHAIN chain = e.ConvertToPolyline( aErrorMax );
+
+        for( int ii = 0; ii < chain.PointCount(); ++ii )
+            aContour.Append( chain.CPoint( ii ) );
+
+        aContour.SetClosed( true );
+
+        for( int ii = 1; ii < aContour.PointCount(); ++ii )
+            aShapeOwners[std::make_pair( aContour.CPoint( ii - 1 ), aContour.CPoint( ii ) )] = aShape;
+        break;
+    }
     default:
         break;
     }
@@ -362,6 +381,44 @@ static void processShapeSegment( PCB_SHAPE* aShape, SHAPE_LINE_CHAIN& aContour,
         }
 
         aPrevPt = nextPt;
+        break;
+    }
+    case SHAPE_T::ELLIPSE_ARC:
+    {
+        VECTOR2I pstart = aShape->GetStart();
+        VECTOR2I pend = aShape->GetEnd();
+        bool     reverse = false;
+
+        if( !close_enough( aPrevPt, pstart, aChainingEpsilon ) )
+        {
+            if( !close_enough( aPrevPt, pend, aChainingEpsilon ) )
+                return;
+
+            reverse = true;
+            std::swap( pstart, pend );
+        }
+
+        SHAPE_ELLIPSE e( aShape->GetEllipseCenter(), aShape->GetEllipseMajorRadius(), aShape->GetEllipseMinorRadius(),
+                         aShape->GetEllipseRotation(), aShape->GetEllipseStartAngle(), aShape->GetEllipseEndAngle() );
+
+        SHAPE_LINE_CHAIN arcChain = e.ConvertToPolyline( aErrorMax );
+
+        if( reverse )
+            arcChain = arcChain.Reverse();
+
+        for( int ii = 0; ii < arcChain.PointCount(); ++ii )
+        {
+            const VECTOR2I& pt = arcChain.CPoint( ii );
+
+            if( pt == aPrevPt )
+                continue;
+
+            aContour.Append( pt );
+            aShapeOwners[std::make_pair( aPrevPt, pt )] = aShape;
+            aPrevPt = pt;
+        }
+
+        aPrevPt = pend;
         break;
     }
     default:
@@ -622,6 +679,129 @@ static bool hasOverlappingClosedContours( const std::vector<SHAPE_LINE_CHAIN>& a
 }
 
 
+// Walk a chain of open shapes (segments/arcs/beziers) starting from aStart, and produce a
+// closed SHAPE_LINE_CHAIN if the chain forms a closed loop. Shapes that are consumed are
+// removed from aRemaining. Returns true and populates aContour and aOwnerShape only if a
+// closed contour is produced. Used to detect cross-contour intersections of bezier-bounded
+// slots which would otherwise be missed by the closed-shape-only intersection test.
+static bool buildChainedClosedContour( PCB_SHAPE* aStart, std::set<PCB_SHAPE*>& aRemaining,
+                                       const KDTree& aKdTree,
+                                       const PCB_SHAPE_ENDPOINTS_ADAPTOR& aAdaptor,
+                                       int aErrorMax, int aChainingEpsilon,
+                                       SHAPE_LINE_CHAIN& aContour, PCB_SHAPE*& aOwnerShape )
+{
+    std::deque<PCB_SHAPE*> chain;
+    chain.push_back( aStart );
+
+    bool     closed = false;
+    VECTOR2I frontPt = aStart->GetStart();
+    VECTOR2I backPt = aStart->GetEnd();
+
+    std::set<PCB_SHAPE*> visited;
+    visited.insert( aStart );
+
+    auto extendChain = [&]( bool forward )
+    {
+        PCB_SHAPE* curr = forward ? chain.back() : chain.front();
+        VECTOR2I   prev = forward ? backPt : frontPt;
+
+        for( ;; )
+        {
+            PCB_SHAPE* next = findNext( curr, prev, aKdTree, aAdaptor, aChainingEpsilon );
+
+            // The KD-tree spans the original openShapes set, so it still returns shapes
+            // already consumed by an earlier chain. Filter against aRemaining to avoid
+            // accidentally absorbing those into this chain.
+            if( next && aRemaining.find( next ) == aRemaining.end() )
+                next = nullptr;
+
+            if( next && visited.find( next ) == visited.end() )
+            {
+                visited.insert( next );
+
+                if( forward )
+                    chain.push_back( next );
+                else
+                    chain.push_front( next );
+
+                if( closer_to_first( prev, next->GetStart(), next->GetEnd() ) )
+                    prev = next->GetEnd();
+                else
+                    prev = next->GetStart();
+
+                curr = next;
+                continue;
+            }
+
+            if( next )
+            {
+                PCB_SHAPE* chainEnd = forward ? chain.front() : chain.back();
+                VECTOR2I   chainPt = forward ? frontPt : backPt;
+
+                if( next == chainEnd && close_enough( prev, chainPt, aChainingEpsilon ) )
+                    closed = true;
+            }
+
+            if( forward )
+                backPt = prev;
+            else
+                frontPt = prev;
+
+            break;
+        }
+    };
+
+    extendChain( true );
+
+    if( !closed )
+        extendChain( false );
+
+    if( !closed )
+        return false;
+
+    // Build the contour from the closed chain, mirroring doConvertOutlineToPolygon().
+    std::map<std::pair<VECTOR2I, VECTOR2I>, PCB_SHAPE*> shapeOwners;
+    PCB_SHAPE*                                          first = chain.front();
+    VECTOR2I                                            startPt;
+
+    if( chain.size() > 1 )
+    {
+        PCB_SHAPE* second = *( std::next( chain.begin() ) );
+
+        if( close_enough( first->GetStart(), second->GetStart(), aChainingEpsilon )
+            || close_enough( first->GetStart(), second->GetEnd(), aChainingEpsilon ) )
+            startPt = first->GetEnd();
+        else
+            startPt = first->GetStart();
+    }
+    else
+    {
+        startPt = first->GetStart();
+    }
+
+    aContour.Clear();
+    aContour.Append( startPt );
+    VECTOR2I prevPt = startPt;
+
+    for( PCB_SHAPE* shapeInChain : chain )
+        processShapeSegment( shapeInChain, aContour, prevPt, shapeOwners, aErrorMax, aChainingEpsilon, false );
+
+    if( aContour.PointCount() < 3 )
+        return false;
+
+    if( aContour.CPoint( 0 ) != aContour.CLastPoint() )
+        aContour.SetPoint( -1, aContour.CPoint( 0 ) );
+
+    aContour.SetClosed( true );
+
+    for( PCB_SHAPE* consumed : chain )
+        aRemaining.erase( consumed );
+
+    aOwnerShape = first;
+    return true;
+}
+
+
 bool doConvertOutlineToPolygon( std::vector<PCB_SHAPE*>& aShapeList, SHAPE_POLY_SET& aPolygons,
                                 int aErrorMax, int aChainingEpsilon, bool aAllowDisjoint,
                                 OUTLINE_ERROR_HANDLER* aErrorHandler, bool aAllowUseArcsInPolygons,
@@ -668,9 +848,9 @@ bool doConvertOutlineToPolygon( std::vector<PCB_SHAPE*>& aShapeList, SHAPE_POLY_
         SHAPE_LINE_CHAIN& currContour = contours.back();
         currContour.SetWidth( graphic->GetWidth() );
 
-        // Handle closed shapes (circles, rects, polygons)
+        // Handle closed shapes (circles, rects, polygons, ellipses)
         if( graphic->GetShape() == SHAPE_T::POLY || graphic->GetShape() == SHAPE_T::CIRCLE
-            || graphic->GetShape() == SHAPE_T::RECTANGLE )
+            || graphic->GetShape() == SHAPE_T::RECTANGLE || graphic->GetShape() == SHAPE_T::ELLIPSE )
         {
             processClosedShape( graphic, currContour, shapeOwners, aErrorMax, aAllowUseArcsInPolygons );
         }
@@ -1013,6 +1193,27 @@ bool TestBoardOutlinesGraphicItems( BOARD* aBoard, int aMinDist,
         case SHAPE_T::BEZIER:
             break;
 
+        case SHAPE_T::ELLIPSE:
+        case SHAPE_T::ELLIPSE_ARC:
+        {
+            const int major = shape->GetEllipseMajorRadius();
+            const int minor = shape->GetEllipseMinorRadius();
+
+            if( major <= min_dist || minor <= min_dist )
+            {
+                success = false;
+
+                if( aErrorHandler )
+                {
+                    ( *aErrorHandler )( wxString::Format( _( "(ellipse has null or very small "
+                                                             "radii: major=%d nm, minor=%d nm)" ),
+                                                          major, minor ),
+                                        shape, nullptr, shape->GetEllipseCenter() );
+                }
+            }
+            break;
+        }
+
         default:
             UNIMPLEMENTED_FOR( shape->SHAPE_T_asString() );
             return false;
@@ -1022,19 +1223,53 @@ bool TestBoardOutlinesGraphicItems( BOARD* aBoard, int aMinDist,
     std::vector<std::pair<PCB_SHAPE*, SHAPE_LINE_CHAIN>> closedContours;
     closedContours.reserve( shapeList.size() );
 
+    std::set<PCB_SHAPE*> openShapes;
+
     for( PCB_SHAPE* shape : shapeList )
     {
-        if( shape->GetShape() != SHAPE_T::POLY && shape->GetShape() != SHAPE_T::CIRCLE
-            && shape->GetShape() != SHAPE_T::RECTANGLE )
+        if( shape->GetShape() == SHAPE_T::POLY || shape->GetShape() == SHAPE_T::CIRCLE
+            || shape->GetShape() == SHAPE_T::RECTANGLE || shape->GetShape() == SHAPE_T::ELLIPSE )
         {
-            continue;
+            SHAPE_LINE_CHAIN                                    contour;
+            std::map<std::pair<VECTOR2I, VECTOR2I>, PCB_SHAPE*> shapeOwners;
+
+            processClosedShape( shape, contour, shapeOwners, shape->GetMaxError(), true );
+            closedContours.emplace_back( shape, std::move( contour ) );
         }
+        else if( shape->GetShape() == SHAPE_T::SEGMENT || shape->GetShape() == SHAPE_T::ARC
+                 || shape->GetShape() == SHAPE_T::BEZIER || shape->GetShape() == SHAPE_T::ELLIPSE_ARC )
+        {
+            openShapes.insert( shape );
+        }
+    }
 
-        SHAPE_LINE_CHAIN                                    contour;
-        std::map<std::pair<VECTOR2I, VECTOR2I>, PCB_SHAPE*> shapeOwners;
+    // Gather closed contours from chained open shapes (slots formed by segments/arcs/beziers).
+    // Without this, malformed-outline detection misses overlaps involving such slots.
+    if( !openShapes.empty() )
+    {
+        std::vector<PCB_SHAPE*> openShapeList( openShapes.begin(), openShapes.end() );
+        PCB_SHAPE_ENDPOINTS_ADAPTOR adaptor( openShapeList );
+        KDTree                      kdTree( 2, adaptor );
 
-        processClosedShape( shape, contour, shapeOwners, shape->GetMaxError(), true );
-        closedContours.emplace_back( shape, std::move( contour ) );
+        int chainingEpsilon = aBoard->GetOutlinesChainingEpsilon();
+        int maxError = aBoard->GetDesignSettings().m_MaxError;
+
+        while( !openShapes.empty() )
+        {
+            PCB_SHAPE*       start = *openShapes.begin();
+            SHAPE_LINE_CHAIN contour;
+            PCB_SHAPE*       owner = nullptr;
+
+            if( buildChainedClosedContour( start, openShapes, kdTree, adaptor, maxError,
+                                           chainingEpsilon, contour, owner ) )
+            {
+                closedContours.emplace_back( owner, std::move( contour ) );
+            }
+            else
+            {
+                openShapes.erase( start );
+            }
+        }
     }
 
     for( size_t ii = 0; ii < closedContours.size(); ++ii )

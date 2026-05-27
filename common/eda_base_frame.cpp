@@ -33,6 +33,7 @@
 #include <bitmaps.h>
 #include <bitmap_store.h>
 #include <dialog_shim.h>
+#include <dialogs/dialog_autosave_recovery.h>
 #include <dialogs/git/panel_git_repos.h>
 #include <dialogs/panel_common_settings.h>
 #include <dialogs/panel_mouse_settings.h>
@@ -413,15 +414,112 @@ void EDA_BASE_FRAME::onAutoSaveTimer( wxTimerEvent& aEvent )
 }
 
 
+static wxString buildRecoveredFileName( const wxFileName& aSrcFn, const wxDateTime& aStamp )
+{
+    wxString stamp = aStamp.IsValid() ? aStamp.Format( wxS( "%Y-%m-%d_%H%M%S" ) ) : wxString( wxS( "unknown-time" ) );
+
+    wxFileName recovered( aSrcFn );
+    recovered.SetName( aSrcFn.GetName() + wxS( ".recovered." ) + stamp );
+
+    int seq = 1;
+
+    while( recovered.FileExists() )
+    {
+        recovered.SetName( aSrcFn.GetName() + wxS( ".recovered." ) + stamp + wxString::Format( wxS( ".%d" ), seq++ ) );
+    }
+
+    return recovered.GetFullPath();
+}
+
+
+void EDA_BASE_FRAME::CheckForAutosaveFiles( const wxString& aProjectPath, const std::vector<wxString>& aExtensions )
+{
+    COMMON_SETTINGS* cs = Pgm().GetCommonSettings();
+
+    if( cs->m_Backup.format != BACKUP_FORMAT::ZIP )
+        return;
+
+    auto stale = Kiway().LocalHistory().FindStaleAutosaveFiles( aProjectPath, aExtensions );
+
+    if( stale.empty() )
+        return;
+
+    DIALOG_AUTOSAVE_RECOVERY dlg( this, stale );
+    dlg.ShowModal();
+
+    auto selected = dlg.GetSelectedStale();
+
+    switch( dlg.GetChoice() )
+    {
+    case AUTOSAVE_RECOVERY_CHOICE::RESTORE:
+        for( const auto& [autosavePath, srcPath] : selected )
+        {
+            if( !wxCopyFile( autosavePath, srcPath, true ) )
+            {
+                wxLogError( _( "Failed to recover auto-saved file '%s'." ), srcPath );
+                continue;
+            }
+
+            wxRemoveFile( autosavePath );
+        }
+        break;
+
+    case AUTOSAVE_RECOVERY_CHOICE::KEEP_CURRENT:
+        for( const auto& [autosavePath, srcPath] : selected )
+        {
+            if( wxFileExists( autosavePath ) )
+                wxRemoveFile( autosavePath );
+        }
+        break;
+
+    case AUTOSAVE_RECOVERY_CHOICE::KEEP_BOTH:
+        for( const auto& [autosavePath, srcPath] : selected )
+        {
+            wxFileName autosaveFn( autosavePath );
+            wxFileName srcFn( srcPath );
+            wxDateTime stamp = autosaveFn.FileExists() ? autosaveFn.GetModificationTime() : wxDateTime::Now();
+
+            wxString target = buildRecoveredFileName( srcFn, stamp );
+
+            if( !wxCopyFile( autosavePath, target, true ) )
+            {
+                wxLogError( _( "Failed to write recovered file '%s'." ), target );
+                continue;
+            }
+
+            wxRemoveFile( autosavePath );
+        }
+        break;
+
+    case AUTOSAVE_RECOVERY_CHOICE::CANCEL:
+        // Leave all autosaves on disk so the dialog can offer them again next open.
+        break;
+    }
+}
+
+
 bool EDA_BASE_FRAME::doAutoSave()
 {
     m_autoSaveRequired = false;
     m_autoSavePending = false;
 
-    // Use registered saver callbacks to snapshot editor state into .history and only commit
-    // if there are material changes.
-    if( !Prj().IsReadOnly() )
-        Kiway().LocalHistory().RunRegisteredSaversAndCommit( Prj().GetProjectPath(), wxS( "Autosave" ) );
+    COMMON_SETTINGS* cs = Pgm().GetCommonSettings();
+
+    // Incremental and zip-autosave both write outside the project tree when the user
+    // selects USER_DIR, so a read-only project is fine in that mode.  Only when the
+    // chosen location is the project directory does the project tree need to be writable.
+    if( cs->m_Backup.location == BACKUP_LOCATION::PROJECT_DIR && Prj().IsReadOnly() )
+        return true;
+
+    if( cs->m_Backup.format == BACKUP_FORMAT::INCREMENTAL )
+    {
+        Kiway().LocalHistory().RunRegisteredSaversAndCommit( Prj().GetProjectPath(),
+                                                             wxS( "Autosave" ) );
+    }
+    else
+    {
+        Kiway().LocalHistory().RunRegisteredSaversAsAutosaveFiles( Prj().GetProjectPath() );
+    }
 
     return true;
 }
@@ -612,6 +710,18 @@ void EDA_BASE_FRAME::RecreateToolbars()
     wxWindowUpdateLocker dummy( this );
 
     wxASSERT( m_toolbarSettings );
+
+    if( m_tbRight )
+        m_tbRight->ClearToolbar();
+
+    if( m_tbLeft )
+        m_tbLeft->ClearToolbar();
+
+    if( m_tbTopMain )
+        m_tbTopMain->ClearToolbar();
+
+    if( m_tbTopAux )
+        m_tbTopAux->ClearToolbar();
 
     std::optional<TOOLBAR_CONFIGURATION> tbConfig;
 
@@ -942,6 +1052,24 @@ void EDA_BASE_FRAME::LoadWindowState( const WINDOW_STATE& aState )
         {
             m_framePos = wxDefaultPosition;
             wxLogTrace( traceDisplayLocation, wxS( "Resetting to default position" ) );
+        }
+
+        // Clamp the saved size to the current display, in case the window was sized for a
+        // larger external monitor that is no longer attached.
+        if( m_frameSize.x > clientSize.width )
+        {
+            wxLogTrace( traceDisplayLocation,
+                        wxS( "Clamping window width %d to display width %d" ),
+                        m_frameSize.x, clientSize.width );
+            m_frameSize.x = clientSize.width;
+        }
+
+        if( m_frameSize.y > clientSize.height )
+        {
+            wxLogTrace( traceDisplayLocation,
+                        wxS( "Clamping window height %d to display height %d" ),
+                        m_frameSize.y, clientSize.height );
+            m_frameSize.y = clientSize.height;
         }
     }
 
@@ -1379,7 +1507,7 @@ void EDA_BASE_FRAME::ShowPreferences( wxString aStartPage, wxString aStartParent
         WX_BUSY_INDICATOR busy_cursor;
 
         WX_TREEBOOK*            book = dlg.GetTreebook();
-        PANEL_HOTKEYS_EDITOR*   hotkeysPanel = new PANEL_HOTKEYS_EDITOR( this, book );
+        PANEL_HOTKEYS_EDITOR*   hotkeysPanel = new PANEL_HOTKEYS_EDITOR( this, book, false );
         std::vector<int>        expand;
 
         wxWindow* kicadMgr_window = wxWindow::FindWindowByName( KICAD_MANAGER_FRAME_NAME );

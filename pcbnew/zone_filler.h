@@ -163,6 +163,24 @@ private:
                                  const SHAPE_POLY_SET& aThermalRings );
 
     /**
+     * Stamp a regular grid of pattern shapes onto a zone's filled area for
+     * copper thieving.  Replaces aFillPolys with the clipped pattern.
+     *
+     * Thieving zones are netless dummy copper used to balance plating current
+     * density on outer layers (and copper distribution on inner layers).  Runs
+     * after electrical clearances have already been subtracted into aFillPolys,
+     * so the stamps inherit those keepouts automatically.
+     *
+     * v1 supports the dots pattern only.  Squares + crosshatch land in a follow-up.
+     *
+     * @param aZone the zone, fill mode must be COPPER_THIEVING.
+     * @param aLayer the copper layer.
+     * @param aFillPolys IN: pre-cleared valid fill region.  OUT: stamped pattern.
+     */
+    bool addCopperThievingPattern( const ZONE* aZone, PCB_LAYER_ID aLayer,
+                                   SHAPE_POLY_SET& aFillPolys );
+
+    /**
      * Remove minimum-width violations introduced by zone-to-zone knockouts.
      * Runs a deflate/reconnect/inflate cycle and intersects with the pre-deflate boundary
      * to avoid re-inflating into cleared areas.
@@ -170,11 +188,21 @@ private:
     void postKnockoutMinWidthPrune( const ZONE* aZone, SHAPE_POLY_SET& aFillPolys );
 
     /**
+     * Snapshot of zone fill polygons captured before an iterative refill wave.
+     */
+    using FillSnapshot = std::map<std::pair<const ZONE*, PCB_LAYER_ID>, SHAPE_POLY_SET>;
+
+    /**
      * Refill a zone from cached pre-knockout fill.
      * Used during iterative refill to avoid recomputing thermal reliefs and copper clearances.
      * Only re-applies the higher-priority zone knockout with updated fills.
+     *
+     * @param aSnapshot: If non-null, fills of other zones are read from the snapshot instead
+     * of from the live zone objects, ensuring all tasks in a parallel wave see the same
+     * pre-wave state.
      */
-    bool refillZoneFromCache( ZONE* aZone, PCB_LAYER_ID aLayer, SHAPE_POLY_SET& aFillPolys );
+    bool refillZoneFromCache( ZONE* aZone, PCB_LAYER_ID aLayer, SHAPE_POLY_SET& aFillPolys,
+                              const FillSnapshot* aSnapshot = nullptr );
 
     BOARD*                m_board;
     SHAPE_POLY_SET        m_boardOutline;       // the board outlines, if exists

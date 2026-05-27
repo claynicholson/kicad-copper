@@ -40,6 +40,7 @@
 #include <bitmaps.h>
 #include <string_utils.h>
 #include <zone_filler.h>
+#include <zone_utils.h>
 
 #include <zone_manager/model_zones_overview.h>
 #include <dialogs/panel_zone_properties.h>
@@ -63,59 +64,27 @@ DIALOG_ZONE_MANAGER::DIALOG_ZONE_MANAGER( PCB_BASE_FRAME* aParent ) :
     m_btnMoveUp->SetBitmap( KiBitmapBundle( BITMAPS::small_up ) );
     m_btnMoveDown->SetBitmap( KiBitmapBundle( BITMAPS::small_down ) );
     m_btnMoveBottom->SetBitmap( KiBitmapBundle( BITMAPS::small_bottom ) );
+    m_btnAutoAssign->SetBitmap( KiBitmapBundle( BITMAPS::small_sort_desc ) );
 
     m_panelZoneProperties = new PANEL_ZONE_PROPERTIES( m_zonePanel, aParent, m_zoneSettingsBag );
-    m_sizerProperties->Add( m_panelZoneProperties, 0,  wxEXPAND, 5 );
+    m_sizerProperties->Add( m_panelZoneProperties, 1,  wxEXPAND, 5 );
 
     m_zonePreviewNotebook = new ZONE_PREVIEW_NOTEBOOK( m_zonePanel, aParent );
     m_sizerPreview->Add( m_zonePreviewNotebook, 1, wxBOTTOM | wxLEFT | wxRIGHT | wxEXPAND, 5 );
+    m_sizerPreview->Layout();
 
     for( const auto& [k, v] : MODEL_ZONES_OVERVIEW::GetColumnNames() )
     {
         if( k == MODEL_ZONES_OVERVIEW::LAYERS )
-            m_viewZonesOverview->AppendIconTextColumn( v, k, wxDATAVIEW_CELL_INERT, 140 );
+            m_viewZonesOverview->AppendIconTextColumn( v, k, wxDATAVIEW_CELL_INERT, wxCOL_WIDTH_DEFAULT );
         else
-            m_viewZonesOverview->AppendTextColumn( v, k, wxDATAVIEW_CELL_INERT, 160 );
+            m_viewZonesOverview->AppendTextColumn( v, k, wxDATAVIEW_CELL_INERT, wxCOL_WIDTH_DEFAULT );
     }
 
     m_modelZonesOverview = new MODEL_ZONES_OVERVIEW( this, m_pcbFrame, m_zoneSettingsBag );
     m_viewZonesOverview->AssociateModel( m_modelZonesOverview.get() );
     m_viewZonesOverview->SetLayoutDirection( wxLayout_LeftToRight );
 
-#if wxUSE_DRAG_AND_DROP
-    m_viewZonesOverview->EnableDragSource( wxDF_UNICODETEXT );
-    m_viewZonesOverview->EnableDropTarget( wxDF_UNICODETEXT );
-
-    int id = m_viewZonesOverview->GetId();
-    Bind( wxEVT_DATAVIEW_ITEM_BEGIN_DRAG, &DIALOG_ZONE_MANAGER::OnBeginDrag, this, id );
-    Bind( wxEVT_DATAVIEW_ITEM_DROP_POSSIBLE, &DIALOG_ZONE_MANAGER::OnDropPossible, this, id );
-    Bind( wxEVT_DATAVIEW_ITEM_DROP, &DIALOG_ZONE_MANAGER::OnDrop, this, id );
-#endif // wxUSE_DRAG_AND_DROP
-
-    Bind( EVT_ZONE_NAME_UPDATE, &DIALOG_ZONE_MANAGER::OnZoneNameUpdate, this );
-    Bind( EVT_ZONE_NET_UPDATE, &DIALOG_ZONE_MANAGER::OnZoneNetUpdate, this );
-    Bind( EVT_ZONES_OVERVIEW_COUNT_CHANGE, &DIALOG_ZONE_MANAGER::OnZonesTableRowCountChange, this );
-    Bind( wxEVT_CHECKBOX, &DIALOG_ZONE_MANAGER::OnCheckBoxClicked, this );
-    Bind( wxEVT_IDLE, &DIALOG_ZONE_MANAGER::OnIdle, this );
-    Bind( wxEVT_CHAR_HOOK, &DIALOG_ZONE_MANAGER::OnDialogCharHook, this );
-    Bind( wxEVT_BOOKCTRL_PAGE_CHANGED,
-          [this]( wxNotebookEvent& aEvent )
-          {
-              Layout();
-          },
-          m_zonePreviewNotebook->GetId() );
-
-    Layout();
-    m_MainBoxSizer->Fit( this );
-    finishDialogSettings();
-}
-
-
-DIALOG_ZONE_MANAGER::~DIALOG_ZONE_MANAGER() = default;
-
-
-bool DIALOG_ZONE_MANAGER::TransferDataToWindow()
-{
     m_layerFilter->Clear();
     m_layerFilter->Append( _( "All Layers" ) );
 
@@ -139,6 +108,40 @@ bool DIALOG_ZONE_MANAGER::TransferDataToWindow()
     if( m_modelZonesOverview->GetCount() )
         SelectZoneTableItem( m_modelZonesOverview->GetItem( 0 ) );
 
+    Layout();
+    m_MainBoxSizer->Fit( this );
+    finishDialogSettings();
+
+#if wxUSE_DRAG_AND_DROP
+    m_viewZonesOverview->EnableDragSource( wxDF_UNICODETEXT );
+    m_viewZonesOverview->EnableDropTarget( wxDF_UNICODETEXT );
+
+    int id = m_viewZonesOverview->GetId();
+    Bind( wxEVT_DATAVIEW_ITEM_BEGIN_DRAG, &DIALOG_ZONE_MANAGER::OnBeginDrag, this, id );
+    Bind( wxEVT_DATAVIEW_ITEM_DROP_POSSIBLE, &DIALOG_ZONE_MANAGER::OnDropPossible, this, id );
+    Bind( wxEVT_DATAVIEW_ITEM_DROP, &DIALOG_ZONE_MANAGER::OnDrop, this, id );
+#endif // wxUSE_DRAG_AND_DROP
+
+    Bind( EVT_ZONE_NAME_UPDATE, &DIALOG_ZONE_MANAGER::OnZoneNameUpdate, this );
+    Bind( EVT_ZONE_NET_UPDATE, &DIALOG_ZONE_MANAGER::OnZoneNetUpdate, this );
+    Bind( EVT_ZONES_OVERVIEW_COUNT_CHANGE, &DIALOG_ZONE_MANAGER::OnZonesTableRowCountChange, this );
+    Bind( wxEVT_CHECKBOX, &DIALOG_ZONE_MANAGER::OnCheckBoxClicked, this );
+    Bind( wxEVT_IDLE, &DIALOG_ZONE_MANAGER::OnIdle, this );
+    Bind( wxEVT_CHAR_HOOK, &DIALOG_ZONE_MANAGER::OnDialogCharHook, this );
+    Bind( wxEVT_BOOKCTRL_PAGE_CHANGED,
+          [this]( wxNotebookEvent& aEvent )
+          {
+              Layout();
+          },
+          m_zonePreviewNotebook->GetId() );
+}
+
+
+DIALOG_ZONE_MANAGER::~DIALOG_ZONE_MANAGER() = default;
+
+
+bool DIALOG_ZONE_MANAGER::TransferDataToWindow()
+{
     return true;
 }
 
@@ -390,6 +393,36 @@ void DIALOG_ZONE_MANAGER::OnMoveBottomClick( wxCommandEvent& aEvent )
 }
 
 
+void DIALOG_ZONE_MANAGER::OnAutoAssignClick( wxCommandEvent& aEvent )
+{
+    BOARD* board = m_pcbFrame->GetBoard();
+
+    // Save original priorities so we can restore them after copying to clones.
+    // The dialog operates on clones; originals must stay untouched until OnOk.
+    std::unordered_map<ZONE*, unsigned> savedPriorities;
+
+    for( ZONE* zone : board->Zones() )
+        savedPriorities[zone] = zone->GetAssignedPriority();
+
+    if( AutoAssignZonePriorities( board ) )
+    {
+        for( auto& [original, clone] : m_zoneSettingsBag.GetZonesCloneMap() )
+        {
+            unsigned newPri = original->GetAssignedPriority();
+            clone->SetAssignedPriority( newPri );
+            m_zoneSettingsBag.SetZonePriority( clone.get(), newPri );
+        }
+
+        PostProcessZoneViewSelChange(
+                m_modelZonesOverview->ApplyFilter( m_filterCtrl->GetValue(),
+                                                   m_viewZonesOverview->GetSelection() ) );
+    }
+
+    for( auto& [zone, priority] : savedPriorities )
+        zone->SetAssignedPriority( priority );
+}
+
+
 void DIALOG_ZONE_MANAGER::OnFilterCtrlCancel( wxCommandEvent& aEvent )
 {
     PostProcessZoneViewSelChange( m_modelZonesOverview->ClearFilter( m_viewZonesOverview->GetSelection() ) );
@@ -508,8 +541,11 @@ void DIALOG_ZONE_MANAGER::OnZonesTableRowCountChange( wxCommandEvent& aEvent )
 {
     unsigned count = aEvent.GetInt();
 
-    for( STD_BITMAP_BUTTON* btn : { m_btnMoveTop, m_btnMoveUp, m_btnMoveDown, m_btnMoveBottom } )
+    for( STD_BITMAP_BUTTON* btn : { m_btnMoveTop, m_btnMoveUp, m_btnMoveDown, m_btnMoveBottom,
+                                    m_btnAutoAssign } )
+    {
         btn->Enable( count > 1 );
+    }
 }
 
 

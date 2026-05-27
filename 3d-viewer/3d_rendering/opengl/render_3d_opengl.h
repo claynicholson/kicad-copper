@@ -76,7 +76,9 @@ public:
      * Load footprint models if they are not already loaded, i.e. if m_3dModelMap is empty
      */
     void Load3dModelsIfNeeded();
+
     void                                handleGizmoMouseInput( int mouseX, int mouseY );
+    void                                updateGizmoSelection( glm::mat4 aCameraRotationMatrix );
     void                                setGizmoViewport( int x, int y, int width, int height );
     std::tuple<int, int, int, int>      getGizmoViewport() const;
     SPHERES_GIZMO::GizmoSphereSelection getSelectedGizmoSphere() const;
@@ -169,6 +171,7 @@ private:
      */
     void load3dModels( REPORTER* aStatusReporter );
 
+    void createPlaceholderModel();
     struct MODELTORENDER
     {
         glm::mat4 m_modelWorldMat;
@@ -190,6 +193,10 @@ private:
         {
         }
     };
+
+    void renderPlaceholderForFootprint( std::list<MODELTORENDER>& aDstRenderList, const glm::mat4& aFpMatrix,
+                                        const FOOTPRINT* aFootprint, bool aRenderTransparentOnly, bool aIsSelected,
+                                        float aOpacity );
 
     void renderOpaqueModels( const glm::mat4 &aCameraViewMatrix );
     void renderTransparentModels( const glm::mat4 &aCameraViewMatrix );
@@ -292,6 +299,12 @@ private:
     SHAPE_POLY_SET m_antiBoardPolys; ///< The negative polygon representation of the board
                                      ///< outline.
     SPHERES_GIZMO* m_spheres_gizmo;
+    MODEL_3D*      m_placeholderModel = nullptr;
+
+    std::map<const FOOTPRINT*, OPENGL_RENDER_LIST*> m_extrudedBodyLists;
+    std::map<const FOOTPRINT*, OPENGL_RENDER_LIST*> m_extrudedPadLists;
+
+    void renderExtrudedBodies();
 };
 
 #endif // RENDER_3D_OPENGL_H

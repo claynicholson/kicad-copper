@@ -62,7 +62,6 @@
 #include <core/profile.h>
 #include <project/project_file.h>
 #include <project/net_settings.h>
-#include <python_scripting.h>
 #include <sch_edit_frame.h>
 #include <symbol_chooser_frame.h>
 #include <sch_painter.h>
@@ -146,8 +145,6 @@ BEGIN_EVENT_TABLE( SCH_EDIT_FRAME, SCH_BASE_FRAME )
 
     EVT_MENU_RANGE( ID_FILE1, ID_FILEMAX, SCH_EDIT_FRAME::OnLoadFile )
     EVT_MENU( ID_FILE_LIST_CLEAR, SCH_EDIT_FRAME::OnClearFileHistory )
-
-    EVT_MENU( ID_IMPORT_NON_KICAD_SCH, SCH_EDIT_FRAME::OnImportProject )
 
     EVT_MENU( wxID_EXIT, SCH_EDIT_FRAME::OnExit )
     EVT_MENU( wxID_CLOSE, SCH_EDIT_FRAME::OnExit )
@@ -621,6 +618,10 @@ SCH_EDIT_FRAME::~SCH_EDIT_FRAME()
     if( m_schematic )
         m_schematic->RemoveAllListeners();
 
+    // Canvas outlives m_schematic; detach tracker consumers before delete.
+    if( GetCanvas() && GetCanvas()->GetView() )
+        GetCanvas()->GetView()->DetachTextVarTracker();
+
     // Delete all items not in draw list before deleting schematic
     // to avoid dangling pointers stored in these items
     ClearUndoRedoList();
@@ -851,6 +852,8 @@ void SCH_EDIT_FRAME::setupUIConditions()
 
     mgr->SetConditions( ACTIONS::zoomTool,            CHECK( cond.CurrentTool( ACTIONS::zoomTool ) ) );
     mgr->SetConditions( ACTIONS::selectionTool,       CHECK( cond.CurrentTool( ACTIONS::selectionTool ) ) );
+    mgr->SetConditions( ACTIONS::selectSetRect,       CHECK( cond.CurrentTool( ACTIONS::selectionTool ) ) );
+    mgr->SetConditions( ACTIONS::selectSetLasso,      CHECK( cond.CurrentTool( ACTIONS::selectionTool ) ) );
 
     auto showHiddenPinsCond =
             [this]( const SELECTION& )
@@ -994,6 +997,8 @@ void SCH_EDIT_FRAME::setupUIConditions()
     CURRENT_TOOL( SCH_ACTIONS::drawSheetFromDesignBlock );
     CURRENT_TOOL( SCH_ACTIONS::drawRectangle );
     CURRENT_TOOL( SCH_ACTIONS::drawCircle );
+    CURRENT_TOOL( SCH_ACTIONS::drawEllipse );
+    CURRENT_TOOL( SCH_ACTIONS::drawEllipseArc );
     CURRENT_TOOL( SCH_ACTIONS::drawArc );
     CURRENT_TOOL( SCH_ACTIONS::drawBezier );
     CURRENT_TOOL( SCH_ACTIONS::drawLines );
@@ -1243,6 +1248,25 @@ void SCH_EDIT_FRAME::doCloseWindow()
 
     SCH_SHEET_LIST sheetlist = Schematic().Hierarchy();
 
+    if( !Prj().IsNullProject() )
+    {
+        std::vector<wxString> sheetSrcs;
+        sheetSrcs.reserve( sheetlist.size() );
+
+        for( const SCH_SHEET_PATH& path : sheetlist )
+        {
+            SCH_SCREEN* screen = path.LastScreen();
+
+            // Only sweep autosaves for sheets actually dirtied in this session.
+            // A clean sheet's autosave, if any, is a previous-session leftover the
+            // user explicitly deferred in the recovery dialog.
+            if( screen && screen->IsContentModified() )
+                sheetSrcs.push_back( Prj().AbsolutePath( screen->GetFileName() ) );
+        }
+
+        Kiway().LocalHistory().RemoveAutosaveFiles( Prj().GetProjectPath(), sheetSrcs );
+    }
+
 #ifdef KICAD_IPC_API
     Pgm().GetApiServer().DeregisterHandler( m_apiHandler.get() );
     wxTheApp->Unbind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED, &SCH_EDIT_FRAME::onPluginAvailabilityChanged, this );
@@ -1295,13 +1319,14 @@ void SCH_EDIT_FRAME::doCloseWindow()
     if( !Schematic().GetFileName().IsEmpty() && !Schematic().RootScreen()->IsEmpty() )
         UpdateFileHistory( fileName );
 
+    // Clear the view before freeing any schematic items.  VIEW::Clear() walks m_allItems and
+    // touches each item's private data, so the items must still be alive when this runs.
+    SetScreen( nullptr );
+
     Schematic().RootScreen()->Clear( true );
 
     // all sub sheets are deleted, only the main sheet is usable
     GetCurrentSheet().clear();
-
-    // Clear view before destroying schematic as repaints depend on schematic being valid
-    SetScreen( nullptr );
 
     Schematic().Reset();
 
@@ -1725,8 +1750,8 @@ void SCH_EDIT_FRAME::RefreshOperatingPointDisplay()
                 for( const auto& modelPin : model.GetPins() )
                 {
                     SCH_PIN* symbolPin = symbol->GetPin( modelPin.get().symbolPinNumber );
-                    wxString signalName = ref + wxS( ":" ) + modelPin.get().modelPinName;
-                    wxString op = m_schematic->GetOperatingPoint( signalName, settings.m_OPO_IPrecision,
+                    wxString netChainName = ref + wxS( ":" ) + modelPin.get().modelPinName;
+                    wxString op = m_schematic->GetOperatingPoint( netChainName, settings.m_OPO_IPrecision,
                                                                   settings.m_OPO_IRange );
 
                     if( symbolPin && !op.IsEmpty() && op != wxS( "--" ) && op != wxS( "?" ) )
@@ -1984,9 +2009,6 @@ void SCH_EDIT_FRAME::CommonSettingsChanged( int aFlags )
 
     SCHEMATIC_SETTINGS& settings = Schematic().Settings();
 
-    settings.m_JunctionSize = GetSchematicJunctionSize();
-    settings.m_HopOverScale = GetSchematicHopOverScale();
-
     ShowAllIntersheetRefs( settings.m_IntersheetRefsShow );
 
     if( EESCHEMA_SETTINGS* cfg = GetAppSettings<EESCHEMA_SETTINGS>( "eeschema" ) )
@@ -2021,7 +2043,7 @@ void SCH_EDIT_FRAME::CommonSettingsChanged( int aFlags )
         {
             SCH_LINE* line = static_cast<SCH_LINE*>( item );
 
-            if( line->IsWire() )
+            if( line->IsWire() || line->IsBus() )
                 UpdateHopOveredWires( line );
         }
     }
@@ -2088,6 +2110,27 @@ void SCH_EDIT_FRAME::ShowChangedLanguage()
 
 void SCH_EDIT_FRAME::UpdateNetHighlightStatus()
 {
+    if( !GetHighlightedNetChain().IsEmpty() )
+    {
+        if( CONNECTION_GRAPH* graph = m_schematic->ConnectionGraph() )
+        {
+            if( SCH_NETCHAIN* sig = graph->GetNetChainByName( GetHighlightedNetChain() ) )
+            {
+                wxString nets;
+
+                for( const wxString& n : sig->GetNets() )
+                {
+                    if( !nets.IsEmpty() )
+                        nets += wxT( ", " );
+                    nets += n;
+                }
+
+                SetStatusText( wxString::Format( _( "Net chain members: %s" ), nets ) );
+                return;
+            }
+        }
+    }
+
     if( !GetHighlightedConnection().IsEmpty() )
     {
         SetStatusText( wxString::Format( _( "Highlighted net: %s" ),
@@ -2458,7 +2501,17 @@ void SCH_EDIT_FRAME::onCloseErcDialog( wxCommandEvent& aEvent )
 DIALOG_SYMBOL_FIELDS_TABLE* SCH_EDIT_FRAME::GetSymbolFieldsTableDialog()
 {
     if( !m_symbolFieldsTableDialog )
-        m_symbolFieldsTableDialog = new DIALOG_SYMBOL_FIELDS_TABLE( this );
+    {
+        auto* dlg = new DIALOG_SYMBOL_FIELDS_TABLE( this );
+
+        if( dlg->WasAborted() )
+        {
+            dlg->Destroy();
+            return nullptr;
+        }
+
+        m_symbolFieldsTableDialog = dlg;
+    }
 
     return m_symbolFieldsTableDialog;
 }
@@ -2570,7 +2623,12 @@ void SCH_EDIT_FRAME::SetHighlightedConnection( const wxString& aConnection,
     m_highlightedConn = aConnection;
 
     if( refreshNetNavigator )
+    {
         RefreshNetNavigator( aSelection );
+
+        if( m_hierarchy )
+            m_hierarchy->UpdateNetHighlight( aConnection );
+    }
 }
 
 
@@ -3036,7 +3094,15 @@ void SCH_EDIT_FRAME::SetSchematic( SCHEMATIC* aSchematic )
     wxCHECK( aSchematic, /* void */ );
 
     if( m_schematic )
+    {
         m_schematic->SetProject( nullptr );
+
+        // Detach before the outgoing schematic (and its tracker) is freed.
+        if( GetCanvas() && GetCanvas()->GetView() )
+            GetCanvas()->GetView()->DetachTextVarTracker();
+
+        Kiway().LocalHistory().UnregisterSaver( m_schematic );
+    }
 
     aSchematic->SetProject( &Prj() );
     delete m_schematic;
@@ -3060,6 +3126,68 @@ void SCH_EDIT_FRAME::AddVariant()
 
     wxCommandEvent dummy( wxEVT_CHOICE, ID_TOOLBAR_SCH_SELECT_VARAIANT );
     onVariantSelected( dummy );
+}
+
+
+void SCH_EDIT_FRAME::EditVariantDescription()
+{
+    wxArrayString choices = Schematic().GetVariantNamesForUI();
+
+    // Default variant cannot be edited.
+    choices.RemoveAt( 0 );
+
+    if( choices.IsEmpty() )
+    {
+        GetInfoBar()->ShowMessageFor( _( "No design variants to edit." ), 10000, wxICON_ERROR );
+        return;
+    }
+
+    wxSingleChoiceDialog chooser( this, _( "Select variant to edit description:" ) + wxS( "                " ),
+                                  _( "Edit Variant Description" ), choices );
+    chooser.Layout();
+
+    if( chooser.ShowModal() == wxID_CANCEL )
+        return;
+
+    wxString variantName = chooser.GetStringSelection();
+
+    if( variantName.IsEmpty() )
+        return;
+
+    wxString currentDesc = Schematic().GetVariantDescription( variantName );
+
+    wxDialog dlg( this, wxID_ANY, wxString::Format( _( "Edit Description for '%s'" ), variantName ), wxDefaultPosition,
+                  wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER );
+
+    wxBoxSizer* mainSizer = new wxBoxSizer( wxVERTICAL );
+
+    wxStaticText* label = new wxStaticText( &dlg, wxID_ANY, _( "Description:" ) );
+    mainSizer->Add( label, 0, wxLEFT | wxRIGHT | wxTOP | wxEXPAND, 10 );
+
+    mainSizer->AddSpacer( 3 );
+
+    wxTextCtrl* descCtrl =
+            new wxTextCtrl( &dlg, wxID_ANY, currentDesc, wxDefaultPosition, wxSize( 300, 60 ), wxTE_MULTILINE );
+    mainSizer->Add( descCtrl, 1, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 10 );
+
+    wxStdDialogButtonSizer* btnSizer = new wxStdDialogButtonSizer();
+    btnSizer->AddButton( new wxButton( &dlg, wxID_OK ) );
+    btnSizer->AddButton( new wxButton( &dlg, wxID_CANCEL ) );
+    btnSizer->Realize();
+    mainSizer->Add( btnSizer, 0, wxALL | wxALIGN_RIGHT, 5 );
+
+    dlg.SetSizer( mainSizer );
+    dlg.Fit();
+    dlg.Centre();
+
+    if( dlg.ShowModal() == wxID_CANCEL )
+        return;
+
+    wxString newDesc = descCtrl->GetValue().Trim().Trim( false );
+
+    Schematic().SetVariantDescription( variantName, newDesc );
+    OnModify();
+    GetCanvas()->Refresh();
 }
 
 
