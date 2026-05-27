@@ -28,9 +28,11 @@
 
 
 #include <array>
+#include <concepts>
 #include <cstdint>
 #include <optional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -53,21 +55,46 @@ class BLOCK_BASE
 {
 public:
     BLOCK_BASE( uint8_t aBlockType, size_t aOffset ) :
-        m_blockType( aBlockType ),
-        m_offset( aOffset )
-    {}
+            m_blockType( aBlockType ),
+            m_offset( aOffset ),
+            m_Key( 0 ), // Key and next are set later, during parse
+            m_Next( 0 )
+    {
+    }
 
     virtual ~BLOCK_BASE() = default;
 
+    /**
+     * This is the actual type code as read from the file.
+     *
+     * Some BLOCKs have multiple valid type codes (e.g. segments).
+     */
     uint8_t GetBlockType() const { return m_blockType; }
     size_t  GetOffset() const { return m_offset; }
 
-    // If this block data has a key, return it, else 0
-    uint32_t GetKey() const;
+    // Unique object identifier for this block, or 0 if it has none.
+    uint32_t GetKey() const { return m_Key; }
+    // Object key of the next block in this block's primary linked-list, or 0.
+    uint32_t GetNext() const { return m_Next; }
+
+    void SetKey( uint32_t aKey ) { m_Key = aKey; }
+    void SetNext( uint32_t aNext ) { m_Next = aNext; }
 
 private:
-    uint8_t m_blockType;
-    size_t  m_offset;
+    uint8_t  m_blockType;
+    size_t   m_offset;
+    uint32_t m_Key;
+    uint32_t m_Next;
+};
+
+
+/**
+ * Concept that is statisfied by any struct that has a block tpye code
+ */
+template <typename T>
+concept HAS_BLOCK_TYPE_CODE = requires
+{
+    T::BLOCK_TYPE_CODE;
 };
 
 
@@ -75,9 +102,17 @@ template <typename T>
 class BLOCK : public BLOCK_BASE
 {
 public:
+    /// Deduce the type code from T::BLOCK_TYPE_CODE (single-code types only)
+    explicit BLOCK( size_t aOffset ) requires HAS_BLOCK_TYPE_CODE<T>
+        : BLOCK_BASE( T::BLOCK_TYPE_CODE, aOffset )
+    {
+    }
+
+    /// Explicit type code for multi-code types (e.g. segments 0x15/0x16/0x17)
     BLOCK( uint8_t aBlockType, size_t aOffset ) :
-        BLOCK_BASE( aBlockType, aOffset )
-    {}
+            BLOCK_BASE( aBlockType, aOffset )
+    {
+    }
 
     const T& GetData() const { return m_data; }
     T&       GetData() { return m_data; }
@@ -87,16 +122,10 @@ private:
 };
 
 
-enum BLOCK_TYPE
-{
-    x1B_NET = 0x1B,
-};
-
-
 /**
- * The format of an Allego file.
+ * The format of an Allegro file.
  *
- * Allgro formats seem to be versioned per the magic, with the lowest
+ * Allegro formats seem to be versioned per the magic, with the lowest
  * byte masked out (or at least there no known case of the lower
  * magic byte changing the format.
  *
@@ -124,16 +153,26 @@ constexpr bool operator>=( FMT_VER lhs, FMT_VER rhs )
 }
 
 
-template <typename T>
-struct COND_FIELD_BASE
+/**
+ * A constexpr predicate that decides whether a field exists for a given FMT_VER.
+ */
+template <typename P>
+concept FMT_VER_PREDICATE = requires( P p, FMT_VER v )
+{
+    { p( v ) }->std::convertible_to<bool>;
+};
+
+
+/**
+ * Version-conditional field. Wraps std::optional<T> with a compile-time
+ * predicate that determines whether the field exists for a given FMT_VER.
+ */
+template <FMT_VER_PREDICATE auto Pred, typename T>
+struct COND_FIELD
 {
     using value_type = T;
 
-    /**
-     * Define this function in the derived class to determine if the field
-     * exists in the given version of the file.
-     */
-    virtual bool exists( FMT_VER ver ) const = 0;
+    static constexpr bool exists( FMT_VER aVer ) { return Pred( aVer ); }
 
     // Access to the value (use std::optional-like semantics)
     T&       value() { return *m_Value; }
@@ -145,18 +184,19 @@ struct COND_FIELD_BASE
     T&       operator*() { return *m_Value; }
     const T& operator*() const { return *m_Value; }
 
-    T*       operator->() { return m_Value.operator->(); }
-    const T* operator->() const { return m_Value.operator->(); }
+    T*       operator->() { return &m_Value.value(); }
+    const T* operator->() const { return &*m_Value; }
 
-    // Assigmnent operator
-    COND_FIELD_BASE& operator=( const T& value )
+    // Assignment operator
+    COND_FIELD& operator=( const T& aValue )
     {
-        m_Value = value;
+        m_Value = aValue;
         return *this;
     }
-    COND_FIELD_BASE& operator=( T&& value )
+
+    COND_FIELD& operator=( T&& aValue )
     {
-        m_Value = std::move( value );
+        m_Value = std::move( aValue );
         return *this;
     }
 
@@ -165,42 +205,49 @@ private:
 };
 
 
-/**
- * This is a conditional field that only exists in versions of a file
- * of or above a certain version.
- */
-template <FMT_VER MinVersion, typename T>
-struct COND_GE : public COND_FIELD_BASE<T>
-{
-    constexpr bool exists( FMT_VER ver ) const override { return ver >= MinVersion; }
+// Predicate functors
 
-    using COND_FIELD_BASE<T>::operator=;
+template <FMT_VER Min>
+struct VER_GE
+{
+    constexpr bool operator()( FMT_VER v ) const { return v >= Min; }
+};
+
+template <FMT_VER Max>
+struct VER_LT
+{
+    constexpr bool operator()( FMT_VER v ) const { return v < Max; }
+};
+
+template <FMT_VER Min, FMT_VER Max>
+struct VER_GE_LT
+{
+    constexpr bool operator()( FMT_VER v ) const { return v >= Min && v < Max; }
 };
 
 
+// Useful aliases for common cases
+
+/// Exists for all versions greater than or equal to Min
+template <FMT_VER Min, typename T>
+using COND_GE = COND_FIELD<VER_GE<Min>{}, T>;
+
+/// Exists for all versions less than (and not equal to) Max
+template <FMT_VER Max, typename T>
+using COND_LT = COND_FIELD<VER_LT<Max>{}, T>;
+
+/// Exists for all versions greater than or equal to Min and less than Max
+template <FMT_VER Min, FMT_VER Max, typename T>
+using COND_GE_LT = COND_FIELD<VER_GE_LT<Min, Max>{}, T>;
+
 /**
- * This is a conditional field that only exists in versions of a file
- * less than a certain version.
+ * Satisfied by any COND_FIELD instantiation (COND_GE, COND_LT, COND_GE_LT, ...)
  */
-template <FMT_VER MaxVersion, typename T>
-struct COND_LT : public COND_FIELD_BASE<T>
+template <typename T>
+concept VERSIONED_COND_FIELD = requires( FMT_VER v )
 {
-    constexpr bool exists( FMT_VER ver ) const override { return ver < MaxVersion; }
-
-    using COND_FIELD_BASE<T>::operator=;
-};
-
-
-/**
- * This is a conditional field that only exists in versions of a file
- * less than a certain version and greater than or equal to a certain version.
- */
-template <FMT_VER GEVersion, FMT_VER LTVersion, typename T>
-struct COND_GE_LT : public COND_FIELD_BASE<T>
-{
-    constexpr bool exists( FMT_VER ver ) const override { return ver >= GEVersion && ver < LTVersion; }
-
-    using COND_FIELD_BASE<T>::operator=;
+    { T::exists( v ) }->std::convertible_to<bool>;
+    typename T::value_type;
 };
 
 
@@ -525,6 +572,8 @@ struct LAYER_INFO
  */
 struct BLK_0x01_ARC
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x01;
+
     uint8_t  m_UnknownByte;
     uint8_t  m_SubType;     ///< Bit 6 (0x40) = clockwise direction
     uint32_t m_Key;
@@ -555,6 +604,8 @@ struct BLK_0x01_ARC
  */
 struct BLK_0x03_FIELD
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x03;
+
     struct SUB_0x6C
     {
         uint32_t              m_NumEntries;
@@ -612,6 +663,8 @@ enum FIELD_KEYS
  */
 struct BLK_0x04_NET_ASSIGNMENT
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x04;
+
     uint8_t  m_Type;
     uint16_t m_R;
     uint32_t m_Key;
@@ -630,6 +683,8 @@ struct BLK_0x04_NET_ASSIGNMENT
  */
 struct BLK_0x05_TRACK
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x05;
+
     LAYER_INFO m_Layer;
 
     uint32_t m_Key;
@@ -659,6 +714,8 @@ struct BLK_0x05_TRACK
  */
 struct BLK_0x06_COMPONENT
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x06;
+
     uint32_t m_Key;
 
     // Pointer to the next BLK_0x06_COMPONENT
@@ -688,6 +745,8 @@ struct BLK_0x06_COMPONENT
  */
 struct BLK_0x07_COMPONENT_INST
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x07;
+
     uint32_t m_Key;
 
     uint32_t m_Next;
@@ -715,6 +774,8 @@ struct BLK_0x07_COMPONENT_INST
  */
 struct BLK_0x08_PIN_NUMBER
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x08;
+
     uint8_t  m_Type;
     uint16_t m_R;
     uint32_t m_Key;
@@ -746,6 +807,8 @@ struct BLK_0x08_PIN_NUMBER
  */
 struct BLK_0x09_FILL_LINK
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x09;
+
     uint32_t m_Key;
 
     std::array<uint32_t, 4> m_UnknownArray;
@@ -767,6 +830,8 @@ struct BLK_0x09_FILL_LINK
  */
 struct BLK_0x0A_DRC
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x0A;
+
     uint8_t    m_T;
     LAYER_INFO m_Layer;
     uint32_t   m_Key;
@@ -789,6 +854,8 @@ struct BLK_0x0A_DRC
  */
 struct BLK_0x0C_PIN_DEF
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x0C;
+
     enum MARKER_SHAPE
     {
         // These are in the same order as the pad shapes, at least for the 'simple' shapes
@@ -849,6 +916,8 @@ struct BLK_0x0C_PIN_DEF
  */
 struct BLK_0x0D_PAD
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x0D;
+
     uint32_t m_Key;
     uint32_t m_NameStrId;
     uint32_t m_Next;
@@ -873,6 +942,8 @@ struct BLK_0x0D_PAD
  */
 struct BLK_0x0E_RECT
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x0E;
+
     uint8_t  m_T;
     LAYER_INFO m_Layer;
     uint32_t m_Key;
@@ -901,20 +972,28 @@ struct BLK_0x0E_RECT
  */
 struct BLK_0x0F_FUNCTION_SLOT
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x0F;
+
     uint32_t m_Key;
 
     uint32_t m_SlotName;
 
+    COND_GE<FMT_VER::V_174, uint32_t> m_Unknown1;
+
     std::array<char, 32> m_CompDeviceType;
+
+    COND_GE<FMT_VER::V_172, uint32_t> m_Next;
 
     uint32_t m_Ptr0x06;
     uint32_t m_Ptr0x11;
 
-    uint32_t m_Unknown1;
+    uint32_t m_Unknown2;
 
-    COND_GE<FMT_VER::V_172, uint32_t> m_Unknown2;
-
-    COND_GE<FMT_VER::V_174, uint32_t> m_Unknown3;
+    std::string GetCompDeviceTypeStr() const
+    {
+        // The string is stored as a fixed-length array, but is null-terminated
+        return std::string( m_CompDeviceType.data(), strnlen( m_CompDeviceType.data(), m_CompDeviceType.size() ) );
+    }
 };
 
 
@@ -925,6 +1004,8 @@ struct BLK_0x0F_FUNCTION_SLOT
  */
 struct BLK_0x10_FUNCTION_INST
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x10;
+
     uint32_t m_Key;
 
     COND_GE<FMT_VER::V_172, uint32_t> m_Unknown1;
@@ -947,6 +1028,8 @@ struct BLK_0x10_FUNCTION_INST
  */
 struct BLK_0x11_PIN_NAME
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x11;
+
     uint8_t  m_Type;
     uint16_t m_R;
     uint32_t m_Key;
@@ -968,6 +1051,8 @@ struct BLK_0x11_PIN_NAME
  */
 struct BLK_0x12_XREF
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x12;
+
     uint8_t  m_Type;
     uint16_t m_R;
     uint32_t m_Key;
@@ -988,6 +1073,8 @@ struct BLK_0x12_XREF
  */
 struct BLK_0x14_GRAPHIC
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x14;
+
     uint8_t    m_Type;
     LAYER_INFO m_Layer;
     uint32_t   m_Key;
@@ -1012,6 +1099,9 @@ struct BLK_0x14_GRAPHIC
  */
 struct BLK_0x15_16_17_SEGMENT
 {
+    // Segments can be one of 3 codes, so we don't have a BLOCK_TYPE_CODE constant
+    // for this struct.
+
     uint32_t m_Key;
     uint32_t m_Next;
     uint32_t m_Parent;
@@ -1034,6 +1124,8 @@ struct BLK_0x15_16_17_SEGMENT
  */
 struct BLK_0x1B_NET
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x1B;
+
     uint32_t m_Key;
     uint32_t m_Next;
     uint32_t m_NetName;
@@ -1108,15 +1200,17 @@ struct PADSTACK_COMPONENT
 
     COND_GE<FMT_VER::V_172, uint32_t> m_Unknown1;
 
+    // Pad size
     int32_t m_W;
     int32_t m_H;
 
-    COND_GE<FMT_VER::V_172, int16_t> m_Z1;
+    // In rounded rectangles, this is the corner radius.
+    // In chamfered rectangles, this is the chamfer size.
+    COND_GE<FMT_VER::V_172, int32_t> m_Z1;
 
+    // This is the pad component offset
     int32_t m_X3;
     int32_t m_X4;
-
-    COND_GE<FMT_VER::V_172, int16_t> m_Z;
 
     /**
      * Seems to point to various things:
@@ -1140,14 +1234,121 @@ struct PADSTACK_COMPONENT
  */
 struct BLK_0x1C_PADSTACK
 {
-    /**
-     * Pad flags are founds in a byte of the pad info
-     */
-    enum PAD_FLAGS
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x1C;
+
+    struct HEADER_v16x
     {
-        // Some through-holes have this, some don't
-        FLAG_UNKNOWN1   = 0x01,
-        FLAG_PLATED     = 0x20,
+        /**
+         * Pad flags are founds in a byte of the pad info
+         */
+        enum PAD_FLAGS
+        {
+            FLAG_PLATED = 0x01,
+            // NPTHs seem to have this instead of 0x01
+            // SMDs seems to have this or 0x01, no clear pattern identified
+            FLAG_UNKNOWN1 = 0x02,
+        };
+
+        uint32_t m_DrillSize;
+        uint32_t m_UnknownStr;
+        uint32_t m_DrillMarkSizeX;
+        uint32_t m_DrillMarkSizeY;
+        // Not sure these are in the right place but they're in here somewhere (usually zero)
+        uint32_t m_DrillOffsetX;
+        uint32_t m_DrillOffsetY;
+
+        // Drill char presumably somewhere in here - can cross-match with 0x0C PIN_DEF to find
+        uint8_t m_DrillMarkShape;
+        // Mask or enum of pad flags, including plating
+        uint8_t m_Flags;
+        // An ASCII char, or 0x00
+        uint8_t m_DrillChar;
+        uint8_t m_D;
+
+        // Probably some kind of type:
+        // 0x0000 for through-hole
+        // 0x0002 for SMD
+        // 0x0400 for slots
+        uint16_t m_Unknown_1;
+
+        uint16_t m_ArrayNX;
+        uint16_t m_ArrayNY;
+
+        uint16_t m_LayerCount;
+        // Also unsure if these are in the right place (all usually 0?)
+        uint32_t m_ClearanceX;
+        uint32_t m_ClearanceY;
+
+        uint32_t m_TolerancePos;
+        uint32_t m_ToleranceNeg;
+        uint32_t m_Unknown_2;
+        uint32_t m_SlotX;
+        uint32_t m_SlotY;
+        uint32_t m_Unknown_3;
+
+        COND_GE<FMT_VER::V_165, uint32_t> m_Unknown_4;
+    };
+
+    struct HEADER_v17x
+    {
+        /**
+         * Pad flags are founds in a byte of the pad info
+         */
+        enum PAD_FLAGS
+        {
+            // Some through-holes have this, some don't
+            FLAG_UNKNOWN1   = 0x01,
+            FLAG_PLATED     = 0x20,
+        };
+
+        // Presumably the same as the one in the v16x header
+        uint32_t m_UnknownStr;
+        uint32_t m_Unknown1; // 0?
+        uint32_t m_Unknown2; // 0?
+
+        PAD_TYPE m_PadType;
+
+        // Not sure if this is really a substruct
+        uint8_t m_A; // Only lower 4 bits (top 4 are type)
+        uint8_t m_B;
+        /// Mask of @c PAD_FLAGS values
+        uint8_t m_Flags;
+        uint8_t m_D;
+
+        uint32_t m_unknown3; // 1?
+        uint32_t m_Unknown4; // 0?
+
+        uint16_t m_ArrayNX;
+        uint16_t m_ArrayNY;
+        uint16_t m_LayerCount;
+        uint16_t m_Unknown5; // 0?
+
+        // Again, these are tentatively placed, they're always zero so far,
+        // so it's hard to say where they go.
+        // Assuming they follow the v16x layout and come after the layer count
+        uint32_t m_ClearanceX;
+        uint32_t m_ClearanceY;
+        uint32_t m_Unknown6a;
+        uint32_t m_Unknown6b;
+
+        uint32_t m_DrillSize;
+        uint32_t m_TolerancePos;
+        uint32_t m_ToleranceNeg;
+        uint32_t m_SlotX;
+        uint32_t m_SlotY;
+        uint32_t m_ToleranceTravelPos; // "TOLERANCE_TRAVEL" in BeagleBone_Black drill table
+        uint32_t m_ToleranceTravelNeg;
+
+        uint32_t m_DrillMarkSizeX;
+        uint32_t m_DrillMarkSizeY;
+        uint32_t m_DrillMarkShape;
+        uint32_t m_DrillChars; // Presumably 4 drill chars
+
+        // Probably holds secondary drill parameters and other new V17.2 features
+        std::array<uint32_t, 21> m_UnknownArr3;
+
+        // To check - this could be another component?
+        COND_GE<FMT_VER::V_180, std::array<uint32_t, 8>> m_UnknownArr_v180;
     };
 
     uint8_t m_UnknownByte1;
@@ -1159,66 +1360,13 @@ struct BLK_0x1C_PADSTACK
     uint8_t  m_UnknownByte2;
     uint32_t m_Key;
     uint32_t m_Next;
+
+    // The name of the padstack
     uint32_t m_PadStr;
 
-    /**
-     * In < V172, this is the drill diameter in internal coordinates.
-     * In >= V172, the drill diameter moved to m_DrillArr[DRILL_DIAMETER].
-     */
-    uint32_t m_Drill;
-    uint32_t m_Unknown2;
-    uint32_t m_PadPath;
-
-    COND_LT<FMT_VER::V_172, uint32_t> m_Unknown3;
-    COND_LT<FMT_VER::V_172, uint32_t> m_Unknown4;
-    COND_LT<FMT_VER::V_172, uint32_t> m_Unknown5;
-    COND_LT<FMT_VER::V_172, uint32_t> m_Unknown6;
-
-    PAD_TYPE m_Type;
-
-    // Not sure if this is really a substruct
-    // Only lower 4 bits (top 4 are type)
-    uint8_t m_A;
-    uint8_t m_B;
-    /// Mask of @c PAD_FLAGS values
-    uint8_t m_Flags;
-    uint8_t m_D;
-
-    COND_GE<FMT_VER::V_172, uint32_t> m_Unknown7;
-    COND_GE<FMT_VER::V_172, uint32_t> m_Unknown8;
-    COND_GE<FMT_VER::V_172, uint32_t> m_Unknown9;
-
-    COND_LT<FMT_VER::V_172, uint16_t> m_Unknown10;
-
-    uint16_t m_LayerCount;
-
-    // Presumably the counterpart to m_Unknown10
-    // Or just padding (?)
-    COND_GE<FMT_VER::V_172, uint16_t> m_Unknown11;
-
-    /**
-     * In >= V172, elements [4] and [7] hold drill dimensions:
-     *   [4] = drill diameter (or width for oblong drills)
-     *   [7] = drill height for oblong drills (0 for round)
-     * All values are in internal coordinate units (mils * divisor).
-     */
-    std::array<uint32_t, 8> m_DrillArr;
-
-    /**
-     * In V172+, elements [0] and [3] hold the true slot outline dimensions (X, Y)
-     * in internal coordinate units. For routed slots (round drill bit routed along a path),
-     * m_DrillArr holds only the bit diameter while this array holds the full slot envelope.
-     * For punched oblong drills, these values match m_DrillArr[4] and [7].
-     */
-    COND_GE<FMT_VER::V_172, std::array<uint32_t, 28>> m_SlotAndUnknownArr;
-
-    COND_GE_LT<FMT_VER::V_165, FMT_VER::V_172, std::array<uint32_t, 8>> m_UnknownArr8_2;
-
-    /**
-     * V180 inserts 8 extra uint32s between the fixed arrays and the component table.
-     * Despite the name, this is read before the components, not after.
-     */
-    COND_GE<FMT_VER::V_180, std::array<uint32_t, 8>> m_V180Trailer;
+    // The header fields are very different between v16x and v17.x+
+    using HEADER = std::variant<HEADER_v16x, HEADER_v17x>;
+    HEADER m_Header;
 
     /**
      * Fixed slot indices in the component table.
@@ -1228,12 +1376,18 @@ struct BLK_0x1C_PADSTACK
      *
      * All fixed slots are technical layers (solder mask, paste mask, film mask,
      * assembly variant, etc). The exact slot-to-layer mapping is version-dependent
-     * and not fully contiguous. Verified mappings from WORKLOG reverse engineering:
+     * and not fully contiguous.
      *
-     * V<172 (10 fixed):
+     * V<165 (10 fixed)
      *   Slot 0  = ~TSM (top solder mask)
      *   Slot 5  = ~TPM (top paste mask)
      *   Slot 7  = ~TFM (top film mask)
+     *
+     * V<172 (11 fixed):
+     *   Slot 0  = ??? (looks the same size as a solder mask)
+     *   Slot 1  = ~TSM (top solder mask)
+     *   Slot 6  = ~TPM (top paste mask)
+     *   Slot 8  = ~TFM (top film mask)
      *
      * V>=172 (21 fixed):
      *   Slot 14 = ~TSM (top solder mask)
@@ -1274,7 +1428,7 @@ struct BLK_0x1C_PADSTACK
      * *  < 17.2: 10 + layer_count * 3
      * * >= 17.2: 21 + layer_count * 4
      *
-     * The first 10/21 components seem to be a fixed set of technical layers.
+     * The first 10/11/21 components seem to be a fixed set of technical layers.
      *
      * Then, a set of groups of 3/4 components for each layer.
      */
@@ -1293,6 +1447,46 @@ struct BLK_0x1C_PADSTACK
      * * >= 17.2: 10
      */
     std::vector<uint32_t> m_UnknownArrN;
+
+
+    // Dispatch common properties to the header variant.
+    // Each method uses a local Visitor struct so that adding a new HEADER alternative
+    // produces a compile error rather than a silent runtime fallback.
+    uint32_t GetDrillSize() const
+    {
+        struct Visitor
+        {
+            uint32_t operator()( const HEADER_v16x& h ) const { return h.m_DrillSize; }
+            uint32_t operator()( const HEADER_v17x& h ) const { return h.m_DrillSize; }
+        };
+        return std::visit( Visitor{}, m_Header );
+    }
+
+    uint32_t GetLayerCount() const
+    {
+        struct Visitor
+        {
+            uint32_t operator()( const HEADER_v16x& h ) const { return h.m_LayerCount; }
+            uint32_t operator()( const HEADER_v17x& h ) const { return h.m_LayerCount; }
+        };
+        return std::visit( Visitor{}, m_Header );
+    }
+
+    bool IsPlated() const
+    {
+        struct Visitor
+        {
+            bool operator()( const HEADER_v16x& h ) const
+            {
+                return ( h.m_Flags & HEADER_v16x::PAD_FLAGS::FLAG_PLATED ) != 0;
+            }
+            bool operator()( const HEADER_v17x& h ) const
+            {
+                return ( h.m_Flags & HEADER_v17x::PAD_FLAGS::FLAG_PLATED ) != 0;
+            }
+        };
+        return std::visit( Visitor{}, m_Header );
+    }
 };
 
 
@@ -1301,6 +1495,8 @@ struct BLK_0x1C_PADSTACK
  */
 struct BLK_0x1D_CONSTRAINT_SET
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x1D;
+
     uint32_t m_Key;
     uint32_t m_Next;         ///< Linked list next pointer (used by LL_WALKER)
     uint32_t m_NameStrKey;   ///< String table key for constraint set name
@@ -1330,6 +1526,8 @@ struct BLK_0x1D_CONSTRAINT_SET
  */
 struct BLK_0x1E_SI_MODEL
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x1E;
+
     uint8_t  m_Type;
     uint16_t m_T2;
     uint32_t m_Key;
@@ -1354,6 +1552,8 @@ struct BLK_0x1E_SI_MODEL
  */
 struct BLK_0x1F_PADSTACK_DIM
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x1F;
+
     uint32_t m_Key;
     uint32_t m_Next;         ///< Linked list next pointer (used by LL_WALKER)
     uint32_t m_Unknown2;
@@ -1381,6 +1581,8 @@ struct BLK_0x1F_PADSTACK_DIM
  */
 struct BLK_0x20_UNKNOWN
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x20;
+
     uint8_t                 m_Type;
     uint16_t                m_R;
     uint32_t                m_Key;
@@ -1397,6 +1599,8 @@ struct BLK_0x20_UNKNOWN
  */
 struct BLK_0x21_BLOB
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x21;
+
     uint8_t  m_Type;
     uint16_t m_R;
     uint32_t m_Size;
@@ -1416,6 +1620,8 @@ struct BLK_0x21_BLOB
  */
 struct BLK_0x22_UNKNOWN
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x22;
+
     uint8_t  m_Type;
     uint16_t m_T2;
     uint32_t m_Key;
@@ -1431,6 +1637,8 @@ struct BLK_0x22_UNKNOWN
  */
 struct BLK_0x23_RATLINE
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x23;
+
     uint8_t    m_Type;
     LAYER_INFO m_Layer;
     uint32_t   m_Key;
@@ -1460,6 +1668,8 @@ struct BLK_0x23_RATLINE
  */
 struct BLK_0x24_RECT
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x24;
+
     uint8_t    m_Type;
     LAYER_INFO m_Layer;
     uint32_t   m_Key;
@@ -1486,6 +1696,8 @@ struct BLK_0x24_RECT
  */
 struct BLK_0x26_MATCH_GROUP
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x26;
+
     uint8_t  m_Type;
     uint16_t m_R;
     uint32_t m_Key;
@@ -1510,6 +1722,8 @@ struct BLK_0x26_MATCH_GROUP
  */
 struct BLK_0x27_CSTRMGR_XREF
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x27;
+
     std::vector<uint32_t> m_Refs;
 };
 
@@ -1525,6 +1739,8 @@ struct BLK_0x27_CSTRMGR_XREF
  */
 struct BLK_0x28_SHAPE
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x28;
+
     uint8_t    m_Type;
     LAYER_INFO m_Layer;
     uint32_t   m_Key;
@@ -1564,6 +1780,8 @@ struct BLK_0x28_SHAPE
  */
 struct BLK_0x29_PIN
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x29;
+
     uint8_t  m_Type;
     uint16_t m_T;
     uint32_t m_Key;
@@ -1597,6 +1815,8 @@ struct BLK_0x29_PIN
  */
 struct BLK_0x2A_LAYER_LIST
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x2A;
+
     struct NONREF_ENTRY
     {
         std::string m_Name;
@@ -1627,6 +1847,8 @@ struct BLK_0x2A_LAYER_LIST
  */
 struct BLK_0x2B_FOOTPRINT_DEF
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x2B;
+
     uint32_t m_Key;
 
     uint32_t m_FpStrRef;
@@ -1658,6 +1880,8 @@ struct BLK_0x2B_FOOTPRINT_DEF
  */
 struct BLK_0x2C_TABLE
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x2C;
+
     /**
      * The subtype of a table.
      *
@@ -1716,6 +1940,8 @@ struct BLK_0x2C_TABLE
  */
 struct BLK_0x2D_FOOTPRINT_INST
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x2D;
+
     uint8_t  m_UnknownByte1;
     uint8_t  m_Layer;         // 0 = top (F_Cu), 1 = bottom (B_Cu)
     uint8_t  m_UnknownByte2;
@@ -1765,6 +1991,8 @@ struct BLK_0x2D_FOOTPRINT_INST
  */
 struct BLK_0x2E_CONNECTION
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x2E;
+
     uint8_t  m_Type;
     uint16_t m_T2;
     uint32_t m_Key;
@@ -1785,6 +2013,8 @@ struct BLK_0x2E_CONNECTION
  */
 struct BLK_0x2F_UNKNOWN
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x2F;
+
     uint8_t  m_Type;
     uint16_t m_T2;
     uint32_t m_Key;
@@ -1801,6 +2031,8 @@ struct BLK_0x2F_UNKNOWN
  */
 struct BLK_0x30_STR_WRAPPER
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x30;
+
     enum class TEXT_REVERSAL
     {
         STRAIGHT,
@@ -1865,6 +2097,8 @@ struct BLK_0x30_STR_WRAPPER
  */
 struct BLK_0x31_SGRAPHIC
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x31;
+
     enum class STRING_LAYER : uint16_t
     {
         BOT_TEXT,
@@ -1901,6 +2135,8 @@ struct BLK_0x31_SGRAPHIC
  */
 struct BLK_0x32_PLACED_PAD
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x32;
+
     uint8_t    m_Type;
     LAYER_INFO m_Layer;
     uint32_t   m_Key;
@@ -1935,6 +2171,8 @@ struct BLK_0x32_PLACED_PAD
  */
 struct BLK_0x33_VIA
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x33;
+
     LAYER_INFO m_LayerInfo;
     uint32_t   m_Key;
     uint32_t   m_Next;
@@ -1967,6 +2205,8 @@ struct BLK_0x33_VIA
  */
 struct BLK_0x34_KEEPOUT
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x34;
+
     uint8_t    m_T;
     LAYER_INFO m_Layer;
     uint32_t   m_Key;
@@ -1988,6 +2228,8 @@ struct BLK_0x34_KEEPOUT
  */
 struct BLK_0x35_FILE_REF
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x35;
+
     uint8_t  m_T2;
     uint16_t m_T3;
 
@@ -2002,6 +2244,8 @@ struct BLK_0x35_FILE_REF
  */
 struct BLK_0x36_DEF_TABLE
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x36;
+
     uint16_t m_Code;
     uint32_t m_Key;
     uint32_t m_Next;
@@ -2034,6 +2278,9 @@ struct BLK_0x36_DEF_TABLE
     struct X05
     {
         std::array<uint8_t, 28> m_Unknown;
+
+        // This is in Nvidia Jetson (17.4), not in EVK BaseBoard (17.2)
+        COND_GE<FMT_VER::V_174, uint32_t> m_Unknown2;
     };
 
     struct X06
@@ -2093,7 +2340,14 @@ struct BLK_0x36_DEF_TABLE
         COND_GE<FMT_VER::V_180, uint32_t> m_Unknown2;
     };
 
-    using SubstructVariant = std::variant<X02, X03, X05, X06, FontDef_X08, X0B, X0C, X0D, X0F, X10>;
+    // So far only seen in a V175 file (Jetson)
+    struct X12
+    {
+        // No point reading this before we can use it
+        // std::array<uint8_t, 1052> m_Unknown;
+    };
+
+    using SubstructVariant = std::variant<X02, X03, X05, X06, FontDef_X08, X0B, X0C, X0D, X0F, X10, X12>;
 
     std::vector<SubstructVariant> m_Items;
 };
@@ -2106,6 +2360,8 @@ struct BLK_0x36_DEF_TABLE
  */
 struct BLK_0x37_PTR_ARRAY
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x37;
+
     uint8_t  m_T;
     uint16_t m_T2;
     uint32_t m_Key;
@@ -2126,6 +2382,8 @@ struct BLK_0x37_PTR_ARRAY
  */
 struct BLK_0x38_FILM
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x38;
+
     uint32_t m_Key;
     uint32_t m_Next;
     uint32_t m_LayerList;
@@ -2146,6 +2404,8 @@ struct BLK_0x38_FILM
  */
 struct BLK_0x39_FILM_LAYER_LIST
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x39;
+
     uint32_t m_Key;
     uint32_t m_Parent;
     uint32_t m_Head;
@@ -2160,6 +2420,8 @@ struct BLK_0x39_FILM_LAYER_LIST
  */
 struct BLK_0x3A_FILM_LIST_NODE
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x3A;
+
     LAYER_INFO m_Layer;
     uint32_t   m_Key;
     uint32_t   m_Next;
@@ -2175,6 +2437,8 @@ struct BLK_0x3A_FILM_LIST_NODE
  */
 struct BLK_0x3B_PROPERTY
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x3B;
+
     uint8_t  m_T;
     uint16_t m_SubType;
     uint32_t m_Len;
@@ -2197,6 +2461,8 @@ struct BLK_0x3B_PROPERTY
  */
 struct BLK_0x3C_KEY_LIST
 {
+    static constexpr uint8_t BLOCK_TYPE_CODE = 0x3C;
+
     uint8_t  m_T;
     uint16_t m_T2;
     uint32_t m_Key;
@@ -2209,53 +2475,17 @@ struct BLK_0x3C_KEY_LIST
 
 
 /**
- * Raw board structure that we will build as we parse the file.
+ * Satisfied by any Allegro block data structs that can be used with BLOCK_REF
+ *
+ * Every BLK_0x* struct declares a BLOCK_TYPE_CODE trait, except those with multiple valid
+ * codes, which are special-cased
  */
-struct RAW_BOARD
+template <typename T>
+concept ALLEGRO_BLOCK_DATA = requires
 {
-public:
-    RAW_BOARD();
+    { T::BLOCK_TYPE_CODE }->std::convertible_to<uint8_t>;
+}
+|| std::is_same_v<T, BLK_0x15_16_17_SEGMENT>;
 
-    std::unique_ptr<FILE_HEADER> m_Header;
-
-    /**
-     * What version is this file? We will need this to correctly interpret some structures.
-     */
-    FMT_VER m_FmtVer;
-
-    /**
-     * The string map is a map of U32 ID to strings.
-     * It seems to always be located at byte 0x1200 in the file.
-     */
-    std::unordered_map<uint32_t, std::string> m_StringTable;
-
-    // All the objects in the file
-    std::vector<std::unique_ptr<BLOCK_BASE>> m_Objects;
-
-    // Map of keys to objects (for the objects we can get keys for)
-    std::unordered_map<uint32_t, BLOCK_BASE*> m_ObjectKeyMap;
-
-    // Lists of the objects by type
-    std::unordered_map<uint8_t, std::vector<BLOCK_BASE*>> m_ObjectLists;
-
-    static const size_t STRING_TABLE_OFFSET = 0x1200;
-
-    const BLOCK_BASE* GetObjectByKey( uint32_t aKey ) const
-    {
-        auto it = m_ObjectKeyMap.find( aKey );
-        if( it != m_ObjectKeyMap.end() )
-            return it->second;
-        return nullptr;
-    }
-
-    const std::string& GetString( uint32_t aId ) const
-    {
-        if( m_StringTable.count( aId ) )
-            return m_StringTable.at( aId );
-
-        static const std::string empty;
-        return empty;
-    }
-};
 
 } // namespace ALLEGRO

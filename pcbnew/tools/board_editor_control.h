@@ -96,7 +96,6 @@ public:
     int ToggleProperties( const TOOL_EVENT& aEvent );
     int ToggleNetInspector( const TOOL_EVENT& aEvent );
     int ToggleSearch( const TOOL_EVENT& aEvent );
-    int TogglePythonConsole( const TOOL_EVENT& aEvent );
     int ToggleLibraryTree( const TOOL_EVENT& aEvent );
 
     // Track & via size control
@@ -111,6 +110,12 @@ public:
 
     ///< Duplicate a zone onto a layer (prompts for new layer)
     int ZoneDuplicate( const TOOL_EVENT& aEvent );
+
+    // Zone priority manipulation
+    int ZonePriorityMoveToTop( const TOOL_EVENT& aEvent );
+    int ZonePriorityRaise( const TOOL_EVENT& aEvent );
+    int ZonePriorityLower( const TOOL_EVENT& aEvent );
+    int ZonePriorityMoveToBottom( const TOOL_EVENT& aEvent );
 
     int EditFpInFpEditor( const TOOL_EVENT& aEvent );
 

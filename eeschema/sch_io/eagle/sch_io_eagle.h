@@ -41,6 +41,7 @@ class SCH_BITMAP;
 class SCH_JUNCTION;
 class SCH_NO_CONNECT;
 class SCH_SHAPE;
+class SCH_LABEL_BASE;
 class SCH_LINE;
 class SCH_BUS_ENTRY_BASE;
 class SCH_TEXT;
@@ -146,12 +147,14 @@ private:
 
     void          loadSegments( const std::vector<std::unique_ptr<ESEGMENT>>& aSegments,
                                 const wxString& aNetName,
-                                const wxString& aNetClass );
+                                const wxString& aNetClass,
+                                bool aIsBus = false );
     SCH_SHAPE*    loadPolyLine( const std::unique_ptr<EPOLYGON>& aPolygon );
     SCH_ITEM*     loadWire( const std::unique_ptr<EWIRE>& aWire, SEG& endpoints );
     SCH_SHAPE*    loadCircle( const std::unique_ptr<ECIRCLE>& aCircle );
     SCH_SHAPE*    loadRectangle( const std::unique_ptr<ERECT>& aRect );
-    SCH_TEXT*     loadLabel( const std::unique_ptr<ELABEL>& aLabel, const wxString& aNetName );
+    SCH_LABEL_BASE* loadLabel( const std::unique_ptr<ELABEL>& aLabel, const wxString& aNetName,
+                               bool aIsBus = false );
     SCH_JUNCTION* loadJunction( const std::unique_ptr<EJUNCTION>&  aJunction );
     SCH_TEXT*     loadPlainText( const std::unique_ptr<ETEXT>& aSchText );
     void          loadFrame( const std::unique_ptr<EFRAME>& aFrame,
@@ -224,6 +227,8 @@ private:
     SCH_SHEET* getCurrentSheet();
     SCH_SCREEN* getCurrentScreen();
 
+    VECTOR2I getLastSymbolFieldPosition( const LIB_SYMBOL* aPart );
+
     // Describe missing units containing pins creating implicit connections
     // (named power pins in Eagle).
     struct EAGLE_MISSING_CMP
@@ -281,9 +286,9 @@ private:
     struct SEG_DESC
     {
         ///< Test if a particular label is attached to any of the stored segments
-        const SEG* LabelAttached( const SCH_TEXT* aLabel ) const;
+        const SEG* LabelAttached( const SCH_LABEL_BASE* aLabel ) const;
 
-        std::vector<SCH_TEXT*> labels;
+        std::vector<SCH_LABEL_BASE*> labels;
         std::vector<SEG> segs;
     };
 

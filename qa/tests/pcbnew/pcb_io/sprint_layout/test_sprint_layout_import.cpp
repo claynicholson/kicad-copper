@@ -360,6 +360,7 @@ BOOST_AUTO_TEST_CASE( AllTestFilesLoadWithoutCrash )
         "/io/sprint_layout/ku14194revb.lay6",
         "/io/sprint_layout/pcb100x40_v5.lay6",
         "/io/sprint_layout/tfcc.lay6",
+        "/io/sprint_layout/12F629_SM.lay6",
     };
 
     for( const auto& file : files )
@@ -584,6 +585,7 @@ BOOST_AUTO_TEST_CASE( AllBoardsHaveConsistentPadCoordinates )
         "/io/sprint_layout/ku14194revb.lay6",
         "/io/sprint_layout/pcb100x40_v5.lay6",
         "/io/sprint_layout/tfcc.lay6",
+        "/io/sprint_layout/12F629_SM.lay6",
     };
 
     for( const auto& file : files )
@@ -630,7 +632,7 @@ BOOST_AUTO_TEST_CASE( MultiBoardFileHasFiveBoards )
                            + "/io/sprint_layout/mmjoy2-74hc165.lay6";
 
     SPRINT_LAYOUT_PARSER parser;
-    BOOST_REQUIRE( parser.Parse( dataPath ) );
+    BOOST_REQUIRE( parser.ParseBoard( dataPath ) );
 
     const auto& fileData = parser.GetFileData();
     BOOST_CHECK_EQUAL( fileData.boards.size(), 5 );
@@ -643,7 +645,7 @@ BOOST_AUTO_TEST_CASE( MultiBoardSelectByIndex )
                            + "/io/sprint_layout/mmjoy2-74hc165.lay6";
 
     SPRINT_LAYOUT_PARSER parser;
-    BOOST_REQUIRE( parser.Parse( dataPath ) );
+    BOOST_REQUIRE( parser.ParseBoard( dataPath ) );
 
     const auto& fileData = parser.GetFileData();
     BOOST_REQUIRE( fileData.boards.size() == 5 );
@@ -731,6 +733,75 @@ BOOST_AUTO_TEST_CASE( SingleBoardFileSkipsCallback )
 
     BOOST_CHECK( !callbackInvoked );
     BOOST_REQUIRE( board );
+}
+
+
+// ============================================================================
+// Regression tests
+// ============================================================================
+
+BOOST_AUTO_TEST_CASE( Pic12F629SmdPadPositions )
+{
+    // GitLab #23538: SMD pad x,y fields in some Sprint Layout files store
+    // component-relative offsets rather than absolute positions, causing
+    // all SMD pads to pile up near (0,0).
+    std::string dataPath = KI_TEST::GetPcbnewTestDataDir()
+                           + "/io/sprint_layout/12F629_SM.lay6";
+
+    std::unique_ptr<BOARD> board( m_plugin.LoadBoard( dataPath, nullptr ) );
+
+    BOOST_REQUIRE( board );
+
+    // The PIC12F629 is an 8-pin SOIC. After import, its pads should be
+    // spread across the board, not clustered at the origin.
+    BOX2I boardBox;
+    bool  first = true;
+
+    for( BOARD_ITEM* item : board->Drawings() )
+    {
+        PCB_SHAPE* shape = dynamic_cast<PCB_SHAPE*>( item );
+
+        if( shape && shape->GetLayer() == Edge_Cuts )
+        {
+            if( first )
+            {
+                boardBox = shape->GetBoundingBox();
+                first = false;
+            }
+            else
+            {
+                boardBox.Merge( shape->GetBoundingBox() );
+            }
+        }
+    }
+
+    BOOST_REQUIRE( !first );
+
+    boardBox.Inflate( pcbIUScale.mmToIU( 2.0 ) );
+
+    int outsideCount = 0;
+    int smdCount = 0;
+
+    for( FOOTPRINT* fp : board->Footprints() )
+    {
+        for( PAD* pad : fp->Pads() )
+        {
+            if( pad->GetAttribute() == PAD_ATTRIB::SMD )
+            {
+                smdCount++;
+
+                if( !boardBox.Contains( pad->GetPosition() ) )
+                    outsideCount++;
+            }
+        }
+    }
+
+    BOOST_CHECK_MESSAGE( smdCount > 0,
+                         "PIC12F629 board should have SMD pads" );
+
+    BOOST_CHECK_MESSAGE( outsideCount == 0,
+                         wxString::Format( "%d of %d SMD pads outside board outline",
+                                           outsideCount, smdCount ) );
 }
 
 

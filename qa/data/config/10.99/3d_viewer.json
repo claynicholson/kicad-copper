@@ -159,6 +159,7 @@
     "show_fp_references": true,
     "show_fp_text": true,
     "show_fp_values": true,
+    "show_missing_models": false,
     "show_navigator": true,
     "show_plated_barrels": true,
     "show_silkscreen_bottom": true,

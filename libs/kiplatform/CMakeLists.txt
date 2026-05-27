@@ -90,9 +90,8 @@ elseif( UNIX )
     list( APPEND PLATFORM_LIBS ${secret_LIBRARIES} )
 
     # Detect Poppler library for printing and configure it
-    find_package( Poppler REQUIRED )
-    include_directories( SYSTEM ${POPPLER_INCLUDE_DIRS} )
-    list( APPEND PLATFORM_LIBS ${Poppler_LIBRARIES} )
+    find_package( Poppler REQUIRED COMPONENTS Glib )
+    list( APPEND PLATFORM_LIBS Poppler::Glib )
 
     if( KICAD_WAYLAND )
         find_package(Wayland 1.20 COMPONENTS Client REQUIRED)

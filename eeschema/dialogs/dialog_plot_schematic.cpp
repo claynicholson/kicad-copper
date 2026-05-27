@@ -145,7 +145,14 @@ bool DIALOG_PLOT_SCHEMATIC::TransferDataToWindow()
         case SCH_PLOT_FORMAT::PDF:  m_plotFormatOpt->SetSelection( 1 ); break;
         case SCH_PLOT_FORMAT::SVG:  m_plotFormatOpt->SetSelection( 2 ); break;
         case SCH_PLOT_FORMAT::DXF:  m_plotFormatOpt->SetSelection( 3 ); break;
+        case SCH_PLOT_FORMAT::PNG:  m_plotFormatOpt->SetSelection( 4 ); break;
         case SCH_PLOT_FORMAT::HPGL: /* no longer supported */           break;
+        }
+
+        if( JOB_EXPORT_SCH_PLOT_PNG* pngJob = dynamic_cast<JOB_EXPORT_SCH_PLOT_PNG*>( m_job ) )
+        {
+            m_pngDPI->SetValue( pngJob->m_dpi );
+            m_pngAntialias->SetValue( pngJob->m_antialias );
         }
 
         // And then hide it
@@ -153,9 +160,16 @@ bool DIALOG_PLOT_SCHEMATIC::TransferDataToWindow()
 
         m_outputPath->SetValue( m_job->GetConfiguredOutputPath() );
 
-        if( !m_job->m_variant.IsEmpty() )
+        // The job exposes both a scalar (m_variant, dialog-edited) and a list (m_variantNames,
+        // CLI-populated).  Prefer the scalar when present, fall back to the first list entry.
+        wxString selectedVariant = m_job->m_variant;
+
+        if( selectedVariant.IsEmpty() && !m_job->m_variantNames.empty() )
+            selectedVariant = m_job->m_variantNames.front();
+
+        if( !selectedVariant.IsEmpty() )
         {
-            int idx = m_variantChoiceCtrl->FindString( m_job->m_variant );
+            int idx = m_variantChoiceCtrl->FindString( selectedVariant );
 
             if( idx != wxNOT_FOUND )
                 m_variantChoiceCtrl->SetSelection( idx );
@@ -228,6 +242,7 @@ PLOT_FORMAT DIALOG_PLOT_SCHEMATIC::getPlotFileFormat()
     case 1: return PLOT_FORMAT::PDF;
     case 2: return PLOT_FORMAT::SVG;
     case 3: return PLOT_FORMAT::DXF;
+    case 4: return PLOT_FORMAT::PNG;
     }
 }
 
@@ -236,7 +251,8 @@ void DIALOG_PLOT_SCHEMATIC::onColorMode( wxCommandEvent& aEvent )
 {
     bool backgroundColorAvailable = getPlotFileFormat() == PLOT_FORMAT::POST
                                     || getPlotFileFormat() == PLOT_FORMAT::PDF
-                                    || getPlotFileFormat() == PLOT_FORMAT::SVG;
+                                    || getPlotFileFormat() == PLOT_FORMAT::SVG
+                                    || getPlotFileFormat() == PLOT_FORMAT::PNG;
 
     m_colorThemeLabel->Enable( getModeColor() );
     m_colorTheme->Enable( getModeColor() );
@@ -289,7 +305,13 @@ void DIALOG_PLOT_SCHEMATIC::onPlotFormatSelection( wxCommandEvent& event )
 
     m_paperSizeOption->SetSelection( m_paperSizeOption->GetSelection() );
 
-    m_defaultLineWidth.Enable( fmt == PLOT_FORMAT::POST || fmt == PLOT_FORMAT::PDF || fmt == PLOT_FORMAT::SVG );
+    m_defaultLineWidth.Enable( fmt == PLOT_FORMAT::POST || fmt == PLOT_FORMAT::PDF
+                               || fmt == PLOT_FORMAT::SVG || fmt == PLOT_FORMAT::PNG );
+
+    m_sizerPNGOptions->GetStaticBox()->Show( fmt == PLOT_FORMAT::PNG );
+    m_sizerPNGOptions->Show( fmt == PLOT_FORMAT::PNG );
+
+    Layout();
 
     wxCommandEvent dummy;
     onColorMode( dummy );
@@ -323,7 +345,19 @@ void DIALOG_PLOT_SCHEMATIC::OnPlotAll( wxCommandEvent& event )
         m_job->m_plotAll = true;
         m_job->SetConfiguredOutputPath( m_outputPath->GetValue() );
         m_job->m_theme = getColorSettings()->GetName();
+        // Keep m_variant (scalar) and m_variantNames (list) in sync so reload + edit + run
+        // honors the dialog selection regardless of which field the executor consults.
         m_job->m_variant = getSelectedVariant();
+        m_job->m_variantNames.clear();
+
+        if( !m_job->m_variant.IsEmpty() )
+            m_job->m_variantNames.push_back( m_job->m_variant );
+
+        if( JOB_EXPORT_SCH_PLOT_PNG* pngJob = dynamic_cast<JOB_EXPORT_SCH_PLOT_PNG*>( m_job ) )
+        {
+            pngJob->m_dpi = m_pngDPI->GetValue();
+            pngJob->m_antialias = m_pngAntialias->GetValue();
+        }
 
         event.Skip(); // Allow normal close action
     }
@@ -353,10 +387,12 @@ void DIALOG_PLOT_SCHEMATIC::plotSchematic( bool aPlotAll )
     plotOpts.m_PDFMetadata = m_plotPDFMetadata->GetValue();
     plotOpts.m_outputDirectory = getOutputPath();
     plotOpts.m_pageSizeSelect = m_paperSizeOption->GetSelection();
-    plotOpts.m_plotHopOver = m_editFrame->Schematic().Settings().m_HopOverScale > 0.0;
+    plotOpts.m_plotHopOver = m_editFrame->Schematic().Settings().GetHopOverScale() > 0.0;
 
     // Select the DXF file unit
     plotOpts.m_DXF_File_Unit = m_DXF_plotUnits->GetSelection() == 0 ? DXF_UNITS::INCH : DXF_UNITS::MM;
+    plotOpts.m_pngDPI = m_pngDPI->GetValue();
+    plotOpts.m_pngAntialias = m_pngAntialias->GetValue();
     plotOpts.m_variant = getSelectedVariant();
     schPlotter->Plot( getPlotFileFormat(), plotOpts, &renderSettings, &m_MessagesBox->Reporter() );
 

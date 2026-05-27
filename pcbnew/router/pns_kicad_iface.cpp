@@ -54,6 +54,8 @@
 #include <geometry/shape_line_chain.h>
 #include <geometry/shape_arc.h>
 #include <geometry/shape_simple.h>
+#include <geometry/shape_line_chain.h>
+#include <geometry/shape_ellipse.h>
 
 #include <drc/drc_rule.h>
 #include <drc/drc_engine.h>
@@ -163,6 +165,8 @@ public:
     int Clearance( const PNS::ITEM* aA, const PNS::ITEM* aB,
                    bool aUseClearanceEpsilon = true ) override;
 
+    bool HasUserDefinedPhysicalConstraint() override;
+
     PNS::NET_HANDLE DpCoupledNet( PNS::NET_HANDLE aNet ) override;
     int DpNetPolarity( PNS::NET_HANDLE aNet ) override;
     bool DpNetPair( const PNS::ITEM* aItem, PNS::NET_HANDLE& aNetP,
@@ -207,6 +211,10 @@ private:
     PCB_ARC            m_dummyArcs[2];
     PCB_VIA            m_dummyVias[2];
     int                m_clearanceEpsilon;
+
+    // Cached for the routing session; HasUserDefinedPhysicalConstraint runs in the
+    // collideSimple inner loop and walks the DRC engine map otherwise.
+    std::optional<bool> m_hasUserPhysicalConstraint;
 
     std::unordered_map<CLEARANCE_CACHE_KEY, int> m_clearanceCache;
     std::unordered_map<CLEARANCE_CACHE_KEY, int> m_tempClearanceCache;
@@ -444,18 +452,19 @@ bool PNS_PCBNEW_RULE_RESOLVER::QueryConstraint( PNS::CONSTRAINT_TYPE aType,
 
     switch ( aType )
     {
-    case PNS::CONSTRAINT_TYPE::CT_CLEARANCE:          hostType = CLEARANCE_CONSTRAINT;          break;
-    case PNS::CONSTRAINT_TYPE::CT_WIDTH:              hostType = TRACK_WIDTH_CONSTRAINT;        break;
-    case PNS::CONSTRAINT_TYPE::CT_DIFF_PAIR_GAP:      hostType = DIFF_PAIR_GAP_CONSTRAINT;      break;
-    case PNS::CONSTRAINT_TYPE::CT_LENGTH:             hostType = LENGTH_CONSTRAINT;             break;
-    case PNS::CONSTRAINT_TYPE::CT_DIFF_PAIR_SKEW:     hostType = SKEW_CONSTRAINT;               break;
-    case PNS::CONSTRAINT_TYPE::CT_MAX_UNCOUPLED:      hostType = MAX_UNCOUPLED_CONSTRAINT;      break;
-    case PNS::CONSTRAINT_TYPE::CT_VIA_DIAMETER:       hostType = VIA_DIAMETER_CONSTRAINT;       break;
-    case PNS::CONSTRAINT_TYPE::CT_VIA_HOLE:           hostType = HOLE_SIZE_CONSTRAINT;          break;
-    case PNS::CONSTRAINT_TYPE::CT_HOLE_CLEARANCE:     hostType = HOLE_CLEARANCE_CONSTRAINT;     break;
-    case PNS::CONSTRAINT_TYPE::CT_EDGE_CLEARANCE:     hostType = EDGE_CLEARANCE_CONSTRAINT;     break;
-    case PNS::CONSTRAINT_TYPE::CT_HOLE_TO_HOLE:       hostType = HOLE_TO_HOLE_CONSTRAINT;       break;
+    case PNS::CONSTRAINT_TYPE::CT_CLEARANCE: hostType = CLEARANCE_CONSTRAINT; break;
+    case PNS::CONSTRAINT_TYPE::CT_WIDTH: hostType = TRACK_WIDTH_CONSTRAINT; break;
+    case PNS::CONSTRAINT_TYPE::CT_DIFF_PAIR_GAP: hostType = DIFF_PAIR_GAP_CONSTRAINT; break;
+    case PNS::CONSTRAINT_TYPE::CT_LENGTH: hostType = LENGTH_CONSTRAINT; break;
+    case PNS::CONSTRAINT_TYPE::CT_DIFF_PAIR_SKEW: hostType = SKEW_CONSTRAINT; break;
+    case PNS::CONSTRAINT_TYPE::CT_MAX_UNCOUPLED: hostType = MAX_UNCOUPLED_CONSTRAINT; break;
+    case PNS::CONSTRAINT_TYPE::CT_VIA_DIAMETER: hostType = VIA_DIAMETER_CONSTRAINT; break;
+    case PNS::CONSTRAINT_TYPE::CT_VIA_HOLE: hostType = HOLE_SIZE_CONSTRAINT; break;
+    case PNS::CONSTRAINT_TYPE::CT_HOLE_CLEARANCE: hostType = HOLE_CLEARANCE_CONSTRAINT; break;
+    case PNS::CONSTRAINT_TYPE::CT_EDGE_CLEARANCE: hostType = EDGE_CLEARANCE_CONSTRAINT; break;
+    case PNS::CONSTRAINT_TYPE::CT_HOLE_TO_HOLE: hostType = HOLE_TO_HOLE_CONSTRAINT; break;
     case PNS::CONSTRAINT_TYPE::CT_PHYSICAL_CLEARANCE: hostType = PHYSICAL_CLEARANCE_CONSTRAINT; break;
+    case PNS::CONSTRAINT_TYPE::CT_PHYSICAL_HOLE_CLEARANCE: hostType = PHYSICAL_HOLE_CLEARANCE_CONSTRAINT; break;
     default:                                          return false; // should not happen
     }
 
@@ -672,6 +681,7 @@ bool PNS_PCBNEW_RULE_RESOLVER::QueryConstraint( PNS::CONSTRAINT_TYPE aType,
         case PNS::CONSTRAINT_TYPE::CT_DIFF_PAIR_SKEW:
         case PNS::CONSTRAINT_TYPE::CT_MAX_UNCOUPLED:
         case PNS::CONSTRAINT_TYPE::CT_PHYSICAL_CLEARANCE:
+        case PNS::CONSTRAINT_TYPE::CT_PHYSICAL_HOLE_CLEARANCE:
             aConstraint->m_Value = hostConstraint.GetValue();
             aConstraint->m_RuleName = hostConstraint.GetName();
             aConstraint->m_Type = aType;
@@ -714,6 +724,7 @@ void PNS_PCBNEW_RULE_RESOLVER::ClearCaches()
     m_clearanceCache.clear();
     m_tempClearanceCache.clear();
     m_hullCache.clear();
+    m_hasUserPhysicalConstraint.reset();
 }
 
 
@@ -739,6 +750,20 @@ const SHAPE_LINE_CHAIN& PNS_PCBNEW_RULE_RESOLVER::HullCache( const PNS::ITEM* aI
     auto result = m_hullCache.emplace( key, std::move( hull ) );
 
     return result.first->second;
+}
+
+
+bool PNS_PCBNEW_RULE_RESOLVER::HasUserDefinedPhysicalConstraint()
+{
+    if( !m_hasUserPhysicalConstraint.has_value() )
+    {
+        if( std::shared_ptr<DRC_ENGINE> drc = m_board->GetDesignSettings().m_DRCEngine )
+            m_hasUserPhysicalConstraint = drc->HasUserDefinedPhysicalConstraint();
+        else
+            m_hasUserPhysicalConstraint = false;
+    }
+
+    return *m_hasUserPhysicalConstraint;
 }
 
 
@@ -775,39 +800,55 @@ int PNS_PCBNEW_RULE_RESOLVER::Clearance( const PNS::ITEM* aA, const PNS::ITEM* a
     // Normalize layer range (no -1 magic numbers)
     layers = layers.Intersection( PNS_LAYER_RANGE( PCBNEW_LAYER_ID_START, PCB_LAYER_ID_COUNT - 1 ) );
 
+    const bool sameNet = aA && aB && aA->Net() && aA->Net() == aB->Net();
+    const bool freePad = aA && aB && ( aA->IsFreePad() || aB->IsFreePad() );
+
     for( int layer = layers.Start(); layer <= layers.End(); ++layer )
     {
-        if( IsDrilledHole( aA ) && IsDrilledHole( aB ) )
+        if( !sameNet && !freePad )
         {
-            if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_HOLE_TO_HOLE, aA, aB, layer, &constraint ) )
+            if( IsDrilledHole( aA ) && IsDrilledHole( aB ) )
             {
-                if( constraint.m_Value.Min() > rv )
-                    rv = constraint.m_Value.Min();
+                if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_HOLE_TO_HOLE, aA, aB, layer, &constraint ) )
+                {
+                    if( constraint.m_Value.Min() > rv )
+                        rv = constraint.m_Value.Min();
+                }
             }
-        }
-        else if( isHole( aA ) || isHole( aB ) )
-        {
-            if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_HOLE_CLEARANCE, aA, aB, layer, &constraint ) )
+            else if( isHole( aA ) || isHole( aB ) )
             {
-                if( constraint.m_Value.Min() > rv )
-                    rv = constraint.m_Value.Min();
+                if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_HOLE_CLEARANCE, aA, aB, layer, &constraint ) )
+                {
+                    if( constraint.m_Value.Min() > rv )
+                        rv = constraint.m_Value.Min();
+                }
+            }
+
+            // No 'else'; plated holes get both HOLE_CLEARANCE and CLEARANCE
+            if( isCopper( aA ) && ( !aB || isCopper( aB ) ) )
+            {
+                if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_CLEARANCE, aA, aB, layer, &constraint ) )
+                {
+                    if( constraint.m_Value.Min() > rv )
+                        rv = constraint.m_Value.Min();
+                }
+            }
+
+            // No 'else'; non-plated milled holes get both HOLE_CLEARANCE and EDGE_CLEARANCE
+            if( isEdge( aA ) || IsNonPlatedSlot( aA ) || isEdge( aB ) || IsNonPlatedSlot( aB ) )
+            {
+                if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_EDGE_CLEARANCE, aA, aB, layer, &constraint ) )
+                {
+                    if( constraint.m_Value.Min() > rv )
+                        rv = constraint.m_Value.Min();
+                }
             }
         }
 
-        // No 'else'; plated holes get both HOLE_CLEARANCE and CLEARANCE
-        if( isCopper( aA ) && ( !aB || isCopper( aB ) ) )
+        // Physical clearances are net-blind: a physical_clearance rule applies regardless
+        if( isHole( aA ) || isHole( aB ) )
         {
-            if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_CLEARANCE, aA, aB, layer, &constraint ) )
-            {
-                if( constraint.m_Value.Min() > rv )
-                    rv = constraint.m_Value.Min();
-            }
-        }
-
-        // No 'else'; non-plated milled holes get both HOLE_CLEARANCE and EDGE_CLEARANCE
-        if( isEdge( aA ) || IsNonPlatedSlot( aA ) || isEdge( aB ) || IsNonPlatedSlot( aB ) )
-        {
-            if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_EDGE_CLEARANCE, aA, aB, layer, &constraint ) )
+            if( QueryConstraint( PNS::CONSTRAINT_TYPE::CT_PHYSICAL_HOLE_CLEARANCE, aA, aB, layer, &constraint ) )
             {
                 if( constraint.m_Value.Min() > rv )
                     rv = constraint.m_Value.Min();
@@ -820,6 +861,10 @@ int PNS_PCBNEW_RULE_RESOLVER::Clearance( const PNS::ITEM* aA, const PNS::ITEM* a
                 rv = constraint.m_Value.Min();
         }
     }
+
+    // Same-net pairs short-circuit clearance unless a physical_clearance rule gave a positive value
+    if( ( sameNet || freePad ) && rv == 0 )
+        rv = -1;
 
     if( aUseClearanceEpsilon && rv > 0 )
         rv = std::max( 0, rv - m_clearanceEpsilon );
@@ -1265,7 +1310,7 @@ public:
     ~PNS_PCBNEW_DEBUG_DECORATOR()
     {
         PNS_PCBNEW_DEBUG_DECORATOR::Clear();
-        
+
         for ( PNS::ITEM* item : m_clonedItems )
         {
             delete item;
@@ -1573,6 +1618,9 @@ std::vector<std::unique_ptr<PNS::SOLID>> PNS_KICAD_IFACE_BASE::syncPad( PAD* aPa
                     if( poly->OutlineCount() )
                         solid->SetShape( new SHAPE_SIMPLE( poly->Outline( 0 ) ) );
                 }
+
+                if( !solid->Shape( 0 ) )
+                    return;
 
                 solids.emplace_back( std::move( solid ) );
             };
@@ -2907,6 +2955,94 @@ int PNS_KICAD_IFACE_BASE::GetPNSLayerFromBoardLayer( PCB_LAYER_ID aLayer ) const
     return ( aLayer / 2 ) - 1;
 }
 
+bool PNS_KICAD_IFACE_BASE::GetSignalAggregate( PNS::NET_HANDLE aNetP, PNS::NET_HANDLE aNetN,
+                                                long long& aExtraLength, long long& aExtraDelay ) const
+{
+    aExtraLength = 0;
+    aExtraDelay = 0;
+    if( !m_board || !aNetP || !aNetN )
+        return false;
+
+    auto* netP = static_cast<NETINFO_ITEM*>( aNetP );
+    auto* netN = static_cast<NETINFO_ITEM*>( aNetN );
+    wxString sig = netP->GetNetChain();
+    if( sig.IsEmpty() || sig != netN->GetNetChain() )
+        return false;
+
+    // Build the set of net codes to exclude (the nets the caller is already accounting for).
+    std::set<int> exclude;
+    exclude.insert( netP->GetNetCode() );
+    if( netP != netN )
+        exclude.insert( netN->GetNetCode() );
+
+    // Sum routed length/delay of every other net in the chain.
+    for( NETINFO_ITEM* net : m_board->GetNetInfo() )
+    {
+        if( net->GetNetChain() != sig )
+            continue;
+        if( exclude.count( net->GetNetCode() ) )
+            continue;
+
+        PCB_TRACK* rep = nullptr;
+
+        for( BOARD_ITEM* bi : m_board->Tracks() )
+        {
+            if( auto tr = dynamic_cast<PCB_TRACK*>( bi ) )
+            {
+                if( tr->GetNetCode() == net->GetNetCode() )
+                {
+                    rep = tr;
+                    break;
+                }
+            }
+        }
+
+        if( rep )
+        {
+            int count = 0; double trk = 0, pad = 0, tDelay = 0, padDelay = 0;
+            std::tie( count, trk, pad, tDelay, padDelay ) = m_board->GetTrackLength( *rep );
+            aExtraLength += KiROUND<double, long long>( trk + pad );
+
+            if( tDelay > 0.0 || padDelay > 0.0 )
+                aExtraDelay += KiROUND<double, long long>( tDelay + padDelay );
+        }
+    }
+
+    // Chain is valid; return true even if no sibling nets carry routed length yet so the
+    // placer applies the full chain budget to the net being routed first.
+    return true;
+}
+
+bool PNS_KICAD_IFACE::GetSignalAggregate( PNS::NET_HANDLE aNetP, PNS::NET_HANDLE aNetN,
+                                          long long& aExtraLength, long long& aExtraDelay ) const
+{
+    return PNS_KICAD_IFACE_BASE::GetSignalAggregate( aNetP, aNetN, aExtraLength, aExtraDelay );
+}
+
+
+long long PNS_KICAD_IFACE_BASE::GetNetBoardLength( PNS::NET_HANDLE aNet ) const
+{
+    if( !m_board || !aNet )
+        return 0;
+
+    auto* ni = static_cast<NETINFO_ITEM*>( aNet );
+
+    for( BOARD_ITEM* bi : m_board->Tracks() )
+    {
+        if( auto tr = dynamic_cast<PCB_TRACK*>( bi ) )
+        {
+            if( tr->GetNetCode() == ni->GetNetCode() )
+            {
+                int count = 0; double trk = 0, pad = 0, tDelay = 0, padDelay = 0;
+                std::tie( count, trk, pad, tDelay, padDelay ) = m_board->GetTrackLength( *tr );
+                return KiROUND<double, long long>( trk + pad );
+            }
+        }
+    }
+
+    return 0;
+}
+
 
 void PNS_KICAD_IFACE_BASE::SetStartLayerFromPCBNew( PCB_LAYER_ID aLayer )
 {
@@ -2935,7 +3071,7 @@ long long int PNS_KICAD_IFACE_BASE::CalculateRoutedPathLength( const PNS::ITEM_S
         endPad = static_cast<PAD*>( aEndPad->Parent() );
 
     constexpr PATH_OPTIMISATIONS opts = {
-        .OptimiseViaLayers = false,
+        .OptimiseVias = false,
         .MergeTracks = false,
         .OptimiseTracesInPads = false,
         .InferViaInPad = true
@@ -2960,7 +3096,7 @@ int64_t PNS_KICAD_IFACE_BASE::CalculateRoutedPathDelay( const PNS::ITEM_SET& aLi
         endPad = static_cast<PAD*>( aEndPad->Parent() );
 
     constexpr PATH_OPTIMISATIONS opts = {
-        .OptimiseViaLayers = false,
+        .OptimiseVias = false,
         .MergeTracks = false,
         .OptimiseTracesInPads = false,
         .InferViaInPad = true

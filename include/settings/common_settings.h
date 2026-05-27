@@ -21,6 +21,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 #include <mouse_drag_action.h>
 #include <settings/environment.h>
 #include <settings/json_settings.h>
@@ -39,6 +40,18 @@ enum class APP_THEME
     LIGHT,
     DARK,
     AUTO
+};
+
+enum class BACKUP_FORMAT
+{
+    INCREMENTAL = 0,    ///< Git-based local history (default)
+    ZIP         = 1     ///< Zip archive snapshots; autosave uses recovery files
+};
+
+enum class BACKUP_LOCATION
+{
+    PROJECT_DIR = 0,    ///< Inside the project directory (default)
+    USER_DIR    = 1     ///< Under the KiCad user data directory
 };
 
 class KICOMMON_API COMMON_SETTINGS : public JSON_SETTINGS
@@ -62,11 +75,13 @@ public:
 
     struct AUTO_BACKUP
     {
-        bool   enabled;            ///< Automatically back up the project when files are saved
-        bool   backup_on_autosave; ///< Trigger a backup on autosave
-        int    limit_total_files;  ///< Maximum number of backup archives to retain
-        int    limit_daily_files;  ///< Maximum files to keep per day, 0 for unlimited
-        int    min_interval;       ///< Minimum time, in seconds, between subsequent backups
+        bool            enabled;            ///< Automatically back up the project when files are saved
+        BACKUP_FORMAT   format;             ///< Backup format (incremental git history vs zip archives)
+        BACKUP_LOCATION location;           ///< Where backups, history, and autosave files live
+        bool            backup_on_autosave; ///< Trigger a backup on autosave
+        int             limit_total_files;  ///< Maximum number of backup archives to retain
+        int             limit_daily_files;  ///< Maximum files to keep per day, 0 for unlimited
+        int             min_interval;       ///< Minimum time, in seconds, between subsequent backups
 
         /// Maximum total size of backups (bytes), 0 for unlimited
         unsigned long long limit_total_size;
@@ -151,6 +166,7 @@ public:
         bool scaled_3d_models_warning;
         bool data_collection_prompt;
         bool update_check_prompt;
+        bool migrate_wrl_prompt;
     };
 
     struct PACKAGE_MANAGER
@@ -205,6 +221,7 @@ private:
     bool migrateSchema2to3();
     bool migrateSchema3to4();
     bool migrateSchema4to5();
+    bool migrateSchema5to6();
 
     struct LEGACY_3D_SEARCH_PATH
     {
@@ -232,6 +249,10 @@ public:
     PACKAGE_MANAGER   m_PackageManager;
     GIT               m_Git;
     API               m_Api;
+
+    /// Extra directories to search for 3D models, added by the user through
+    /// the 3D model migration dialog.  Persists across sessions.
+    std::vector<wxString> m_Extra3DSearchDirs;
 
     std::unique_ptr<COMMON_SETTINGS_INTERNALS> m_csInternals;
 };

@@ -18,14 +18,16 @@
  */
 
 #include <boost/test/unit_test.hpp>
-#include <boost/bimap.hpp>
 #include <magic_enum.hpp>
 #include <import_export.h>
 #include <qa_utils/wx_utils/wx_assert.h>
+#include <qa_utils/api_test_utils.h>
 
 // Common
 #include <api/api_enums.h>
+#include <api/board/board.pb.h>
 #include <api/common/types/enums.pb.h>
+#include <eda_shape.h>
 #include <core/typeinfo.h>
 #include <font/text_attributes.h>
 #include <layer_ids.h>
@@ -52,6 +54,8 @@
 #include <jobs/job_export_pcb_stats.h>
 #include <jobs/job_export_pcb_svg.h>
 #include <jobs/job_pcb_render.h>
+#include <drc/drc_item.h>
+#include <drc/drc_rule.h>
 #include <padstack.h>
 #include <pcb_dimension.h>
 #include <pcb_track.h>
@@ -63,91 +67,6 @@
 using namespace kiapi::common;
 
 BOOST_AUTO_TEST_SUITE( ApiEnums )
-
-/**
- * Checks if a KiCad enum has been properly mapped to a Protobuf enum
- * @tparam KiCadEnum is an enum type
- * @tparam ProtoEnum is a Protobuf enum type
- * @param aPartiallyMapped is true if only some of the KiCad enum values are exposed to the API
- */
-template<typename KiCadEnum, typename ProtoEnum>
-void testEnums( bool aPartiallyMapped = false )
-{
-    boost::bimap<ProtoEnum, KiCadEnum> protoToKiCadSeen;
-    std::set<ProtoEnum> seenProtos;
-
-    for( ProtoEnum value : magic_enum::enum_values<ProtoEnum>() )
-    {
-        BOOST_TEST_CONTEXT( magic_enum::enum_type_name<ProtoEnum>() << "::"
-                            << magic_enum::enum_name( value ) )
-        {
-            std::string name( magic_enum::enum_name( value ) );
-            auto splitPos = name.find_first_of( '_' );
-
-            // Protobuf enum names should be formatted as PREFIX_KEY
-            BOOST_REQUIRE_MESSAGE( splitPos != std::string::npos,
-                                   "Proto enum name doesn't have a prefix" );
-
-            std::string suffix = name.substr( splitPos );
-
-            // Protobuf enum with the value 0 should not map to anything
-            if( static_cast<int>( value ) == 0 )
-            {
-                BOOST_REQUIRE_MESSAGE( suffix.compare( "_UNKNOWN" ) == 0,
-                                       "Proto enum with value 0 must be named <PREFIX>_UNKNOWN" );
-                continue;
-            }
-
-            KiCadEnum result;
-            // Every non-unknown Proto value should map to a valid KiCad value
-            BOOST_REQUIRE_NO_THROW( result = ( FromProtoEnum<KiCadEnum, ProtoEnum>( value ) ) );
-
-            // There should be a 1:1 mapping
-            BOOST_REQUIRE( !protoToKiCadSeen.left.count( value ) );
-            protoToKiCadSeen.left.insert( { value, result } );
-        }
-    }
-
-    for( KiCadEnum value : magic_enum::enum_values<KiCadEnum>() )
-    {
-        BOOST_TEST_CONTEXT( magic_enum::enum_type_name<KiCadEnum>() << "::"
-                            << magic_enum::enum_name( value ) )
-        {
-            ProtoEnum result;
-
-            if( aPartiallyMapped )
-            {
-                try
-                {
-                     result = ToProtoEnum<KiCadEnum, ProtoEnum>( value );
-                }
-                catch( KI_TEST::WX_ASSERT_ERROR )
-                {
-                    // If it wasn't mapped from KiCad to Proto, it shouldn't be mapped the other way
-                    BOOST_REQUIRE_MESSAGE( !protoToKiCadSeen.right.count( value ),
-                            "Proto enum is mapped to this KiCad enum, but not vice versa" );
-                    continue;
-                }
-            }
-            else
-            {
-                // Every KiCad enum value should map to a non-unknown Protobuf value
-                BOOST_REQUIRE_NO_THROW( result = ( ToProtoEnum<KiCadEnum, ProtoEnum>( value ) ) );
-            }
-
-            // Protobuf "unknown" should always be zero value by convention
-            BOOST_REQUIRE( result != static_cast<ProtoEnum>( 0 ) );
-
-            // There should be a 1:1 mapping
-            BOOST_REQUIRE( !seenProtos.count( result ) );
-            seenProtos.insert( result );
-
-            // Round-tripping should work
-            KiCadEnum roundTrip = FromProtoEnum<KiCadEnum, ProtoEnum>( result );
-            BOOST_REQUIRE( roundTrip == value );
-        }
-    }
-}
 
 BOOST_AUTO_TEST_CASE( HorizontalAlignment )
 {
@@ -162,6 +81,11 @@ BOOST_AUTO_TEST_CASE( VerticalAlignment )
 BOOST_AUTO_TEST_CASE( StrokeLineStyle )
 {
     testEnums<LINE_STYLE, types::StrokeLineStyle>();
+}
+
+BOOST_AUTO_TEST_CASE( GraphicFillType )
+{
+    testEnums<FILL_T, types::GraphicFillType>();
 }
 
 BOOST_AUTO_TEST_CASE( KiCadObjectType )
@@ -240,6 +164,11 @@ BOOST_AUTO_TEST_CASE( TeardropType )
     testEnums<TEARDROP_TYPE, kiapi::board::types::TeardropType>();
 }
 
+BOOST_AUTO_TEST_CASE( TeardropTarget )
+{
+    testEnums<TARGET_TD, kiapi::board::TeardropTarget>( true );
+}
+
 BOOST_AUTO_TEST_CASE( DimensionTextBorderStyle )
 {
     testEnums<DIM_TEXT_BORDER, kiapi::board::types::DimensionTextBorderStyle>();
@@ -293,6 +222,141 @@ BOOST_AUTO_TEST_CASE( BoardStackupLayerType )
 BOOST_AUTO_TEST_CASE( DrcSeverity )
 {
     testEnums<SEVERITY, kiapi::board::commands::DrcSeverity>();
+}
+
+BOOST_AUTO_TEST_CASE( RuleSeverity )
+{
+    testEnums<SEVERITY, kiapi::common::types::RuleSeverity>();
+}
+
+BOOST_AUTO_TEST_CASE( DesignRuleType )
+{
+    using ProtoType = kiapi::board::DrcErrorType;
+
+    for( PCB_DRC_CODE value : { DRCE_UNCONNECTED_ITEMS,
+                                DRCE_SHORTING_ITEMS,
+                                DRCE_ALLOWED_ITEMS,
+                                DRCE_TEXT_ON_EDGECUTS,
+                                DRCE_CLEARANCE,
+                                DRCE_CREEPAGE,
+                                DRCE_TRACKS_CROSSING,
+                                DRCE_EDGE_CLEARANCE,
+                                DRCE_ZONES_INTERSECT,
+                                DRCE_ISOLATED_COPPER,
+                                DRCE_STARVED_THERMAL,
+                                DRCE_DANGLING_VIA,
+                                DRCE_DANGLING_TRACK,
+                                DRCE_DRILLED_HOLES_TOO_CLOSE,
+                                DRCE_DRILLED_HOLES_COLOCATED,
+                                DRCE_HOLE_CLEARANCE,
+                                DRCE_CONNECTION_WIDTH,
+                                DRCE_TRACK_WIDTH,
+                                DRCE_TRACK_ANGLE,
+                                DRCE_TRACK_SEGMENT_LENGTH,
+                                DRCE_ANNULAR_WIDTH,
+                                DRCE_DRILL_OUT_OF_RANGE,
+                                DRCE_VIA_DIAMETER,
+                                DRCE_PADSTACK,
+                                DRCE_PADSTACK_INVALID,
+                                DRCE_MICROVIA_DRILL_OUT_OF_RANGE,
+                                DRCE_OVERLAPPING_FOOTPRINTS,
+                                DRCE_MISSING_COURTYARD,
+                                DRCE_MALFORMED_COURTYARD,
+                                DRCE_PTH_IN_COURTYARD,
+                                DRCE_NPTH_IN_COURTYARD,
+                                DRCE_DISABLED_LAYER_ITEM,
+                                DRCE_INVALID_OUTLINE,
+                                DRCE_MISSING_FOOTPRINT,
+                                DRCE_DUPLICATE_FOOTPRINT,
+                                DRCE_NET_CONFLICT,
+                                DRCE_EXTRA_FOOTPRINT,
+                                DRCE_SCHEMATIC_PARITY,
+                                DRCE_SCHEMATIC_FIELDS_PARITY,
+                                DRCE_FOOTPRINT_FILTERS,
+                                DRCE_LIB_FOOTPRINT_ISSUES,
+                                DRCE_LIB_FOOTPRINT_MISMATCH,
+                                DRCE_UNRESOLVED_VARIABLE,
+                                DRCE_ASSERTION_FAILURE,
+                                DRCE_GENERIC_WARNING,
+                                DRCE_GENERIC_ERROR,
+                                DRCE_COPPER_SLIVER,
+                                DRCE_SILK_CLEARANCE,
+                                DRCE_SILK_MASK_CLEARANCE,
+                                DRCE_SILK_EDGE_CLEARANCE,
+                                DRCE_SOLDERMASK_BRIDGE,
+                                DRCE_TEXT_HEIGHT,
+                                DRCE_TEXT_THICKNESS,
+                                DRCE_LENGTH_OUT_OF_RANGE,
+                                DRCE_SKEW_OUT_OF_RANGE,
+                                DRCE_VIA_COUNT_OUT_OF_RANGE,
+                                DRCE_DIFF_PAIR_GAP_OUT_OF_RANGE,
+                                DRCE_DIFF_PAIR_UNCOUPLED_LENGTH_TOO_LONG,
+                                DRCE_FOOTPRINT,
+                                DRCE_FOOTPRINT_TYPE_MISMATCH,
+                                DRCE_PAD_TH_WITH_NO_HOLE,
+                                DRCE_MIRRORED_TEXT_ON_FRONT_LAYER,
+                                DRCE_NONMIRRORED_TEXT_ON_BACK_LAYER,
+                                DRCE_MISSING_TUNING_PROFILE,
+                                DRCE_TRACK_ON_POST_MACHINED_LAYER,
+                                DRCE_TRACK_NOT_CENTERED_ON_VIA } )
+    {
+        ProtoType proto = ToProtoEnum<PCB_DRC_CODE, ProtoType>( value );
+        BOOST_REQUIRE( proto != ProtoType::DRCET_UNKNOWN );
+        BOOST_CHECK( ( FromProtoEnum<PCB_DRC_CODE, ProtoType>( proto ) == value ) );
+    }
+
+    BOOST_CHECK( ( FromProtoEnum<PCB_DRC_CODE, ProtoType>( ProtoType::DRCET_UNKNOWN )
+                   == static_cast<PCB_DRC_CODE>( 0 ) ) );
+}
+
+BOOST_AUTO_TEST_CASE( CustomRuleConstraintType )
+{
+    using ProtoType = kiapi::board::CustomRuleConstraintType;
+
+    for( DRC_CONSTRAINT_T value : magic_enum::enum_values<DRC_CONSTRAINT_T>() )
+    {
+        if( value == NULL_CONSTRAINT )
+            continue;
+
+        ProtoType proto = ToProtoEnum<DRC_CONSTRAINT_T, ProtoType>( value );
+        BOOST_REQUIRE( proto != ProtoType::CRCT_UNKNOWN );
+        BOOST_CHECK( ( FromProtoEnum<DRC_CONSTRAINT_T, ProtoType>( proto ) == value ) );
+    }
+
+    BOOST_CHECK( ( FromProtoEnum<DRC_CONSTRAINT_T, ProtoType>( ProtoType::CRCT_UNKNOWN )
+                   == NULL_CONSTRAINT ) );
+}
+
+BOOST_AUTO_TEST_CASE( CustomRuleConstraintOption )
+{
+    using ProtoType = kiapi::board::CustomRuleConstraintOption;
+
+    for( DRC_CONSTRAINT::OPTIONS value : magic_enum::enum_values<DRC_CONSTRAINT::OPTIONS>() )
+    {
+        if( value == DRC_CONSTRAINT::OPTIONS::NUM_OPTIONS )
+            continue;
+
+        ProtoType proto = ToProtoEnum<DRC_CONSTRAINT::OPTIONS, ProtoType>( value );
+        BOOST_REQUIRE( proto != ProtoType::CRCO_UNKNOWN );
+        BOOST_CHECK( ( FromProtoEnum<DRC_CONSTRAINT::OPTIONS, ProtoType>( proto ) == value ) );
+    }
+}
+
+BOOST_AUTO_TEST_CASE( CustomRuleDisallowType )
+{
+    using ProtoType = kiapi::board::CustomRuleDisallowType;
+
+    for( DRC_DISALLOW_T value : { DRC_DISALLOW_THROUGH_VIAS, DRC_DISALLOW_MICRO_VIAS,
+                                  DRC_DISALLOW_BLIND_VIAS, DRC_DISALLOW_BURIED_VIAS,
+                                  DRC_DISALLOW_TRACKS, DRC_DISALLOW_PADS,
+                                  DRC_DISALLOW_ZONES, DRC_DISALLOW_TEXTS,
+                                  DRC_DISALLOW_GRAPHICS, DRC_DISALLOW_HOLES,
+                                  DRC_DISALLOW_FOOTPRINTS } )
+    {
+        ProtoType proto = ToProtoEnum<DRC_DISALLOW_T, ProtoType>( value );
+        BOOST_REQUIRE( proto != ProtoType::CRDT_UNKNOWN );
+        BOOST_CHECK( ( FromProtoEnum<DRC_DISALLOW_T, ProtoType>( proto ) == value ) );
+    }
 }
 
 BOOST_AUTO_TEST_CASE( PlotDrillMarks )

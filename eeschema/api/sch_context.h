@@ -22,7 +22,9 @@
 #define KICAD_SCH_CONTEXT_H
 
 #include <memory>
+#include <optional>
 
+#include <sch_sheet_path.h>
 #include <wx/string.h>
 
 class KIWAY;
@@ -49,6 +51,8 @@ public:
     virtual wxString GetCurrentFileName() const = 0;
 
     virtual bool CanAcceptApiCommands() const = 0;
+
+    virtual std::optional<SCH_SHEET_PATH> GetCurrentSheet() const = 0;
 };
 
 

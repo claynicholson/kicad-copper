@@ -112,7 +112,9 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
     wxString   fullFileName( aFileSet[0] );
     wxFileName wx_filename( fullFileName );
-    Kiway().LocalHistory().Init( wx_filename.GetPath() );
+
+    if( !Prj().IsNullProject() )
+        Kiway().LocalHistory().Init( Prj().GetProjectPath() );
 
     // We insist on caller sending us an absolute path, if it does not, we say it's a bug.
     wxASSERT_MSG( wx_filename.IsAbsolute(), wxS( "Path is not absolute!" ) );
@@ -174,7 +176,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     m_infoBar->Dismiss();
 
     if( KISTATUSBAR* statusBar = dynamic_cast<KISTATUSBAR*>( GetStatusBar() ) )
-        statusBar->ClearLoadWarningMessages();
+        statusBar->ClearWarningMessages( "load" );
 
     WX_PROGRESS_REPORTER progressReporter( this, is_new ? _( "Create Schematic" )
                                                         : _( "Load Schematic" ), 1,
@@ -207,6 +209,11 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         if( !pro.Exists() && !legacyPro.Exists() && !( aCtl & KICTL_CREATE ) )
             Prj().SetReadOnly();
     }
+
+    // Crash-recovery: when zip-format autosave is active, look for autosave files newer
+    // than the saved schematic and offer to recover them before any sheet is loaded.
+    if( !is_new )
+        CheckForAutosaveFiles( wx_filename.GetPath(), { FILEEXT::KiCadSchematicFileExtension } );
 
     // Start a new schematic object now that we sorted out our project
     std::unique_ptr<SCHEMATIC> newSchematic = std::make_unique<SCHEMATIC>( &Prj() );
@@ -421,7 +428,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
             // Show any messages collected before the failure
             if( KISTATUSBAR* statusBar = dynamic_cast<KISTATUSBAR*>( GetStatusBar() ) )
-                statusBar->SetLoadWarningMessages( loadReporter.GetMessages() );
+                statusBar->AddWarningMessages( "load", loadReporter.GetMessages() );
 
             msg.Printf( _( "Failed to load '%s'." ), fullFileName );
             SetMsgPanel( wxEmptyString, msg );
@@ -452,7 +459,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         UpdateFileHistory( fullFileName );
 
         if( KISTATUSBAR* statusBar = dynamic_cast<KISTATUSBAR*>( GetStatusBar() ) )
-            statusBar->SetLoadWarningMessages( loadReporter.GetMessages() );
+            statusBar->AddWarningMessages( "load", loadReporter.GetMessages() );
 
         SCH_SCREENS schematic( Schematic().Root() );
 
@@ -713,14 +720,17 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         // instead of the default one.
         LoadDrawingSheet();
 
-        schematic.PruneOrphanedSymbolInstances( Prj().GetProjectName(), sheetList );
-        schematic.PruneOrphanedSheetInstances( Prj().GetProjectName(), sheetList );
-
         wxLogTrace( traceSchCurrentSheet,
                    "Before CheckForMissingSymbolInstances: Current sheet path='%s', size=%zu",
                    GetCurrentSheet().Path().AsString(),
                    GetCurrentSheet().size() );
+
+        // Check must run before pruning so variant data on a stale instance path is migrated
+        // onto the new instance before the orphan is removed.
         sheetList.CheckForMissingSymbolInstances( Prj().GetProjectName() );
+
+        schematic.PruneOrphanedSymbolInstances( Prj().GetProjectName(), sheetList );
+        schematic.PruneOrphanedSheetInstances( Prj().GetProjectName(), sheetList );
 
         Schematic().ConnectionGraph()->Reset();
 
@@ -781,6 +791,14 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     TestDanglingEnds();
 
     UpdateHierarchyNavigator( false, true );
+    CallAfter(
+            [this]()
+            {
+                if( m_netNavigator && m_netNavigator->IsEmpty() )
+                {
+                    RefreshNetNavigator();
+                }
+            } );
 
     wxCommandEvent changedEvt( EDA_EVT_SCHEMATIC_CHANGED );
     ProcessEventLocally( changedEvt );
@@ -843,7 +861,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 }
 
 
-void SCH_EDIT_FRAME::OnImportProject( wxCommandEvent& aEvent )
+void SCH_EDIT_FRAME::OnImportProject()
 {
     if( Schematic().RootScreen() && !Schematic().RootScreen()->Items().empty() )
     {
@@ -1049,16 +1067,6 @@ bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSave
 
         msg.Printf( _( "File '%s' saved." ),  screen->GetFileName() );
         SetStatusText( msg, 0 );
-
-        // Record a full project snapshot so related files (symbols, libs, sheets) are captured.
-        Kiway().LocalHistory().CommitFullProjectSnapshot( schematicFileName.GetPath(), wxS( "SCH Save" ) );
-        Kiway().LocalHistory().TagSave( schematicFileName.GetPath(), wxS( "sch" ) );
-
-        if( m_autoSaveTimer )
-            m_autoSaveTimer->Stop();
-
-        m_autoSavePending = false;
-        m_autoSaveRequired = false;
     }
 
     return success;
@@ -1329,6 +1337,8 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
 
     screens.BuildClientSheetPathList();
 
+    std::vector<wxString> savedSheetPaths;
+
     for( size_t i = 0; i < screens.GetCount(); i++ )
     {
         screen = screens.GetScreen( i );
@@ -1378,11 +1388,22 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
         if( !saveCopy && tmpFn.GetFullPath() != screen->GetFileName() )
             screen->AssignNewUuid();
 
-        success &= saveSchematicFile( screens.GetSheet( i ), tmpFn.GetFullPath() );
+        bool savedThisSheet = saveSchematicFile( screens.GetSheet( i ), tmpFn.GetFullPath() );
+
+        if( savedThisSheet )
+            savedSheetPaths.push_back( tmpFn.GetFullPath() );
+
+        success &= savedThisSheet;
     }
 
     if( success )
+    {
+        if( m_autoSaveTimer )
+            m_autoSaveTimer->Stop();
+
+        m_autoSavePending = false;
         m_autoSaveRequired = false;
+    }
 
     if( aSaveAs && success )
         LockFile( Schematic().RootScreen()->GetFileName() );
@@ -1426,6 +1447,22 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
         saveProjectSettings();
     }
 
+    // Record a full project snapshot so related files (symbols, libs, sheets) are captured.
+    // Skip when running standalone without a project loaded - the save path can land
+    // anywhere on the filesystem and there is no project context for a snapshot.
+    if( success && !Prj().IsNullProject() )
+    {
+        Kiway().LocalHistory().RunRegisteredSaversAndCommit( Prj().GetProjectPath(), wxS( "SCH Save" ), wxS( "sch" ) );
+
+        // Drop the autosave files for the sheets we just persisted.  Scope to those
+        // sources so other dirty sheets (and any open PCB) keep their autosaves until
+        // they are saved themselves; otherwise a Save All across editors would lose
+        // recovery data for files this save did not write.
+        // RunRegisteredSaversAndCommit above is a no-op when format is ZIP, and
+        // RemoveAutosaveFiles is conversely a no-op in INCREMENTAL mode.
+        Kiway().LocalHistory().RemoveAutosaveFiles( Prj().GetProjectPath(), savedSheetPaths );
+    }
+
     if( !Kiface().IsSingle() )
     {
         WX_STRING_REPORTER backupReporter;
@@ -1454,7 +1491,7 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
     ProcessEventLocally( changingEvt );
 
     if( KISTATUSBAR* statusBar = dynamic_cast<KISTATUSBAR*>( GetStatusBar() ) )
-        statusBar->ClearLoadWarningMessages();
+        statusBar->ClearWarningMessages( "load" );
 
     WX_STRING_REPORTER loadReporter;
     LOAD_INFO_REPORTER_SCOPE loadReporterScope( &loadReporter );
@@ -1578,6 +1615,14 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
         SyncView();
 
         UpdateHierarchyNavigator( false, true );
+        CallAfter(
+                [this]()
+                {
+                    if( m_netNavigator && m_netNavigator->IsEmpty() )
+                    {
+                        RefreshNetNavigator();
+                    }
+                } );
 
         wxCommandEvent e( EDA_EVT_SCHEMATIC_CHANGED );
         ProcessEventLocally( e );
@@ -1599,7 +1644,7 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
         updateTitle();
 
         if( KISTATUSBAR* statusBar = dynamic_cast<KISTATUSBAR*>( GetStatusBar() ) )
-            statusBar->SetLoadWarningMessages( loadReporter.GetMessages() );
+            statusBar->AddWarningMessages( "load", loadReporter.GetMessages() );
 
         break;
     }

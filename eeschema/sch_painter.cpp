@@ -30,10 +30,12 @@
 #include <bitmap_base.h>
 #include <connection_graph.h>
 #include <gal/graphics_abstraction_layer.h>
+#include <sch_netchain.h>
 #include <callback_gal.h>
 #include <geometry/shape_segment.h>
 #include <geometry/shape_rect.h>
 #include <geometry/roundrect.h>
+#include <geometry/shape_ellipse.h>
 #include <geometry/shape_poly_set.h>
 #include <geometry/shape_utils.h>
 #include <gr_text.h>
@@ -55,6 +57,7 @@
 #include <sch_sheet.h>
 #include <sch_sheet_pin.h>
 #include <sch_text.h>
+#include <sch_label.h>
 #include <sch_textbox.h>
 #include <sch_table.h>
 #include <schematic.h>
@@ -1682,6 +1685,25 @@ void SCH_PAINTER::draw( const SCH_PIN* aPin, int aLayer, bool aDimmed )
 
     if( std::optional<PIN_LAYOUT_CACHE::TEXT_INFO> elecTypeInfo = cache.GetPinElectricalTypeInfo( shadowWidth ) )
         drawTextInfo( *elecTypeInfo, getColorForLayer( LAYER_PRIVATE_NOTES ) );
+
+    if( aPin->IsBrightened() && m_schematic && !m_schematic->GetHighlightedNetChain().IsEmpty() )
+    {
+        if( SCH_NETCHAIN* sig = m_schematic->ConnectionGraph()->GetNetChainByName( m_schematic->GetHighlightedNetChain() ) )
+        {
+            if( sig->GetTerminalPinA() == aPin->m_Uuid || sig->GetTerminalPinB() == aPin->m_Uuid )
+            {
+                CIRCLE c = cache.GetDanglingIndicator();
+                COLOR4D emphasis = sig->GetColor() != COLOR4D::UNSPECIFIED
+                                        ? sig->GetColor()
+                                        : color.Brightened( 0.5 );
+                m_gal->SetStrokeColor( emphasis );
+                m_gal->SetIsFill( false );
+                m_gal->SetIsStroke( true );
+                m_gal->SetLineWidth( getShadowWidth( true ) );
+                m_gal->DrawCircle( c.Center, c.Radius );
+            }
+        }
+    }
 }
 
 
@@ -1791,7 +1813,7 @@ void SCH_PAINTER::draw( const SCH_LINE* aLine, int aLayer )
 
     if( aLine->Schematic() )    // Can be nullptr when run from the color selection panel
     {
-        hopOverScale = aLine->Schematic()->Settings().m_HopOverScale;
+        hopOverScale = aLine->Schematic()->Settings().GetHopOverScale();
         defaultLineWidth = aLine->Schematic()->Settings().m_DefaultLineWidth;
     }
 
@@ -1832,6 +1854,28 @@ void SCH_PAINTER::draw( const SCH_LINE* aLine, int aLayer )
             color = m_schSettings.GetLayerColor( LAYER_WIRE );
         else if( drawingBusses )
             color = m_schSettings.GetLayerColor( LAYER_BUS );
+    }
+
+    // If the user has highlighted a chain and this wire belongs to that chain,
+    // and the chain has a colour override, tint the wire in that colour so the
+    // highlighted chain is immediately visible.
+    if( drawingWires && !drawingShadows && m_schematic
+        && !m_schematic->GetHighlightedNetChain().IsEmpty() )
+    {
+        SCH_CONNECTION* conn = !aLine->IsConnectivityDirty() ? aLine->Connection() : nullptr;
+
+        if( conn && !conn->Name().IsEmpty() )
+        {
+            if( SCH_NETCHAIN* chain =
+                        m_schematic->ConnectionGraph()->GetNetChainForNet( conn->Name() ) )
+            {
+                if( chain->GetName() == m_schematic->GetHighlightedNetChain()
+                    && chain->GetColor() != COLOR4D::UNSPECIFIED )
+                {
+                    color = chain->GetColor().WithAlpha( color.a );
+                }
+            }
+        }
     }
 
     if( drawingNetColorHighlights )
@@ -1916,10 +1960,10 @@ void SCH_PAINTER::draw( const SCH_LINE* aLine, int aLayer )
 
     std::vector<VECTOR3I> curr_wire_shape;
 
-    if( aLine->IsWire() && hopOverScale > 0.0 )
+    if( ( aLine->IsWire() || aLine->IsBus() ) && hopOverScale > 0.0 )
     {
         double arcRadius = defaultLineWidth * hopOverScale;
-        curr_wire_shape = aLine->BuildWireWithHopShape( m_schematic->GetCurrentScreen(), arcRadius );
+        curr_wire_shape = aLine->BuildWireWithHopShape( aLine->Schematic()->GetCurrentScreen(), arcRadius );
     }
     else
     {
@@ -2060,6 +2104,17 @@ void SCH_PAINTER::draw( const SCH_SHAPE* aShape, int aLayer, bool aDimmed )
                     break;
                 }
 
+                case SHAPE_T::ELLIPSE:
+                    m_gal->DrawEllipse( shape->GetEllipseCenter(), shape->GetEllipseMajorRadius(),
+                                        shape->GetEllipseMinorRadius(), shape->GetEllipseRotation() );
+                    break;
+
+                case SHAPE_T::ELLIPSE_ARC:
+                    m_gal->DrawEllipseArc( shape->GetEllipseCenter(), shape->GetEllipseMajorRadius(),
+                                           shape->GetEllipseMinorRadius(), shape->GetEllipseRotation(),
+                                           shape->GetEllipseStartAngle(), shape->GetEllipseEndAngle() );
+                    break;
+
                 default:
                     UNIMPLEMENTED_FOR( shape->SHAPE_T_asString() );
                 }
@@ -2162,19 +2217,39 @@ void SCH_PAINTER::draw( const SCH_SHAPE* aShape, int aLayer, bool aDimmed )
             }
             else
             {
-                std::vector<SHAPE*> shapes = aShape->MakeEffectiveShapes( true );
+                std::vector<SHAPE*> shapes;
+
+                // For ellipses pass the SHAPE_ELLIPSE directly so the dash pattern is
+                // continuous around the curve.  Otherwise MakeEffectiveShapes returns
+                // many SHAPE_SEGMENTs and STROKE_PARAMS restarts the pattern on each.
+                if( aShape->GetShape() == SHAPE_T::ELLIPSE )
+                {
+                    shapes.push_back( new SHAPE_ELLIPSE( aShape->GetEllipseCenter(), aShape->GetEllipseMajorRadius(),
+                                                         aShape->GetEllipseMinorRadius(),
+                                                         aShape->GetEllipseRotation() ) );
+                }
+                else if( aShape->GetShape() == SHAPE_T::ELLIPSE_ARC )
+                {
+                    shapes.push_back( new SHAPE_ELLIPSE( aShape->GetEllipseCenter(), aShape->GetEllipseMajorRadius(),
+                                                         aShape->GetEllipseMinorRadius(), aShape->GetEllipseRotation(),
+                                                         aShape->GetEllipseStartAngle(),
+                                                         aShape->GetEllipseEndAngle() ) );
+                }
+                else
+                {
+                    shapes = aShape->MakeEffectiveShapes( true );
+                }
 
                 for( SHAPE* shape : shapes )
                 {
                     STROKE_PARAMS::Stroke( shape, lineStyle, KiROUND( lineWidth ), &m_schSettings,
-                            [this]( const VECTOR2I& a, const VECTOR2I& b )
-                            {
-                                // DrawLine has problem with 0 length lines so enforce minimum
-                                if( a == b )
-                                    m_gal->DrawLine( a+1, b );
-                                else
-                                    m_gal->DrawLine( a, b );
-                            } );
+                                           [this]( const VECTOR2I& a, const VECTOR2I& b )
+                                           {
+                                               if( a == b )
+                                                   m_gal->DrawLine( a + 1, b );
+                                               else
+                                                   m_gal->DrawLine( a, b );
+                                           } );
                 }
 
                 for( SHAPE* shape : shapes )
@@ -3042,8 +3117,13 @@ void SCH_PAINTER::draw( const SCH_FIELD* aField, int aLayer, bool aDimmed )
             drawLocalPowerIcon( pos, size, rotated, color, drawingShadows, aField->IsBrightened() );
     }
 
-    // Draw anchor or umbilical line
-    if( aField->IsMoving() && m_schematic )
+    // Draw anchor or umbilical line.  The umbilical line shows independent motion of a field
+    // relative to its parent; suppress it when the parent is also moving (e.g. dragging the
+    // whole label) or its endpoints would span the entire label, drawing a long stray line.
+    SCH_ITEM* fieldParent = dynamic_cast<SCH_ITEM*>( aField->GetParent() );
+    bool      parentMoving = fieldParent && fieldParent->IsMoving();
+
+    if( aField->IsMoving() && !parentMoving && m_schematic )
     {
         VECTOR2I parentPos = aField->GetParentPosition();
 
@@ -3051,7 +3131,7 @@ void SCH_PAINTER::draw( const SCH_FIELD* aField, int aLayer, bool aDimmed )
         m_gal->SetStrokeColor( getRenderColor( aField, LAYER_SCHEMATIC_ANCHOR, drawingShadows ) );
         m_gal->DrawLine( aField->GetPosition(), parentPos );
     }
-    else if( aField->IsSelected() )
+    else if( aField->IsSelected() && !parentMoving )
     {
         drawAnchor( aField->GetPosition(), drawingShadows );
     }
@@ -3210,7 +3290,7 @@ void SCH_PAINTER::draw( const SCH_HIERLABEL* aLabel, int aLayer, bool aDimmed )
     m_gal->SetStrokeColor( color );
     m_gal->DrawPolyline( d_pts );
 
-    draw( static_cast<const SCH_TEXT*>( aLabel ), aLayer, false );
+    draw( static_cast<const SCH_TEXT*>( aLabel ), aLayer, aDimmed );
 }
 
 
@@ -3342,7 +3422,7 @@ void SCH_PAINTER::draw( const SCH_SHEET* aSheet, int aLayer )
 
     if( aLayer == LAYER_SHEET || aLayer == LAYER_SELECTION_SHADOWS )
     {
-        m_gal->SetStrokeColor( getRenderColor( aSheet, LAYER_SHEET, drawingShadows ) );
+        m_gal->SetStrokeColor( getRenderColor( aSheet, LAYER_SHEET, drawingShadows, DNP ) );
         m_gal->SetIsStroke( true );
         m_gal->SetLineWidth( getLineWidth( aSheet, drawingShadows ) );
         m_gal->SetIsFill( false );

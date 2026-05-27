@@ -84,6 +84,9 @@ public:
     /// Remove all connections belonging to a single net from the active selection
     static TOOL_ACTION deselectNet;
 
+    /// Select all connections belonging to every net in the current item's net chain.
+    static TOOL_ACTION selectNetChain;
+
     /// Select unconnected footprints from ratsnest of selection
     static TOOL_ACTION selectUnconnected;
 
@@ -196,6 +199,8 @@ public:
     static TOOL_ACTION drawPolygon;
     static TOOL_ACTION drawRectangle;
     static TOOL_ACTION drawCircle;
+    static TOOL_ACTION drawEllipse;
+    static TOOL_ACTION drawEllipseArc;
     static TOOL_ACTION drawArc;
     static TOOL_ACTION drawBezier;
     static TOOL_ACTION placePoint;
@@ -215,6 +220,7 @@ public:
     static TOOL_ACTION drawLeader;
     static TOOL_ACTION placeBarcode;
     static TOOL_ACTION drawZone;
+    static TOOL_ACTION drawCopperThievingZone;
     static TOOL_ACTION drawVia;
     static TOOL_ACTION drawRuleArea;
     static TOOL_ACTION drawZoneCutout;
@@ -414,6 +420,12 @@ public:
     /// Duplicate zone onto another layer
     static TOOL_ACTION zoneDuplicate;
 
+    // Zone priority actions
+    static TOOL_ACTION zonePriorityMoveToTop;
+    static TOOL_ACTION zonePriorityRaise;
+    static TOOL_ACTION zonePriorityLower;
+    static TOOL_ACTION zonePriorityMoveToBottom;
+
     /// Scripting Actions
     static TOOL_ACTION pluginsShowFolder;
 
@@ -454,6 +466,7 @@ public:
     static TOOL_ACTION cleanupGraphics;
     static TOOL_ACTION updateFootprint;
     static TOOL_ACTION updateFootprints;
+    static TOOL_ACTION migrate3DModels;
     static TOOL_ACTION changeFootprint;
     static TOOL_ACTION changeFootprints;
     static TOOL_ACTION swapLayers;
@@ -467,7 +480,6 @@ public:
 
     static TOOL_ACTION showLayersManager;
     static TOOL_ACTION showNetInspector;
-    static TOOL_ACTION showPythonConsole;
     static TOOL_ACTION zonesManager;
 
     // Design Block management
@@ -584,6 +596,8 @@ public:
     static TOOL_ACTION toggleNetHighlight;      // Toggles between highlight off and highlight on
     static TOOL_ACTION highlightNetSelection;   // Turns on highlight and takes net from selection
     static TOOL_ACTION highlightItem;           // Select component via cross-probe
+    static TOOL_ACTION highlightNetChain;
+    static TOOL_ACTION setTerminalPad;
 
     // Ratsnest
     static TOOL_ACTION hideNetInRatsnest;
@@ -623,8 +637,6 @@ public:
     /// Footprint wizard frame actions:
     static TOOL_ACTION showWizards;
     static TOOL_ACTION resetWizardPrms;
-    static TOOL_ACTION selectPreviousWizardPage;
-    static TOOL_ACTION selectNextWizardPage;
     static TOOL_ACTION exportFpToEditor;
 };
 

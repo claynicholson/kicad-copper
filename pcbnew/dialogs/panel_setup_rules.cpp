@@ -24,6 +24,7 @@
 #include <bitmaps.h>
 #include <common.h>
 #include <confirm.h>
+#include <kiplatform/io.h>
 #include <widgets/std_bitmap_button.h>
 #include <widgets/paged_dialog.h>
 #include <pcb_edit_frame.h>
@@ -151,6 +152,9 @@ void PANEL_SETUP_RULES::OnContextMenu(wxMouseEvent &event)
     menu.Append( wxID_ZOOM_IN, _( "Zoom In" ) );
     menu.Append( wxID_ZOOM_OUT, _( "Zoom Out" ) );
 
+    menu.AppendSeparator();
+
+    menu.Append( 6, _( "Show Matching Items" ) );
 
     switch( GetPopupMenuSelectionFromUser( menu ) )
     {
@@ -191,7 +195,220 @@ void PANEL_SETUP_RULES::OnContextMenu(wxMouseEvent &event)
     case wxID_ZOOM_OUT:
         m_textEditor->ZoomOut();
         break;
+
+    case 6: OnShowMatching(); break;
     }
+}
+
+
+void PANEL_SETUP_RULES::OnShowMatching()
+{
+    m_errorsReport->Clear();
+
+    if( m_frame->Prj().IsNullProject() )
+    {
+        m_errorsReport->Report( _( "Cannot show matching items without an open project." ), RPT_SEVERITY_ERROR );
+        m_errorsReport->Flush();
+        return;
+    }
+
+    const wxString text = m_textEditor->GetText();
+    const int      cursorPos = m_textEditor->GetCurrentPos();
+    const int      cursorLine = m_textEditor->LineFromPosition( cursorPos ) + 1;
+    const int      cursorCol = cursorPos - m_textEditor->PositionFromLine( cursorLine - 1 ) + 1;
+
+    std::vector<std::shared_ptr<DRC_RULE>> rules;
+
+    try
+    {
+        std::function<bool( wxString* )> resolver = [&]( wxString* token ) -> bool
+        {
+            return m_frame->GetBoard()->ResolveTextVar( token, 0 );
+        };
+
+        wxString rulesText = m_frame->GetBoard()->ConvertCrossReferencesToKIIDs( text );
+        rulesText = ExpandTextVars( rulesText, &resolver );
+
+        DRC_RULES_PARSER parser( rulesText, _( "DRC rules" ) );
+        parser.Parse( rules, m_errorsReport );
+    }
+    catch( PARSE_ERROR& pe )
+    {
+        m_errorsReport->Report( wxString::Format( wxT( "%s <a href='%d:%d'>%s</a>%s" ), _( "ERROR:" ), pe.lineNumber,
+                                                  pe.byteIndex, pe.ParseProblem(), wxEmptyString ),
+                                RPT_SEVERITY_ERROR );
+        m_errorsReport->Flush();
+        return;
+    }
+
+    wxString targetRuleName;
+    bool     foundRule = false;
+
+    try
+    {
+        std::string     utf8( text.mb_str( wxConvUTF8 ) );
+        DRC_RULES_LEXER lex( utf8, _( "DRC rules" ) );
+
+        struct RuleFrame
+        {
+            int      depth;
+            int      startLine;
+            int      startCol;
+            wxString name;
+        };
+
+        std::vector<RuleFrame> ruleStack;
+        int                    depth = 0;
+
+        for( ;; )
+        {
+            int tok = lex.NextTok();
+
+            if( tok == DSN_EOF )
+                break;
+
+            if( tok == DSN_LEFT )
+            {
+                int leftLine = lex.CurLineNumber();
+                int leftCol = lex.CurOffset();
+
+                depth++;
+
+                int sub = lex.NextTok();
+
+                if( sub == DRCRULE_T::T_rule )
+                {
+                    wxString name;
+                    int      nameTok = lex.NextTok();
+
+                    if( DSNLEXER::IsSymbol( nameTok ) )
+                        name = wxString::FromUTF8( lex.CurText() );
+
+                    ruleStack.push_back( { depth, leftLine, leftCol, name } );
+                }
+                else if( sub == DSN_LEFT )
+                {
+                    depth++;
+                }
+                else if( sub == DSN_RIGHT )
+                {
+                    depth--;
+                }
+                else if( sub == DSN_EOF )
+                {
+                    break;
+                }
+            }
+            else if( tok == DSN_RIGHT )
+            {
+                if( !ruleStack.empty() && ruleStack.back().depth == depth )
+                {
+                    RuleFrame opened = ruleStack.back();
+                    ruleStack.pop_back();
+
+                    int endLine = lex.CurLineNumber();
+                    int endCol = lex.CurOffset();
+
+                    bool afterStart = cursorLine > opened.startLine
+                                      || ( cursorLine == opened.startLine && cursorCol >= opened.startCol );
+                    bool beforeEnd = cursorLine < endLine || ( cursorLine == endLine && cursorCol <= endCol );
+
+                    if( afterStart && beforeEnd )
+                    {
+                        targetRuleName = opened.name;
+                        foundRule = true;
+                        break;
+                    }
+                }
+
+                depth--;
+            }
+        }
+    }
+    catch( IO_ERROR& e )
+    {
+        m_errorsReport->Report( wxString::Format( _( "Could not scan rules text: %s" ), e.What() ),
+                                RPT_SEVERITY_ERROR );
+        m_errorsReport->Flush();
+        return;
+    }
+
+    if( !foundRule )
+    {
+        m_errorsReport->Report( _( "Place the cursor inside a (rule ...) block to show matching "
+                                   "items." ),
+                                RPT_SEVERITY_ACTION );
+        m_errorsReport->Flush();
+        return;
+    }
+
+    if( targetRuleName.IsEmpty() )
+    {
+        m_errorsReport->Report( _( "The rule under the cursor has no name; add a name to identify "
+                                   "it." ),
+                                RPT_SEVERITY_ERROR );
+        m_errorsReport->Flush();
+        return;
+    }
+
+    std::shared_ptr<DRC_RULE> targetRule;
+
+    for( const auto& rule : rules )
+    {
+        if( rule->m_Name == targetRuleName )
+        {
+            targetRule = rule;
+            break;
+        }
+    }
+
+    if( !targetRule )
+    {
+        m_errorsReport->Report( wxString::Format( _( "Rule '%s' could not be located after "
+                                                     "parsing." ),
+                                                  targetRuleName ),
+                                RPT_SEVERITY_ERROR );
+        m_errorsReport->Flush();
+        return;
+    }
+
+    if( targetRule->m_Condition && !targetRule->m_Condition->GetExpression().IsEmpty()
+        && !targetRule->m_Condition->Compile( m_errorsReport ) )
+    {
+        m_errorsReport->Flush();
+        return;
+    }
+
+    std::shared_ptr<DRC_ENGINE> engine = m_frame->GetBoard()->GetDesignSettings().m_DRCEngine;
+
+    if( !engine )
+    {
+        m_errorsReport->Report( _( "DRC engine not available." ), RPT_SEVERITY_ERROR );
+        m_errorsReport->Flush();
+        return;
+    }
+
+    std::vector<BOARD_ITEM*> allMatches = engine->GetItemsMatchingRule( targetRule, m_errorsReport );
+
+    std::vector<BOARD_ITEM*> matches;
+
+    for( BOARD_ITEM* item : allMatches )
+    {
+        switch( item->Type() )
+        {
+        case PCB_NETINFO_T:
+        case PCB_GENERATOR_T:
+        case PCB_GROUP_T: continue;
+        default: matches.push_back( item ); break;
+        }
+    }
+
+    m_frame->FocusOnItems( matches );
+
+    m_errorsReport->Report(
+            wxString::Format( _( "Rule '%s': %zu matching item(s)." ), targetRule->m_Name, matches.size() ),
+            RPT_SEVERITY_INFO );
+    m_errorsReport->Flush();
 }
 
 
@@ -508,13 +725,15 @@ void PANEL_SETUP_RULES::onScintillaCharAdded( wxStyledTextEvent &aEvent )
         }
         else if( sexprs.top() == wxT( "disallow" ) || isDisallowToken( sexprs.top() ) )
         {
-            tokens = wxT( "buried_via|"
+            tokens = wxT( "blind_via|"
+                          "buried_via|"
                           "footprint|"
                           "graphic|"
                           "hole|"
                           "micro_via|"
                           "pad|"
                           "text|"
+                          "through_via|"
                           "track|"
                           "via|"
                           "zone" );
@@ -905,13 +1124,20 @@ bool PANEL_SETUP_RULES::TransferDataFromWindow()
 
     wxString rulesFilepath = m_frame->GetDesignRulesPath();
 
+    wxString    content = m_textEditor->GetText();
+    std::string utf8 = std::string( content.mb_str( wxConvUTF8 ) );
+    wxString    writeError;
+
+    if( !KIPLATFORM::IO::AtomicWriteFile( rulesFilepath, utf8.data(), utf8.size(), &writeError ) )
+    {
+        wxLogError( _( "Cannot save design rules to '%s': %s" ), rulesFilepath, writeError );
+        return false;
+    }
+
     try
     {
-        if( m_textEditor->SaveFile( rulesFilepath ) )
-        {
-            m_frame->GetBoard()->GetDesignSettings().m_DRCEngine->InitEngine( rulesFilepath );
-            return true;
-        }
+        m_frame->GetBoard()->GetDesignSettings().m_DRCEngine->InitEngine( rulesFilepath );
+        return true;
     }
     catch( PARSE_ERROR& )
     {
@@ -919,8 +1145,6 @@ bool PANEL_SETUP_RULES::TransferDataFromWindow()
         // saved them so we can allow an exit.
         return true;
     }
-
-    return false;
 }
 
 

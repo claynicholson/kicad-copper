@@ -192,13 +192,11 @@ int CLI::API_SERVER_COMMAND::doPerform( KIWAY& aKiway )
         }
         else if( openDocumentType == types::DOCTYPE_SCHEMATIC )
         {
-            wxFileName schPath( openProjectPath );
-            schPath.SetExt( FILEEXT::KiCadSchematicFileExtension );
-            doc->set_schematic_filename( schPath.GetFullName().ToStdString() );
+            // TODO(JE) stateful sheet path handling?
         }
 
-        doc->mutable_project()->set_name( project.GetProjectName().ToStdString() );
-        doc->mutable_project()->set_path( project.GetProjectDirectory().ToStdString() );
+        doc->mutable_project()->set_name( project.GetProjectName().ToUTF8() );
+        doc->mutable_project()->set_path( project.GetProjectPath().ToUTF8() );
 
         return response;
     };
@@ -235,9 +233,10 @@ int CLI::API_SERVER_COMMAND::doPerform( KIWAY& aKiway )
                 requestedName = wxString::FromUTF8( aRequest.document().board_filename() );
             }
             else if( openDocumentType == types::DOCTYPE_SCHEMATIC
-                     && !aRequest.document().schematic_filename().empty() )
+                     && !aRequest.document().project().path().empty() )
             {
-                requestedName = wxString::FromUTF8( aRequest.document().schematic_filename() );
+                requestedName = wxString::FromUTF8( aRequest.document().project().name() )
+                                + FILEEXT::KiCadSchematicFileExtension;
             }
 
             if( !requestedName.IsEmpty() && expectedPath.GetFullName() != requestedName )

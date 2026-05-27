@@ -31,7 +31,11 @@
 #include <eda_draw_frame.h>
 #include <gr_basic.h>
 #include <geometry/geometry_utils.h>
+#include <geometry/shape_ellipse.h>
+#include <geometry/shape_line_chain.h>
 #include <schematic.h>
+#include <api/api_utils.h>
+#include <api/schematic/schematic_types.pb.h>
 #include <sch_shape.h>
 #include <properties/property.h>
 #include <properties/property_mgr.h>
@@ -49,6 +53,41 @@ SCH_SHAPE::SCH_SHAPE( SHAPE_T aShape, SCH_LAYER_ID aLayer, int aLineWidth, FILL_
 EDA_ITEM* SCH_SHAPE::Clone() const
 {
     return new SCH_SHAPE( *this );
+}
+
+
+void SCH_SHAPE::Serialize( google::protobuf::Any& aContainer ) const
+{
+    using namespace kiapi::common;
+
+    kiapi::schematic::types::SchematicGraphicShape msg;
+    google::protobuf::Any any;
+
+    msg.mutable_id()->set_value( m_Uuid.AsStdString() );
+    msg.set_locked( IsLocked() ? types::LockedState::LS_LOCKED : types::LockedState::LS_UNLOCKED );
+
+    EDA_SHAPE::Serialize( any, schIUScale );
+    any.UnpackTo( msg.mutable_shape() );
+
+    aContainer.PackFrom( msg );
+}
+
+
+bool SCH_SHAPE::Deserialize( const google::protobuf::Any& aContainer )
+{
+    using namespace kiapi::common;
+
+    kiapi::schematic::types::SchematicGraphicShape msg;
+
+    if( !aContainer.UnpackTo( &msg ) )
+        return false;
+
+    const_cast<KIID&>( m_Uuid ) = KIID( msg.id().value() );
+    SetLocked( msg.locked() == types::LockedState::LS_LOCKED );
+
+    google::protobuf::Any any;
+    any.PackFrom( msg.shape() );
+    return EDA_SHAPE::Deserialize( any, schIUScale );
 }
 
 
@@ -224,6 +263,17 @@ void SCH_SHAPE::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& 
         for( const VECTOR2I& pt : m_bezierPoints )
             ptList.push_back( renderSettings->TransformCoordinate( pt ) + aOffset );
     }
+    else if( GetShape() == SHAPE_T::ELLIPSE || GetShape() == SHAPE_T::ELLIPSE_ARC )
+    {
+        ptList.clear();
+
+        SHAPE_ELLIPSE e = buildShapeEllipse();
+
+        SHAPE_LINE_CHAIN chain = e.ConvertToPolyline( getMaxError() );
+
+        for( int ii = 0; ii < chain.PointCount(); ++ii )
+            ptList.push_back( renderSettings->TransformCoordinate( chain.CPoint( ii ) ) + aOffset );
+    }
 
     COLOR4D    color = GetStroke().GetColor();
     COLOR4D    bg = renderSettings->GetBackgroundColor();
@@ -340,6 +390,15 @@ void SCH_SHAPE::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& 
         aPlotter->PlotPoly( ptList, fill, pen_size, nullptr );
         break;
 
+    case SHAPE_T::ELLIPSE:
+        if( !ptList.empty() )
+            ptList.push_back( ptList.front() );
+
+        aPlotter->PlotPoly( ptList, fill, pen_size, nullptr );
+        break;
+
+    case SHAPE_T::ELLIPSE_ARC: aPlotter->PlotPoly( ptList, FILL_T::NO_FILL, pen_size, nullptr ); break;
+
     default:
         UNIMPLEMENTED_FOR( SHAPE_T_asString() );
     }
@@ -405,6 +464,16 @@ wxString SCH_SHAPE::GetItemDescription( UNITS_PROVIDER* aUnitsProvider, bool aFu
         return wxString::Format( _( "Bezier Curve, %d points" ),
                                  int( m_bezierPoints.size() ) );
 
+    case SHAPE_T::ELLIPSE:
+        return wxString::Format( _( "Ellipse, %s x %s" ),
+                                 aUnitsProvider->MessageTextFromValue( GetEllipseMajorRadius() ),
+                                 aUnitsProvider->MessageTextFromValue( GetEllipseMinorRadius() ) );
+
+    case SHAPE_T::ELLIPSE_ARC:
+        return wxString::Format( _( "Elliptical Arc, %s x %s" ),
+                                 aUnitsProvider->MessageTextFromValue( GetEllipseMajorRadius() ),
+                                 aUnitsProvider->MessageTextFromValue( GetEllipseMinorRadius() ) );
+
     default:
         UNIMPLEMENTED_FOR( SHAPE_T_asString() );
         return wxEmptyString;
@@ -422,6 +491,8 @@ BITMAPS SCH_SHAPE::GetMenuImage() const
     case SHAPE_T::RECTANGLE: return BITMAPS::add_rectangle;
     case SHAPE_T::POLY:      return BITMAPS::add_graphical_segments;
     case SHAPE_T::BEZIER:    return BITMAPS::add_bezier;
+    case SHAPE_T::ELLIPSE: return BITMAPS::add_ellipse;
+    case SHAPE_T::ELLIPSE_ARC: return BITMAPS::add_ellipse_arc;
 
     default:
         UNIMPLEMENTED_FOR( SHAPE_T_asString() );
@@ -558,16 +629,29 @@ static struct SCH_SHAPE_DESC
         propMgr.InheritsAfter( TYPE_HASH( SCH_SHAPE ), TYPE_HASH( SCH_ITEM ) );
         propMgr.InheritsAfter( TYPE_HASH( SCH_SHAPE ), TYPE_HASH( EDA_SHAPE ) );
 
-        // Only polygons have meaningful Position properties.
-        // On other shapes, these are duplicates of the Start properties.
-        auto isPolygon =
-                []( INSPECTABLE* aItem ) -> bool
-                {
-                    if( SCH_SHAPE* shape = dynamic_cast<SCH_SHAPE*>( aItem ) )
-                        return shape->GetShape() == SHAPE_T::POLY;
+        // Polygons and ellipses have meaningful Position properties (first vertex / center).
+        // On other shapes, Position duplicates the Start properties.
+        auto isPolygonOrEllipse = []( INSPECTABLE* aItem ) -> bool
+        {
+            if( SCH_SHAPE* shape = dynamic_cast<SCH_SHAPE*>( aItem ) )
+            {
+                const SHAPE_T t = shape->GetShape();
+                return t == SHAPE_T::POLY || t == SHAPE_T::ELLIPSE || t == SHAPE_T::ELLIPSE_ARC;
+            }
+            return false;
+        };
 
-                    return false;
-                };
+        // Hide Start/End for shapes that don't use them directly
+        // (polygon uses first vertex via Position; circle uses Center; ellipse uses Center + radii).
+        auto isNotPolygonOrCircleOrEllipse = []( INSPECTABLE* aItem ) -> bool
+        {
+            if( SCH_SHAPE* shape = dynamic_cast<SCH_SHAPE*>( aItem ) )
+            {
+                const SHAPE_T t = shape->GetShape();
+                return t != SHAPE_T::POLY && t != SHAPE_T::CIRCLE && t != SHAPE_T::ELLIPSE && t != SHAPE_T::ELLIPSE_ARC;
+            }
+            return true;
+        };
 
         auto isSymbolItem =
                 []( INSPECTABLE* aItem ) -> bool
@@ -601,10 +685,28 @@ static struct SCH_SHAPE_DESC
                     return true;
                 };
 
-        propMgr.OverrideAvailability( TYPE_HASH( SCH_SHAPE ), TYPE_HASH( SCH_ITEM ),
-                                      _HKI( "Position X" ), isPolygon );
-        propMgr.OverrideAvailability( TYPE_HASH( SCH_SHAPE ), TYPE_HASH( SCH_ITEM ),
-                                      _HKI( "Position Y" ), isPolygon );
+        const wxString shapeProps = _HKI( "Shape Properties" );
+
+        propMgr.AddProperty( new PROPERTY<SCH_SHAPE, int>( _HKI( "Position X" ), &SCH_SHAPE::SetPositionX,
+                                                           &SCH_SHAPE::GetPositionX, PROPERTY_DISPLAY::PT_COORD,
+                                                           ORIGIN_TRANSFORMS::ABS_X_COORD ),
+                             shapeProps )
+                .SetAvailableFunc( isPolygonOrEllipse );
+
+        propMgr.AddProperty( new PROPERTY<SCH_SHAPE, int>( _HKI( "Position Y" ), &SCH_SHAPE::SetPositionY,
+                                                           &SCH_SHAPE::GetPositionY, PROPERTY_DISPLAY::PT_COORD,
+                                                           ORIGIN_TRANSFORMS::ABS_Y_COORD ),
+                             shapeProps )
+                .SetAvailableFunc( isPolygonOrEllipse );
+
+        propMgr.OverrideAvailability( TYPE_HASH( SCH_SHAPE ), TYPE_HASH( EDA_SHAPE ), _HKI( "Start X" ),
+                                      isNotPolygonOrCircleOrEllipse );
+        propMgr.OverrideAvailability( TYPE_HASH( SCH_SHAPE ), TYPE_HASH( EDA_SHAPE ), _HKI( "Start Y" ),
+                                      isNotPolygonOrCircleOrEllipse );
+        propMgr.OverrideAvailability( TYPE_HASH( SCH_SHAPE ), TYPE_HASH( EDA_SHAPE ), _HKI( "End X" ),
+                                      isNotPolygonOrCircleOrEllipse );
+        propMgr.OverrideAvailability( TYPE_HASH( SCH_SHAPE ), TYPE_HASH( EDA_SHAPE ), _HKI( "End Y" ),
+                                      isNotPolygonOrCircleOrEllipse );
 
         propMgr.OverrideAvailability( TYPE_HASH( SCH_SHAPE ), TYPE_HASH( EDA_SHAPE ),
                                       _HKI( "Filled" ), isSchematicItem );

@@ -34,7 +34,6 @@
 #include "tools/align_distribute_tool.h"
 #include "tools/pcb_point_editor.h"
 #include "tools/pcb_selection_tool.h"
-#include <python/scripting/pcb_scripting_tool.h>
 #include <bitmaps.h>
 #include <board.h>
 #include <project/net_settings.h>
@@ -1239,7 +1238,6 @@ void FOOTPRINT_EDIT_FRAME::setupTools()
     m_toolManager->RegisterTool( new PCB_VIEWER_TOOLS );
     m_toolManager->RegisterTool( new PCB_GROUP_TOOL );
     m_toolManager->RegisterTool( new CONVERT_TOOL );
-    m_toolManager->RegisterTool( new SCRIPTING_TOOL );
     m_toolManager->RegisterTool( new PROPERTIES_TOOL );
     m_toolManager->RegisterTool( new EMBED_TOOL );
 
@@ -1377,6 +1375,8 @@ void FOOTPRINT_EDIT_FRAME::setupUIConditions()
 
     mgr->SetConditions( ACTIONS::zoomTool,               CHECK( cond.CurrentTool( ACTIONS::zoomTool ) ) );
     mgr->SetConditions( ACTIONS::selectionTool,          CHECK( cond.CurrentTool( ACTIONS::selectionTool ) ) );
+    mgr->SetConditions( ACTIONS::selectSetRect,          CHECK( cond.CurrentTool( ACTIONS::selectionTool ) ) );
+    mgr->SetConditions( ACTIONS::selectSetLasso,         CHECK( cond.CurrentTool( ACTIONS::selectionTool ) ) );
     // clang-format on
 
     auto highContrastCond =
@@ -1464,6 +1464,8 @@ void FOOTPRINT_EDIT_FRAME::setupUIConditions()
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawLine );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawRectangle );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawCircle );
+    CURRENT_EDIT_TOOL( PCB_ACTIONS::drawEllipse );
+    CURRENT_EDIT_TOOL( PCB_ACTIONS::drawEllipseArc );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawArc );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawPolygon );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawBezier );
@@ -1505,6 +1507,7 @@ void FOOTPRINT_EDIT_FRAME::ActivateGalCanvas()
 void FOOTPRINT_EDIT_FRAME::CommonSettingsChanged( int aFlags )
 {
     PCB_BASE_EDIT_FRAME::CommonSettingsChanged( aFlags );
+    m_appearancePanel->CommonSettingsChanged( aFlags );
 
     if( FOOTPRINT_EDITOR_SETTINGS* cfg = GetAppSettings<FOOTPRINT_EDITOR_SETTINGS>( "fpedit" ) )
     {

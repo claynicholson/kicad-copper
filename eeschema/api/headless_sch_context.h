@@ -52,6 +52,8 @@ public:
 
     bool CanAcceptApiCommands() const override { return true; }
 
+    std::optional<SCH_SHEET_PATH> GetCurrentSheet() const override { return std::nullopt; }
+
 private:
     // All owned by caller (the kiface)
     SCHEMATIC*                    m_schematic;

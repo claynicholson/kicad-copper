@@ -2014,6 +2014,11 @@ std::shared_ptr<EDIT_POINTS> PCB_POINT_EDITOR::makePoints( EDA_ITEM* aItem )
                                                                                  shape->GetMaxError() );
             break;
 
+        case SHAPE_T::ELLIPSE:
+        case SHAPE_T::ELLIPSE_ARC:
+            m_editorBehavior = std::make_unique<EDA_ELLIPSE_POINT_EDIT_BEHAVIOR>( *shape );
+            break;
+
         default:        // suppress warnings
             break;
         }
@@ -2300,8 +2305,10 @@ int PCB_POINT_EDITOR::OnSelectionChange( const TOOL_EVENT& aEvent )
                 }
                 else
                 {
+                    VECTOR2I origin = m_altConstraint ? m_altConstrainer.GetPosition() : m_original.GetPosition();
+
                     grid.SetSnapLineDirections( directions );
-                    grid.SetSnapLineOrigin( m_original.GetPosition() );
+                    grid.SetSnapLineOrigin( origin );
                     grid.SetSnapLineEnd( std::nullopt );
                     haveSnapLineDirections = true;
                 }
@@ -2387,7 +2394,10 @@ int PCB_POINT_EDITOR::OnSelectionChange( const TOOL_EVENT& aEvent )
                 updateSnapLineDirections();
             }
 
-            bool need_constraint = Is45Limited() || Is90Limited();
+            EDIT_LINE* line = dynamic_cast<EDIT_LINE*>( m_editedPoint );
+            bool       ctrlHeld = evt->Modifier( MD_CTRL );
+
+            bool need_constraint = ( Is45Limited() || Is90Limited() ) && !ctrlHeld;
 
             if( isConstrained != need_constraint )
             {
@@ -2397,8 +2407,6 @@ int PCB_POINT_EDITOR::OnSelectionChange( const TOOL_EVENT& aEvent )
             }
 
             // For polygon lines, Ctrl temporarily toggles between CONVERGING and FIXED_LENGTH modes
-            EDIT_LINE* line = dynamic_cast<EDIT_LINE*>( m_editedPoint );
-            bool       ctrlHeld = evt->Modifier( MD_CTRL );
 
             if( line )
             {
@@ -2449,22 +2457,66 @@ int PCB_POINT_EDITOR::OnSelectionChange( const TOOL_EVENT& aEvent )
             {
                 if( grid.GetUseGrid() )
                 {
-                    VECTOR2I gridPt = grid.BestSnapAnchor( pos, {}, grid.GetItemGrid( item ), { item } );
+                    EC_CONVERGING* convergingConstraint =
+                            line ? dynamic_cast<EC_CONVERGING*>( line->GetConstraint() ) : nullptr;
 
-                    VECTOR2I last = m_editedPoint->GetPosition();
-                    VECTOR2I delta = pos - last;
-                    VECTOR2I deltaGrid = gridPt - grid.BestSnapAnchor( last, {}, grid.GetItemGrid( item ),
-                                                                       { item } );
+                    bool snappedAlongPerp = false;
 
-                    if( abs( delta.x ) > grid.GetGrid().x / 2 )
-                        pos.x = last.x + deltaGrid.x;
-                    else
-                        pos.x = last.x;
+                    if( convergingConstraint )
+                    {
+                        // For a polygon edge, the line moves only perpendicular to itself.
+                        // Snapping pos.x and pos.y independently to the axis-aligned grid
+                        // produces inconsistent perpendicular displacements when the edge is
+                        // tilted (different magnitudes depending on which axis crossed the
+                        // half-grid threshold first), causing the rendered edge to flicker
+                        // between two positions. Quantize the perpendicular displacement
+                        // directly so each grid step produces one stable line position.
+                        const VECTOR2I& origCenter = convergingConstraint->GetOriginalCenter();
+                        const VECTOR2I& perpVec = convergingConstraint->GetPerpVector();
+                        double perpLen = VECTOR2D( perpVec ).EuclideanNorm();
 
-                    if( abs( delta.y ) > grid.GetGrid().y / 2 )
-                        pos.y = last.y + deltaGrid.y;
-                    else
-                        pos.y = last.y;
+                        if( perpLen > 0 )
+                        {
+                            VECTOR2D perpUnit = VECTOR2D( perpVec ) / perpLen;
+                            VECTOR2D gridSize = grid.GetGridSize( grid.GetItemGrid( item ) );
+
+                            // Effective grid spacing along the perpendicular direction. For an
+                            // axis-aligned edge this reduces to the grid pitch on that axis.
+                            double step = std::hypot( gridSize.x * perpUnit.x,
+                                                      gridSize.y * perpUnit.y );
+
+                            if( step > 0 )
+                            {
+                                double offset = VECTOR2D( pos - origCenter ).Dot( perpUnit );
+                                double snapped = std::round( offset / step ) * step;
+                                VECTOR2D snappedPt = VECTOR2D( origCenter ) + perpUnit * snapped;
+                                pos = VECTOR2I( KiROUND( snappedPt.x ), KiROUND( snappedPt.y ) );
+                                snappedAlongPerp = true;
+                            }
+                        }
+                    }
+
+                    if( !snappedAlongPerp )
+                    {
+                        VECTOR2I gridPt = grid.BestSnapAnchor( pos, {}, grid.GetItemGrid( item ),
+                                                                { item } );
+
+                        VECTOR2I last = m_editedPoint->GetPosition();
+                        VECTOR2I delta = pos - last;
+                        VECTOR2I deltaGrid = gridPt - grid.BestSnapAnchor( last, {},
+                                                                           grid.GetItemGrid( item ),
+                                                                           { item } );
+
+                        if( abs( delta.x ) > grid.GetGrid().x / 2 )
+                            pos.x = last.x + deltaGrid.x;
+                        else
+                            pos.x = last.x;
+
+                        if( abs( delta.y ) > grid.GetGrid().y / 2 )
+                            pos.y = last.y + deltaGrid.y;
+                        else
+                            pos.y = last.y;
+                    }
                 }
             }
 
@@ -2483,7 +2535,11 @@ int PCB_POINT_EDITOR::OnSelectionChange( const TOOL_EVENT& aEvent )
                 }
             }
 
-            if( !m_angleSnapActive && m_editPoints->PointsSize() > 2 && !evt->Modifier( MD_SHIFT ) )
+            bool isFreePolygon =
+                    item->Type() == PCB_ZONE_T
+                    || ( item->Type() == PCB_SHAPE_T && static_cast<PCB_SHAPE*>( item )->GetShape() == SHAPE_T::POLY );
+
+            if( isFreePolygon && !m_angleSnapActive && m_editPoints->PointsSize() > 2 && !evt->Modifier( MD_SHIFT ) )
             {
                 int idx = getEditedPointIndex();
 
@@ -2500,10 +2556,23 @@ int PCB_POINT_EDITOR::OnSelectionChange( const TOOL_EVENT& aEvent )
 
                     if( std::abs( ang - snapAng ) < 2.0 )
                     {
-                        m_angleSnapPos = snapCorner( prev, next, pos, snapAng );
-                        m_angleSnapActive = true;
-                        m_stickyDisplacement = evt->Position() - m_angleSnapPos;
-                        pos = m_angleSnapPos;
+                        VECTOR2I snapped = snapCorner( prev, next, pos, snapAng );
+
+                        if( m_editedPoint->GetGridConstraint() == SNAP_TO_GRID && grid.GetSnap() )
+                        {
+                            VECTOR2I gridded = grid.BestSnapAnchor( snapped, {}, grid.GetItemGrid( item ), { item } );
+                            double   griddedAng = SEG( gridded, prev ).Angle( SEG( gridded, next ) ).AsDegrees();
+
+                            snapped = std::abs( griddedAng - snapAng ) < 2.0 ? gridded : pos;
+                        }
+
+                        if( snapped != pos )
+                        {
+                            m_angleSnapPos = snapped;
+                            m_angleSnapActive = true;
+                            m_stickyDisplacement = evt->Position() - m_angleSnapPos;
+                            pos = m_angleSnapPos;
+                        }
                     }
                 }
             }
@@ -2582,6 +2651,9 @@ int PCB_POINT_EDITOR::OnSelectionChange( const TOOL_EVENT& aEvent )
 
             if( haveSnapLineDirections )
             {
+                VECTOR2I snapOrigin = m_altConstraint ? m_altConstrainer.GetPosition() : m_original.GetPosition();
+                grid.SetSnapLineOrigin( snapOrigin );
+
                 if( constraintSnapped )
                     grid.SetSnapLineEnd( m_editedPoint->GetPosition() );
                 else

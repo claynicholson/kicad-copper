@@ -27,12 +27,16 @@ ignore
 inner
 layer
 length
+net_chain_length
+return_path
+stub_length
 max
 mechanical_clearance
 mechanical_hole_clearance
 micro_via
 min
 min_resolved_spokes
+net
 none
 npth
 opt

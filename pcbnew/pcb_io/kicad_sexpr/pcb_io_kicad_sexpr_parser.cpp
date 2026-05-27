@@ -62,6 +62,7 @@
 #include <font/font.h>
 #include <core/ignore.h>
 #include <netclass.h>
+#include <netinfo.h>
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 #include <pcb_plot_params_parser.h>
 #include <pcb_plot_params.h>
@@ -909,15 +910,19 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseRenderCache( EDA_TEXT* text )
 }
 
 
-FP_3DMODEL* PCB_IO_KICAD_SEXPR_PARSER::parse3DModel()
+FP_3DMODEL* PCB_IO_KICAD_SEXPR_PARSER::parse3DModel( bool aFileNameAlreadyParsed )
 {
-    wxCHECK_MSG( CurTok() == T_model, nullptr,
-                 wxT( "Cannot parse " ) + GetTokenString( CurTok() ) + wxT( " as FP_3DMODEL." ) );
+    if( !aFileNameAlreadyParsed )
+    {
+        wxCHECK_MSG( CurTok() == T_model, nullptr,
+                     wxT( "Cannot parse " ) + GetTokenString( CurTok() ) + wxT( " as FP_3DMODEL." ) );
+
+        NeedSYMBOLorNUMBER();
+    }
 
     T token;
 
     FP_3DMODEL* n3D = new FP_3DMODEL;
-    NeedSYMBOLorNUMBER();
     n3D->m_Filename = FromUTF8();
 
     for( token = NextTok();  token != T_RIGHT;  token = NextTok() )
@@ -1212,6 +1217,10 @@ BOARD* PCB_IO_KICAD_SEXPR_PARSER::parseBOARD_unchecked()
             parseNETINFO_ITEM();
             break;
 
+        case T_net_chains:
+            parseNET_CHAINS_SECTION();
+            break;
+
         case T_net_class:
             parseNETCLASS();
             m_board->m_LegacyNetclassesLoaded = true;
@@ -1223,6 +1232,8 @@ BOARD* PCB_IO_KICAD_SEXPR_PARSER::parseBOARD_unchecked()
         case T_gr_poly:
         case T_gr_circle:
         case T_gr_rect:
+        case T_gr_ellipse:
+        case T_gr_ellipse_arc:
             item = parsePCB_SHAPE( m_board );
             m_board->Add( item, ADD_MODE::BULK_APPEND, true );
             bulkAddedItems.push_back( item );
@@ -1352,6 +1363,20 @@ BOARD* PCB_IO_KICAD_SEXPR_PARSER::parseBOARD_unchecked()
             catch( const PARSE_ERROR& e )
             {
                 m_parseWarnings.push_back( e.What() );
+
+                // ParseEmbedded may have stopped mid-section. Skip remaining
+                // tokens so the board parser doesn't see them at the top level.
+                int depth = 0;
+
+                for( int tok = embeddedFilesParser.NextTok();
+                     tok != DSN_EOF;
+                     tok = embeddedFilesParser.NextTok() )
+                {
+                    if( tok == DSN_LEFT )
+                        depth++;
+                    else if( tok == DSN_RIGHT && --depth < 0 )
+                        break;
+                }
             }
 
             SyncLineReaderWith( embeddedFilesParser );
@@ -1505,6 +1530,26 @@ BOARD* PCB_IO_KICAD_SEXPR_PARSER::parseBOARD_unchecked()
     // Ensure all footprints have their embedded data from the board
     m_board->FixupEmbeddedData();
 
+    for( NETINFO_ITEM* net : m_board->GetNetInfo() )
+    {
+        // Remap terminal pad UUIDs through reset map if needed before resolving
+        for( int i = 0; i < 2; ++i )
+        {
+            const KIID& original = net->GetTerminalPadUuid( i );
+            if( original != niluuid )
+            {
+                auto it = m_resetKIIDMap.find( original.AsString() );
+                if( it != m_resetKIIDMap.end() )
+                {
+                    // Replace with canonical UUID after reset
+                    net->SetTerminalPadUuid( i, it->second );
+                }
+            }
+        }
+
+        net->ResolveTerminalPads( m_board );
+    }
+
     return m_board;
 }
 
@@ -1587,7 +1632,7 @@ void PCB_IO_KICAD_SEXPR_PARSER::resolveGroups( BOARD_ITEM* aParent )
             group->SetName( groupInfo->name );
         }
 
-        const_cast<KIID&>( group->m_Uuid ) = groupInfo->uuid;
+        group->SetUuidDirect( groupInfo->uuid );
 
         if( groupInfo->libId.IsValid() )
             group->SetDesignBlockLibId( groupInfo->libId );
@@ -1943,6 +1988,9 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseBoardStackup()
     int dielectric_idx = 1;     // the index of dielectric layers
     BOARD_STACKUP& stackup = m_board->GetDesignSettings().GetStackupDescriptor();
 
+    // Remove existing stack or we end up just appending to the existing stackup
+    stackup.RemoveAll();
+
     for( token = NextTok(); token != T_RIGHT; token = NextTok() )
     {
         if( CurTok() != T_LEFT )
@@ -2021,17 +2069,26 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseBoardStackup()
         else if( !( layerId & 1 ) )
             type = BS_ITEM_TYPE_COPPER;
 
-        BOARD_STACKUP_ITEM* item = nullptr;
+        std::unique_ptr<BOARD_STACKUP_ITEM> itemOwner;
+        BOARD_STACKUP_ITEM*                 item = nullptr;
 
         if( type != BS_ITEM_TYPE_UNDEFINED )
         {
-            item = new BOARD_STACKUP_ITEM( type );
+            // A 32-copper-layer board has at most 69 stackup items (32 copper +
+            // 31 dielectric + 6 mask/paste/silk).  Anything far beyond that
+            // indicates a corrupted file.  Parse the item so tokens are consumed
+            // correctly, but don't keep it.
+            static constexpr int MAX_STACKUP_ITEMS = 128;
+
+            itemOwner = std::make_unique<BOARD_STACKUP_ITEM>( type );
+            item = itemOwner.get();
             item->SetBrdLayerId( layerId );
 
             if( type == BS_ITEM_TYPE_DIELECTRIC )
                 item->SetDielectricLayerId( dielectric_idx++ );
 
-            stackup.Add( item );
+            if( stackup.GetCount() < MAX_STACKUP_ITEMS )
+                stackup.Add( itemOwner.release() );
         }
         else
         {
@@ -2041,6 +2098,8 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseBoardStackup()
         bool has_next_sublayer = true;
         int sublayer_idx = 0;       // the index of dielectric sub layers
                                     // sublayer 0 is always existing (main sublayer)
+        wxString specFreqUnits;
+        wxString dielectricModel;
 
         while( has_next_sublayer )
         {
@@ -2102,6 +2161,33 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseBoardStackup()
                         NeedRIGHT();
                         break;
 
+                    case T_spec_frequency:
+                        NextTok();
+                        item->SetSpecFreq( parseDouble(), sublayer_idx );
+                        NeedRIGHT();
+                        break;
+
+                    case T_dielectric_model:
+                        token = NextTok();
+
+                        switch( token )
+                        {
+                        case T_constant:
+                            item->SetDielectricModel( DIELECTRIC_MODEL::CONSTANT, sublayer_idx );
+                            break;
+
+                        case T_djordjevic_sarkar:
+                            item->SetDielectricModel( DIELECTRIC_MODEL::DJORDJEVIC_SARKAR, sublayer_idx );
+                            break;
+
+                        default:
+                            Expecting( "constant or djordjevic_sarkar" );
+                            break;
+                        }
+
+                        NeedRIGHT();
+                        break;
+
                     case T_color:
                         NeedSYMBOL();
                         name = FromUTF8();
@@ -2145,6 +2231,7 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseBoardStackup()
                 item->AddDielectricPrms( sublayer_idx );
             }
         }
+
     }
 
     if( token != T_RIGHT )
@@ -2454,7 +2541,10 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseSetup()
         switch( token )
         {
         case T_stackup:
-            parseBoardStackup();
+            if( m_preserveDestinationStackup )
+                skipCurrent();
+            else
+                parseBoardStackup();
             break;
 
         case T_last_trace_width:    // not used now
@@ -2835,7 +2925,7 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseSetup()
 
     // Set up a default stackup in case the file doesn't define one, and now we know
     // the enabled layers
-    if( ! m_board->GetDesignSettings().m_HasStackup )
+    if( !m_preserveDestinationStackup && !m_board->GetDesignSettings().m_HasStackup )
     {
         BOARD_STACKUP& stackup = bds.GetStackupDescriptor();
         stackup.RemoveAll();
@@ -3059,6 +3149,140 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseNETINFO_ITEM()
     }
 }
 
+// Parse the (net_chains ...) aggregation block providing chain names, member nets and optional terminal pads.
+void PCB_IO_KICAD_SEXPR_PARSER::parseNET_CHAINS_SECTION()
+{
+    // Tokens inside section: (net_chain (name <str>) (members (member (net <code>))...) (terminal_pad <uuid>) (terminal_pad <uuid>))
+    for( T token = NextTok(); token != T_EOF; token = NextTok() )
+    {
+        if( token == T_RIGHT )
+            break; // end of (net_chains ...)
+        else if( token == T_LEFT )
+            token = NextTok();
+
+        if( token != T_net_chain )
+        {
+            skipCurrent();
+            continue;
+        }
+
+        wxString name;
+        std::vector<int> netCodes;
+        std::vector<wxString> netNames;
+        KIID padUuids[2];
+        int padCount = 0;
+
+        for( T t = NextTok(); t != T_EOF; t = NextTok() )
+        {
+            if( t == T_RIGHT )
+                break; // end chain
+            else if( t == T_LEFT )
+                t = NextTok();
+
+            switch( t )
+            {
+            case T_name:
+                NeedSYMBOLorNUMBER();
+                name = FromUTF8();
+                NeedRIGHT();
+                break;
+
+            case T_members:
+            {
+                for( T mt = NextTok(); mt != T_RIGHT; mt = NextTok() )
+                {
+                    if( mt == T_LEFT )
+                        mt = NextTok();
+                    if( mt == T_net )
+                    {
+                        // Accept either a net code (legacy) or a net name (current).
+                        T tok = NextTok();
+                        if( tok == T_NUMBER )
+                        {
+                            netCodes.push_back( (int) strtol( CurText(), nullptr, 10 ) );
+                        }
+                        else
+                        {
+                            netNames.push_back( FromUTF8() );
+                        }
+                        NeedRIGHT();
+                    }
+                    else if( mt == T_member )
+                    {
+                        // legacy style (member (net <code>)) wrapper
+                        T inner = NextTok();
+                        if( inner == T_LEFT )
+                            inner = NextTok();
+                        if( inner == T_net )
+                        {
+                            T tok2 = NextTok();
+                            if( tok2 == T_NUMBER )
+                                netCodes.push_back( (int) strtol( CurText(), nullptr, 10 ) );
+                            else
+                                netNames.push_back( FromUTF8() );
+                            NeedRIGHT();
+                        }
+                        NeedRIGHT();
+                    }
+                    else
+                        skipCurrent();
+                }
+                break;
+            }
+
+            case T_terminal_pad:
+                if( padCount < 2 )
+                {
+                    NeedSYMBOLorNUMBER();
+                    padUuids[padCount++] = KIID( FromUTF8() );
+                    NeedRIGHT();
+                }
+                else
+                {
+                    skipCurrent();
+                }
+                break;
+
+            default:
+                skipCurrent();
+                break;
+            }
+        }
+
+        std::vector<NETINFO_ITEM*> resolvedNets;
+
+        for( int code : netCodes )
+        {
+            int internalCode = code;
+
+            if( code >= 0 && code < (int) m_netCodes.size() && m_netCodes[code] != 0 )
+                internalCode = m_netCodes[code];
+
+            if( NETINFO_ITEM* net = m_board->FindNet( internalCode ) )
+                resolvedNets.push_back( net );
+        }
+
+        for( const wxString& netName : netNames )
+        {
+            if( NETINFO_ITEM* net = m_board->FindNet( netName ) )
+                resolvedNets.push_back( net );
+        }
+
+        for( NETINFO_ITEM* net : resolvedNets )
+        {
+            net->SetNetChain( name );
+
+            for( int i = 0; i < padCount && i < 2; ++i )
+            {
+                net->SetTerminalPadUuid( i, padUuids[i] );
+
+                if( PAD* pad = m_board->FindPadByUuid( padUuids[i] ) )
+                    net->SetTerminalPad( i, pad );
+            }
+        }
+    }
+}
+
 
 void PCB_IO_KICAD_SEXPR_PARSER::parseNETCLASS()
 {
@@ -3166,12 +3390,13 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseNETCLASS()
 
 PCB_SHAPE* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_SHAPE( BOARD_ITEM* aParent )
 {
-    wxCHECK_MSG( CurTok() == T_fp_arc || CurTok() == T_fp_circle || CurTok() == T_fp_curve ||
-                 CurTok() == T_fp_rect || CurTok() == T_fp_line || CurTok() == T_fp_poly ||
-                 CurTok() == T_gr_arc || CurTok() == T_gr_circle || CurTok() == T_gr_curve ||
-                 CurTok() == T_gr_rect || CurTok() == T_gr_bbox || CurTok() == T_gr_line ||
-                 CurTok() == T_gr_poly || CurTok() == T_gr_vector, nullptr,
-                 wxT( "Cannot parse " ) + GetTokenString( CurTok() ) + wxT( " as PCB_SHAPE." ) );
+    wxCHECK_MSG( CurTok() == T_fp_arc || CurTok() == T_fp_circle || CurTok() == T_fp_curve || CurTok() == T_fp_rect
+                         || CurTok() == T_fp_line || CurTok() == T_fp_poly || CurTok() == T_fp_ellipse
+                         || CurTok() == T_fp_ellipse_arc || CurTok() == T_gr_arc || CurTok() == T_gr_circle
+                         || CurTok() == T_gr_curve || CurTok() == T_gr_rect || CurTok() == T_gr_bbox
+                         || CurTok() == T_gr_line || CurTok() == T_gr_poly || CurTok() == T_gr_vector
+                         || CurTok() == T_gr_ellipse || CurTok() == T_gr_ellipse_arc,
+                 nullptr, wxT( "Cannot parse " ) + GetTokenString( CurTok() ) + wxT( " as PCB_SHAPE." ) );
 
     T                          token;
     VECTOR2I                   pt;
@@ -3441,15 +3666,22 @@ PCB_SHAPE* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_SHAPE( BOARD_ITEM* aParent )
         break;
     }
 
+    case T_gr_ellipse:
+    case T_fp_ellipse: shape->SetShape( SHAPE_T::ELLIPSE ); break;
+
+    case T_gr_ellipse_arc:
+    case T_fp_ellipse_arc: shape->SetShape( SHAPE_T::ELLIPSE_ARC ); break;
+
     default:
         if( aParent && aParent->Type() == PCB_FOOTPRINT_T )
         {
-            Expecting( "fp_arc, fp_circle, fp_curve, fp_line, fp_poly or fp_rect" );
+            Expecting( "fp_arc, fp_circle, fp_curve, fp_ellipse, fp_ellipse_arc, "
+                       "fp_line, fp_poly or fp_rect" );
         }
         else
         {
-            Expecting( "gr_arc, gr_circle, gr_curve, gr_vector, gr_line, gr_poly, gr_rect or "
-                       "gr_bbox" );
+            Expecting( "gr_arc, gr_circle, gr_curve, gr_ellipse, gr_ellipse_arc, "
+                       "gr_vector, gr_line, gr_poly, gr_rect or gr_bbox" );
         }
     }
 
@@ -3506,7 +3738,7 @@ PCB_SHAPE* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_SHAPE( BOARD_ITEM* aParent )
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( shape->m_Uuid ) = CurStrToKIID();
+            shape->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -3552,9 +3784,42 @@ PCB_SHAPE* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_SHAPE( BOARD_ITEM* aParent )
             parseNet( shape.get() );
             break;
 
+        case T_center:
+            pt.x = parseBoardUnits( "X coordinate" );
+            pt.y = parseBoardUnits( "Y coordinate" );
+            shape->SetEllipseCenter( pt );
+            NeedRIGHT();
+            break;
+
+        case T_major_radius:
+            shape->SetEllipseMajorRadius( parseBoardUnits( "major radius" ) );
+            NeedRIGHT();
+            break;
+
+        case T_minor_radius:
+            shape->SetEllipseMinorRadius( parseBoardUnits( "minor radius" ) );
+            NeedRIGHT();
+            break;
+
+        case T_rotation_angle:
+            shape->SetEllipseRotation( EDA_ANGLE( parseDouble( "rotation angle" ), DEGREES_T ) );
+            NeedRIGHT();
+            break;
+
+        case T_start_angle:
+            shape->SetEllipseStartAngle( EDA_ANGLE( parseDouble( "start angle" ), DEGREES_T ) );
+            NeedRIGHT();
+            break;
+
+        case T_end_angle:
+            shape->SetEllipseEndAngle( EDA_ANGLE( parseDouble( "end angle" ), DEGREES_T ) );
+            NeedRIGHT();
+            break;
+
         default:
             Expecting( "layer, width, fill, tstamp, uuid, locked, net, status, "
-                       "or solder_mask_margin" );
+                       "solder_mask_margin, center, major_radius, minor_radius, "
+                       "rotation_angle, start_angle, or end_angle" );
         }
     }
 
@@ -3677,7 +3942,7 @@ PCB_REFERENCE_IMAGE* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_REFERENCE_IMAGE( BOARD_
         case T_uuid:
         {
             NextTok();
-            const_cast<KIID&>( bitmap->m_Uuid ) = CurStrToKIID();
+            bitmap->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
         }
@@ -3839,7 +4104,7 @@ void PCB_IO_KICAD_SEXPR_PARSER::parsePCB_TEXT_effects( PCB_TEXT* aText, PCB_TEXT
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( aText->m_Uuid ) = CurStrToKIID();
+            aText->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -4022,7 +4287,7 @@ PCB_BARCODE* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_BARCODE( BOARD_ITEM* aParent )
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( barcode->m_Uuid ) = CurStrToKIID();
+            barcode->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -4219,7 +4484,7 @@ void PCB_IO_KICAD_SEXPR_PARSER::parseTextBoxContent( PCB_TEXTBOX* aTextBox )
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( aTextBox->m_Uuid ) = CurStrToKIID();
+            aTextBox->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -4293,7 +4558,7 @@ PCB_TABLE* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_TABLE( BOARD_ITEM* aParent )
 
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( table->m_Uuid ) = CurStrToKIID();
+            table->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -4512,7 +4777,7 @@ PCB_DIMENSION_BASE* PCB_IO_KICAD_SEXPR_PARSER::parseDIMENSION( BOARD_ITEM* aPare
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( dim->m_Uuid ) = CurStrToKIID();
+            dim->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -5040,7 +5305,7 @@ FOOTPRINT* PCB_IO_KICAD_SEXPR_PARSER::parseFOOTPRINT_unchecked( wxArrayString* a
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( footprint->m_Uuid ) = CurStrToKIID();
+            footprint->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -5434,13 +5699,13 @@ FOOTPRINT* PCB_IO_KICAD_SEXPR_PARSER::parseFOOTPRINT_unchecked( wxArrayString* a
                 {
                 case FIELD_T::REFERENCE:
                     footprint->Reference() = PCB_FIELD( *text, FIELD_T::REFERENCE );
-                    const_cast<KIID&>( footprint->Reference().m_Uuid ) = text->m_Uuid;
+                    footprint->Reference().SetUuidDirect( text->m_Uuid );
                     delete text;
                     break;
 
                 case FIELD_T::VALUE:
                     footprint->Value() = PCB_FIELD( *text, FIELD_T::VALUE );
-                    const_cast<KIID&>( footprint->Value().m_Uuid ) = text->m_Uuid;
+                    footprint->Value().SetUuidDirect( text->m_Uuid );
                     delete text;
                     break;
 
@@ -5480,6 +5745,8 @@ FOOTPRINT* PCB_IO_KICAD_SEXPR_PARSER::parseFOOTPRINT_unchecked( wxArrayString* a
         case T_fp_rect:
         case T_fp_line:
         case T_fp_poly:
+        case T_fp_ellipse:
+        case T_fp_ellipse_arc:
         {
             PCB_SHAPE* shape = parsePCB_SHAPE( footprint.get() );
             footprint->Add( shape, ADD_MODE::APPEND, true );
@@ -5516,9 +5783,175 @@ FOOTPRINT* PCB_IO_KICAD_SEXPR_PARSER::parseFOOTPRINT_unchecked( wxArrayString* a
 
         case T_model:
         {
-            FP_3DMODEL* model = parse3DModel();
-            footprint->Add3DModel( model );
-            delete model;
+            token = NextTok();
+
+            if( token == T_LEFT )
+            {
+                // Typed model (model (type extruded) ...)
+                token = NextTok();
+
+                if( token != T_type )
+                    Expecting( T_type );
+
+                NeedSYMBOL();
+
+                if( CurTok() == T_extruded )
+                {
+                    NeedRIGHT(); // close (type extruded)
+
+                    EXTRUDED_3D_BODY& body = footprint->EnsureExtrudedBody();
+
+                    for( token = NextTok(); token != T_RIGHT; token = NextTok() )
+                    {
+                        if( token != T_LEFT )
+                            Expecting( T_LEFT );
+
+                        token = NextTok();
+
+                        switch( token )
+                        {
+                        case T_hide:
+                        {
+                            bool hide = parseMaybeAbsentBool( true );
+                            body.m_show = !hide;
+                            break;
+                        }
+
+                        case T_overall_height:
+                            body.m_height = parseBoardUnits( "overall height" );
+                            NeedRIGHT();
+                            break;
+
+                        case T_body_pcb_gap:
+                            body.m_standoff = parseBoardUnits( "body pcb gap" );
+                            NeedRIGHT();
+                            break;
+
+                        case T_layer:
+                        {
+                            NeedSYMBOL();
+                            wxString layerName = From_UTF8( CurText() );
+
+                            if( layerName == wxT( "auto" ) )
+                            {
+                                body.m_layer = UNDEFINED_LAYER;
+                            }
+                            else if( layerName == wxT( "pad_bbox" ) )
+                            {
+                                body.m_layer = UNSELECTED_LAYER;
+                            }
+                            else
+                            {
+                                int layer = LSET::NameToLayer( layerName );
+
+                                if( layer >= 0 )
+                                    body.m_layer = static_cast<PCB_LAYER_ID>( layer );
+                            }
+
+                            NeedRIGHT();
+                            break;
+                        }
+
+                        case T_material:
+                        {
+                            NeedSYMBOL();
+                            wxString matName = From_UTF8( CurText() );
+
+                            if( matName == wxT( "matte" ) )
+                                body.m_material = EXTRUSION_MATERIAL::MATTE;
+                            else if( matName == wxT( "metal" ) )
+                                body.m_material = EXTRUSION_MATERIAL::METAL;
+                            else if( matName == wxT( "copper" ) )
+                                body.m_material = EXTRUSION_MATERIAL::COPPER;
+                            else
+                                body.m_material = EXTRUSION_MATERIAL::PLASTIC;
+
+                            NeedRIGHT();
+                            break;
+                        }
+
+                        case T_color:
+                        {
+                            NeedSYMBOLorNUMBER();
+                            wxString first = From_UTF8( CurText() );
+
+                            if( first == wxT( "unspecified" ) )
+                            {
+                                body.m_color = KIGFX::COLOR4D::UNSPECIFIED;
+                            }
+                            else
+                            {
+                                body.m_color.r = parseDouble();
+                                body.m_color.g = parseDouble( "green" );
+                                body.m_color.b = parseDouble( "blue" );
+                                body.m_color.a = parseDouble( "alpha" );
+                            }
+
+                            NeedRIGHT();
+                            break;
+                        }
+
+                        case T_offset:
+                            NeedLEFT();
+                            token = NextTok();
+
+                            if( token != T_xyz )
+                                Expecting( T_xyz );
+
+                            body.m_offset.x = parseDouble( "x value" );
+                            body.m_offset.y = parseDouble( "y value" );
+                            body.m_offset.z = parseDouble( "z value" );
+                            NeedRIGHT();
+                            NeedRIGHT();
+                            break;
+
+                        case T_scale:
+                            NeedLEFT();
+                            token = NextTok();
+
+                            if( token != T_xyz )
+                                Expecting( T_xyz );
+
+                            body.m_scale.x = parseDouble( "x value" );
+                            body.m_scale.y = parseDouble( "y value" );
+                            body.m_scale.z = parseDouble( "z value" );
+                            NeedRIGHT();
+                            NeedRIGHT();
+                            break;
+
+                        case T_rotate:
+                            NeedLEFT();
+                            token = NextTok();
+
+                            if( token != T_xyz )
+                                Expecting( T_xyz );
+
+                            body.m_rotation.x = parseDouble( "x value" );
+                            body.m_rotation.y = parseDouble( "y value" );
+                            body.m_rotation.z = parseDouble( "z value" );
+                            NeedRIGHT();
+                            NeedRIGHT();
+                            break;
+
+                        default:
+                            Expecting( "hide, overall_height, body_pcb_gap, layer, material, "
+                                       "color, offset, scale, or rotate" );
+                        }
+                    }
+                }
+                else
+                {
+                    Expecting( "extruded" );
+                }
+            }
+            else
+            {
+                // Reference model (model "filename" ...)
+                FP_3DMODEL* model = parse3DModel( true );
+                footprint->Add3DModel( model );
+                delete model;
+            }
+
             break;
         }
 
@@ -5565,6 +5998,18 @@ FOOTPRINT* PCB_IO_KICAD_SEXPR_PARSER::parseFOOTPRINT_unchecked( wxArrayString* a
             catch( const PARSE_ERROR& e )
             {
                 m_parseWarnings.push_back( e.What() );
+
+                int depth = 0;
+
+                for( int tok = embeddedFilesParser.NextTok();
+                     tok != DSN_EOF;
+                     tok = embeddedFilesParser.NextTok() )
+                {
+                    if( tok == DSN_LEFT )
+                        depth++;
+                    else if( tok == DSN_RIGHT && --depth < 0 )
+                        break;
+                }
             }
 
             SyncLineReaderWith( embeddedFilesParser );
@@ -6349,7 +6794,7 @@ PAD* PCB_IO_KICAD_SEXPR_PARSER::parsePAD( FOOTPRINT* aParent )
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( pad->m_Uuid ) = CurStrToKIID();
+            pad->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -7217,7 +7662,7 @@ PCB_ARC* PCB_IO_KICAD_SEXPR_PARSER::parseARC()
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( arc->m_Uuid ) = CurStrToKIID();
+            arc->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -7312,7 +7757,7 @@ PCB_TRACK* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_TRACK()
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( track->m_Uuid ) = CurStrToKIID();
+            track->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -7514,7 +7959,7 @@ PCB_VIA* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_VIA()
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( via->m_Uuid ) = CurStrToKIID();
+            via->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -7866,7 +8311,7 @@ ZONE* PCB_IO_KICAD_SEXPR_PARSER::parseZONE( BOARD_ITEM_CONTAINER* aParent )
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( zone->m_Uuid ) = CurStrToKIID();
+            zone->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 
@@ -7957,13 +8402,26 @@ ZONE* PCB_IO_KICAD_SEXPR_PARSER::parseZONE( BOARD_ITEM_CONTAINER* aParent )
                 case T_mode:
                     token = NextTok();
 
-                    if( token != T_segment && token != T_hatch && token != T_polygon )
-                        Expecting( "segment, hatch or polygon" );
+                    if( token != T_segment && token != T_hatch && token != T_polygon
+                            && token != T_thieving )
+                    {
+                        Expecting( "segment, hatch, polygon or thieving" );
+                    }
 
                     switch( token )
                     {
                     case T_hatch:
                         zone->SetFillMode( ZONE_FILL_MODE::HATCH_PATTERN );
+                        break;
+
+                    case T_thieving:
+                        if( m_requiredVersion < 20260513 )
+                        {
+                            Expecting( "segment, hatch or polygon "
+                                       "(thieving requires file version >= 20260513)" );
+                        }
+
+                        zone->SetFillMode( ZONE_FILL_MODE::COPPER_THIEVING );
                         break;
 
                     case T_segment: // deprecated, convert to polygons
@@ -8018,6 +8476,93 @@ ZONE* PCB_IO_KICAD_SEXPR_PARSER::parseZONE( BOARD_ITEM_CONTAINER* aParent )
                     zone->SetHatchHoleMinArea( parseDouble( T_hatch_min_hole_area ) );
                     NeedRIGHT();
                     break;
+
+                case T_thieving:
+                {
+                    if( m_requiredVersion < 20260513 )
+                    {
+                        Expecting( "thieving requires file version >= 20260513" );
+                    }
+
+                    THIEVING_SETTINGS thieving = zone->GetThievingSettings();
+
+                    for( token = NextTok(); token != T_RIGHT; token = NextTok() )
+                    {
+                        if( token == T_LEFT )
+                            token = NextTok();
+
+                        switch( token )
+                        {
+                        case T_type:
+                            token = NextTok();
+
+                            switch( token )
+                            {
+                            case T_dots:    thieving.pattern = THIEVING_PATTERN::DOTS;    break;
+                            case T_squares: thieving.pattern = THIEVING_PATTERN::SQUARES; break;
+                            case T_hatch:   thieving.pattern = THIEVING_PATTERN::HATCH;   break;
+                            default:        Expecting( "dots, squares or hatch" );
+                            }
+
+                            NeedRIGHT();
+                            break;
+
+                        // Reject non-positive geometry inline.  Zero size would emit
+                        // zero-area stamps and zero gap would deadlock the filler grid
+                        // loop.  The zone's existing setting (constructor defaults)
+                        // stays in place for any malformed field.
+                        case T_size:
+                        {
+                            int val = parseBoardUnits( T_size );
+
+                            if( val > 0 )
+                                thieving.element_size = val;
+
+                            NeedRIGHT();
+                            break;
+                        }
+
+                        case T_gap:
+                        {
+                            int val = parseBoardUnits( T_gap );
+
+                            if( val > 0 )
+                                thieving.gap = val;
+
+                            NeedRIGHT();
+                            break;
+                        }
+
+                        case T_width:
+                        {
+                            int val = parseBoardUnits( T_width );
+
+                            if( val > 0 )
+                                thieving.line_width = val;
+
+                            NeedRIGHT();
+                            break;
+                        }
+
+                        case T_stagger:
+                            thieving.stagger = parseBool();
+                            NeedRIGHT();
+                            break;
+
+                        case T_orientation:
+                            thieving.orientation = EDA_ANGLE( parseDouble( T_orientation ),
+                                                              DEGREES_T );
+                            NeedRIGHT();
+                            break;
+
+                        default:
+                            Expecting( "type, size, gap, width, stagger or orientation" );
+                        }
+                    }
+
+                    zone->SetThievingSettings( thieving );
+                    break;
+                }
 
                 case T_arc_segments:
                     ignore_unused( parseInt( "arc segment count" ) );
@@ -8090,8 +8635,8 @@ ZONE* PCB_IO_KICAD_SEXPR_PARSER::parseZONE( BOARD_ITEM_CONTAINER* aParent )
                     Expecting( "mode, arc_segments, thermal_gap, thermal_bridge_width, "
                                "hatch_thickness, hatch_gap, hatch_orientation, "
                                "hatch_smoothing_level, hatch_smoothing_value, "
-                               "hatch_border_algorithm, hatch_min_hole_area, smoothing, radius, "
-                               "island_removal_mode, or island_area_min" );
+                               "hatch_border_algorithm, hatch_min_hole_area, thieving, "
+                               "smoothing, radius, island_removal_mode, or island_area_min" );
                 }
             }
 
@@ -8238,6 +8783,9 @@ ZONE* PCB_IO_KICAD_SEXPR_PARSER::parseZONE( BOARD_ITEM_CONTAINER* aParent )
             NeedRIGHT();
 
             outline.SetClosed( true );
+
+            if( outline.PointCount() == 0 )
+                break;
 
             // Remark: The first polygon is the main outline.
             // Others are holes inside the main outline.
@@ -8551,7 +9099,7 @@ PCB_POINT* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_POINT()
         case T_uuid:
         {
             NextTok();
-            const_cast<KIID&>( point->m_Uuid ) = CurStrToKIID();
+            point->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
         }
@@ -8613,7 +9161,7 @@ PCB_TARGET* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_TARGET()
         case T_tstamp:
         case T_uuid:
             NextTok();
-            const_cast<KIID&>( target->m_Uuid ) = CurStrToKIID();
+            target->SetUuidDirect( CurStrToKIID() );
             NeedRIGHT();
             break;
 

@@ -65,7 +65,7 @@ public:
     void RemoveItem( EDA_ITEM* aItem );
     void RemoveAll();
 
-    KIID_VECT_LIST GetGroupMemberIds() const;
+    std::vector<KIID> GetGroupMemberIds() const;
 
     bool HasDesignBlockLink() const { return m_designBlockLibId.IsValid(); }
 

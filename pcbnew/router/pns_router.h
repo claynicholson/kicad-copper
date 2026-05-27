@@ -132,6 +132,10 @@ enum DRAG_MODE
                                                      const NETCLASS* aNetClass ) = 0;
     virtual PCB_LAYER_ID GetBoardLayerFromPNSLayer( int aLayer ) const = 0;
     virtual int GetPNSLayerFromBoardLayer( PCB_LAYER_ID aLayer ) const = 0;
+    virtual bool GetSignalAggregate( NET_HANDLE aNetP, NET_HANDLE aNetN,
+                                     long long& aExtraLength, long long& aExtraDelay ) const = 0;
+
+    virtual long long GetNetBoardLength( NET_HANDLE aNet ) const { return 0; }
 };
 
 class ROUTER

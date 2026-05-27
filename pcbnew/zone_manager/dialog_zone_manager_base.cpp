@@ -1,5 +1,5 @@
 ///////////////////////////////////////////////////////////////////////////
-// C++ code generated with wxFormBuilder (version 4.2.1-0-g80c4cb6a-dirty)
+// C++ code generated with wxFormBuilder (version 4.2.1-0-g80c4cb6)
 // http://www.wxformbuilder.org/
 //
 // PLEASE DO *NOT* EDIT THIS FILE!
@@ -19,11 +19,7 @@ DIALOG_ZONE_MANAGER_BASE::DIALOG_ZONE_MANAGER_BASE( wxWindow* parent, wxWindowID
 
 	m_sizerTop = new wxBoxSizer( wxHORIZONTAL );
 
-	m_splitter = new wxSplitterWindow( this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxSP_3DSASH|wxSP_LIVE_UPDATE );
-	m_splitter->SetSashGravity( 0.3 );
-	m_splitter->Connect( wxEVT_IDLE, wxIdleEventHandler( DIALOG_ZONE_MANAGER_BASE::m_splitterOnIdle ), NULL, this );
-
-	m_listPanel = new wxPanel( m_splitter, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL );
+	m_listPanel = new wxPanel( this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL );
 	wxBoxSizer* listPanelSizer;
 	listPanelSizer = new wxBoxSizer( wxVERTICAL );
 
@@ -69,9 +65,7 @@ DIALOG_ZONE_MANAGER_BASE::DIALOG_ZONE_MANAGER_BASE( wxWindow* parent, wxWindowID
 
 	m_leftColumn->Add( layerFilterSizer, 0, wxBOTTOM|wxEXPAND|wxTOP, 5 );
 
-	m_viewZonesOverview = new wxDataViewCtrl( m_listPanel, wxID_ANY, wxDefaultPosition, wxSize( -1,240 ), wxDV_HORIZ_RULES|wxDV_SINGLE|wxDV_VERT_RULES );
-	m_viewZonesOverview->SetMinSize( wxSize( -1,240 ) );
-
+	m_viewZonesOverview = new wxDataViewCtrl( m_listPanel, wxID_ANY, wxDefaultPosition, wxSize( -1,-1 ), wxDV_HORIZ_RULES|wxDV_SINGLE|wxDV_VERT_RULES );
 	m_leftColumn->Add( m_viewZonesOverview, 1, wxEXPAND, 5 );
 
 	m_sizerZoneOP = new wxBoxSizer( wxHORIZONTAL );
@@ -97,7 +91,15 @@ DIALOG_ZONE_MANAGER_BASE::DIALOG_ZONE_MANAGER_BASE( wxWindow* parent, wxWindowID
 	m_sizerZoneOP->Add( m_btnMoveBottom, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 5 );
 
 
-	m_leftColumn->Add( m_sizerZoneOP, 0, wxEXPAND|wxTOP|wxBOTTOM, 5 );
+	m_sizerZoneOP->Add( 10, 0, 0, wxEXPAND, 5 );
+
+	m_btnAutoAssign = new STD_BITMAP_BUTTON( m_listPanel, wxID_ANY, wxNullBitmap, wxDefaultPosition, wxDefaultSize, wxBU_AUTODRAW|0 );
+	m_btnAutoAssign->SetToolTip( _("Automatically assign zone priorities based on connectivity analysis of overlapping regions.") );
+
+	m_sizerZoneOP->Add( m_btnAutoAssign, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 5 );
+
+
+	m_leftColumn->Add( m_sizerZoneOP, 0, wxBOTTOM|wxEXPAND|wxTOP, 5 );
 
 
 	listPanelSizer->Add( m_leftColumn, 1, wxEXPAND|wxRIGHT|wxLEFT, 5 );
@@ -106,7 +108,9 @@ DIALOG_ZONE_MANAGER_BASE::DIALOG_ZONE_MANAGER_BASE( wxWindow* parent, wxWindowID
 	m_listPanel->SetSizer( listPanelSizer );
 	m_listPanel->Layout();
 	listPanelSizer->Fit( m_listPanel );
-	m_zonePanel = new wxPanel( m_splitter, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL );
+	m_sizerTop->Add( m_listPanel, 1, wxEXPAND, 5 );
+
+	m_zonePanel = new wxPanel( this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL );
 	wxBoxSizer* zonePanelSizer;
 	zonePanelSizer = new wxBoxSizer( wxVERTICAL );
 
@@ -115,7 +119,7 @@ DIALOG_ZONE_MANAGER_BASE::DIALOG_ZONE_MANAGER_BASE( wxWindow* parent, wxWindowID
 	m_sizerProperties = new wxBoxSizer( wxVERTICAL );
 
 
-	m_rightColumn->Add( m_sizerProperties, 0, wxEXPAND, 5 );
+	m_rightColumn->Add( m_sizerProperties, 1, wxEXPAND, 5 );
 
 	m_sizerPreview = new wxBoxSizer( wxVERTICAL );
 
@@ -123,14 +127,13 @@ DIALOG_ZONE_MANAGER_BASE::DIALOG_ZONE_MANAGER_BASE( wxWindow* parent, wxWindowID
 	m_rightColumn->Add( m_sizerPreview, 1, wxEXPAND, 5 );
 
 
-	zonePanelSizer->Add( m_rightColumn, 1, wxEXPAND|wxBOTTOM, 5 );
+	zonePanelSizer->Add( m_rightColumn, 1, wxBOTTOM|wxEXPAND, 5 );
 
 
 	m_zonePanel->SetSizer( zonePanelSizer );
 	m_zonePanel->Layout();
 	zonePanelSizer->Fit( m_zonePanel );
-	m_splitter->SplitVertically( m_listPanel, m_zonePanel, 520 );
-	m_sizerTop->Add( m_splitter, 1, wxEXPAND, 5 );
+	m_sizerTop->Add( m_zonePanel, 2, wxEXPAND, 5 );
 
 
 	m_MainBoxSizer->Add( m_sizerTop, 1, wxEXPAND, 5 );
@@ -185,6 +188,7 @@ DIALOG_ZONE_MANAGER_BASE::DIALOG_ZONE_MANAGER_BASE( wxWindow* parent, wxWindowID
 	m_btnMoveUp->Connect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_ZONE_MANAGER_BASE::OnMoveUpClick ), NULL, this );
 	m_btnMoveDown->Connect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_ZONE_MANAGER_BASE::OnMoveDownClick ), NULL, this );
 	m_btnMoveBottom->Connect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_ZONE_MANAGER_BASE::OnMoveBottomClick ), NULL, this );
+	m_btnAutoAssign->Connect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_ZONE_MANAGER_BASE::OnAutoAssignClick ), NULL, this );
 	m_updateDisplayedZones->Connect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_ZONE_MANAGER_BASE::OnUpdateDisplayedZonesClick ), NULL, this );
 	m_sdbSizerOK->Connect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_ZONE_MANAGER_BASE::OnOk ), NULL, this );
 }
@@ -206,6 +210,7 @@ DIALOG_ZONE_MANAGER_BASE::~DIALOG_ZONE_MANAGER_BASE()
 	m_btnMoveUp->Disconnect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_ZONE_MANAGER_BASE::OnMoveUpClick ), NULL, this );
 	m_btnMoveDown->Disconnect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_ZONE_MANAGER_BASE::OnMoveDownClick ), NULL, this );
 	m_btnMoveBottom->Disconnect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_ZONE_MANAGER_BASE::OnMoveBottomClick ), NULL, this );
+	m_btnAutoAssign->Disconnect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_ZONE_MANAGER_BASE::OnAutoAssignClick ), NULL, this );
 	m_updateDisplayedZones->Disconnect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_ZONE_MANAGER_BASE::OnUpdateDisplayedZonesClick ), NULL, this );
 	m_sdbSizerOK->Disconnect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_ZONE_MANAGER_BASE::OnOk ), NULL, this );
 

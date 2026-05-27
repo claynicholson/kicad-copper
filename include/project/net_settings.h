@@ -118,6 +118,18 @@ public:
     /// @brief Clears all netclass pattern assignments
     void ClearNetclassPatternAssignments();
 
+    /// @brief Sets a chain-derived netclass pattern assignment.
+    ///
+    /// Chain-derived assignments are recomputed from the netlist on every netlist update and are
+    /// kept separate from the user-authored pattern list so that stale chain entries can be
+    /// dropped without disturbing user pattern rules.
+    /// Calling this method will reset the effective netclass calculation caches.
+    void SetChainPatternAssignment( const wxString& pattern, const wxString& netclass );
+
+    /// @brief Clears all chain-derived pattern assignments.
+    /// Calling this method will reset the effective netclass calculation caches.
+    void ClearChainPatternAssignments();
+
     /// @brief Clears effective netclass cache for the given net
     void ClearCacheForNet( const wxString& netName );
 
@@ -134,6 +146,33 @@ public:
     /// @brief Clears all net name to color assignments
     /// Calling user is responsible for resetting the effective netclass calculation caches
     void ClearNetColorAssignments();
+
+    /// @brief Assign a net chain to a named class (used by inNetChainClass() DRC scope).
+    void SetNetChainClass( const wxString& aChain, const wxString& aClass )
+    {
+        if( aClass.IsEmpty() )
+            m_netChainClasses.erase( aChain );
+        else
+            m_netChainClasses[aChain] = aClass;
+    }
+
+    /// @brief Look up the class assigned to a chain.  Empty string means "no class".
+    wxString GetNetChainClass( const wxString& aChain ) const
+    {
+        auto it = m_netChainClasses.find( aChain );
+        return it != m_netChainClasses.end() ? it->second : wxString();
+    }
+
+    const std::map<wxString, wxString>& GetNetChainClasses() const
+    {
+        return m_netChainClasses;
+    }
+
+    /// @brief Removes all chain-to-class assignments.
+    void ClearNetChainClasses()
+    {
+        m_netChainClasses.clear();
+    }
 
     /// @brief Determines if an effective netclass for the given net name has been cached
     bool HasEffectiveNetClass( const wxString& aNetName ) const;
@@ -224,6 +263,9 @@ private:
     /// @brief Adds a single pattern assignment without bus expansion (internal helper)
     void addSinglePatternAssignment( const wxString& pattern, const wxString& netclass );
 
+    /// @brief Adds a single chain-derived pattern assignment without bus expansion (internal helper)
+    void addSingleChainPatternAssignment( const wxString& pattern, const wxString& netclass );
+
     /// @brief The default netclass
     std::shared_ptr<NETCLASS> m_defaultNetClass;
 
@@ -236,6 +278,14 @@ private:
     /// @brief List of net class pattern assignments
     std::vector<std::pair<std::unique_ptr<EDA_COMBINED_MATCHER>, wxString>>
             m_netClassPatternAssignments;
+
+    /// @brief List of chain-derived netclass pattern assignments
+    ///
+    /// Populated each netlist update from net-chain class overrides.  Held separately from the
+    /// user pattern list so removed/changed chain assignments do not leave stale entries in the
+    /// user list.  Not serialised — these are recomputed each netlist update.
+    std::vector<std::pair<std::unique_ptr<EDA_COMBINED_MATCHER>, wxString>>
+            m_netClassChainPatternAssignments;
 
     /// @brief Map of netclass names to netclass definitions for
     // composite (multiple netclass assignment / missing defaults) netclasses
@@ -259,6 +309,14 @@ private:
      * Nets that no longer exist will be deleted during a netlist read in Pcbnew.
      */
     std::map<wxString, KIGFX::COLOR4D> m_netColorAssignments;
+
+    /**
+     * Map of net-chain name -> chain-class name.  Used by the inNetChainClass()
+     * PCBEXPR scope function and by rule authors who want to group multiple
+     * chains under a shared label (e.g. all DDR_DQ_* chains under "DDR_DQ").
+     * Serialised under "net_chain_classes" in the net_settings JSON.
+     */
+    std::map<wxString, wxString> m_netChainClasses;
 
     // TODO: Add diff pairs, bus information, etc.
 };

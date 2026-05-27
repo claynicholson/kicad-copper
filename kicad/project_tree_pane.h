@@ -167,9 +167,19 @@ private:
     void onGitInitializeProject( wxCommandEvent& event );
 
     /**
+     * Configure (or change) the default remote on an already-initialized repository
+    */
+    void onGitRemoteSettings( wxCommandEvent& event );
+
+    /**
      * Commit the current project saved changes to the git repository
     */
     void onGitCommit( wxCommandEvent& event );
+
+    /**
+     * Amend (rewrite) the last commit on the current branch
+    */
+    void onGitAmendCommit( wxCommandEvent& event );
 
     /**
      * Pull the latest changes from the git repository
@@ -306,6 +316,11 @@ private:
 
     void gitStatusTimerHandler();
 
+    /// Show a short message in the project status bar after a git operation.
+    void showGitFeedback( const wxString& aText );
+
+    void onGitFeedbackTimer( wxTimerEvent& event );
+
 public:
     KICAD_MANAGER_FRAME*    m_Parent;
     PROJECT_TREE*           m_TreeProject;
@@ -321,8 +336,10 @@ private:
                                                 // the main loop event handler is started
     int                     m_gitLastError;
     wxString                m_gitCurrentBranchName;
+    wxString                m_gitCurrentUpstream;
     wxTimer                 m_gitSyncTimer;
     wxTimer                 m_gitStatusTimer;
+    wxTimer                 m_gitFeedbackTimer;
     std::future<void>       m_gitSyncTask;
     std::future<void>       m_gitStatusIconTask;
 

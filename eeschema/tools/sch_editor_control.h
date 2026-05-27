@@ -91,6 +91,10 @@ public:
     ///< Highlight net under the cursor.
     int HighlightNet( const TOOL_EVENT& aEvent );
 
+    ///< Highlight net chain under the cursor.
+    int HighlightNetChain( const TOOL_EVENT& aEvent );
+    int RemoveFromNetChain( const TOOL_EVENT& aEvent );
+
     ///< Remove any net highlighting
     int ClearHighlight( const TOOL_EVENT& aEvent );
 
@@ -99,6 +103,13 @@ public:
 
     ///< Launch a tool to highlight nets.
     int HighlightNetCursor( const TOOL_EVENT& aEvent );
+
+    ///< Replace one of a net chain's terminal pins.
+    int ReplaceTerminalPin( const TOOL_EVENT& aEvent );
+    int NameNetChain( const TOOL_EVENT& aEvent );
+    int CreateNetChainBetweenPins( const TOOL_EVENT& aEvent );
+
+    int ShowCreateNetChain( const TOOL_EVENT& aEvent );
 
     int AssignNetclass( const TOOL_EVENT& aEvent );
     int FindNetInInspector( const TOOL_EVENT& aEvent );
@@ -123,6 +134,7 @@ public:
     int UpdatePCB( const TOOL_EVENT& aEvent );
     int UpdateFromPCB( const TOOL_EVENT& aEvent );
     int ImportFPAssignments( const TOOL_EVENT& aEvent );
+    int ImportNonKicadSchematic( const TOOL_EVENT& aEvent );
     int ExportNetlist( const TOOL_EVENT& aEvent );
     int GenerateBOM( const TOOL_EVENT& aEvent );
     int GenerateBOMLegacy( const TOOL_EVENT& aEvent );
@@ -150,8 +162,6 @@ public:
     int NextLineMode( const TOOL_EVENT& aEvent );
     int OnAngleSnapModeChanged( const TOOL_EVENT& aEvent );
     int ToggleAnnotateAuto( const TOOL_EVENT& aEvent );
-    int TogglePythonConsole( const TOOL_EVENT& aEvent );
-    int ReloadPlugins( const TOOL_EVENT& aEvent );
 
     int GridFeedback( const TOOL_EVENT& aEvent );
 
@@ -184,6 +194,7 @@ public:
 
     int AddVariant( const TOOL_EVENT& aEvent );
     int RemoveVariant( const TOOL_EVENT& aEvent );
+    int EditVariantDescription( const TOOL_EVENT& aEvent );
 
 private:
     ///< copy selection to clipboard or to m_duplicateClipboard

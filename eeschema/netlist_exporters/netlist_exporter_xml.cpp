@@ -25,10 +25,13 @@
 
 #include "netlist_exporter_xml.h"
 
+#include <algorithm>
 #include <build_version.h>
+#include <gal/color4d.h>
 #include <common.h>     // for ExpandTextVars
 #include <sch_base_frame.h>
 #include <sch_group.h>
+#include <sch_sheet.h>
 #include <string_utils.h>
 #include <connection_graph.h>
 #include <pgm_base.h>
@@ -37,9 +40,12 @@
 #include <xnode.h>      // also nests: <wx/xml/xml.h>
 #include <json_common.h>
 #include <project_sch.h>
+#include <project/project_file.h>
+#include <project/net_settings.h>
 #include <sch_rule_area.h>
 #include <trace_helpers.h>
 
+#include <map>
 #include <set>
 #include <libraries/symbol_library_adapter.h>
 
@@ -93,7 +99,19 @@ XNODE* NETLIST_EXPORTER_XML::makeRoot( unsigned aCtl )
         xroot->AddChild( makeLibraries() );
 
     if( aCtl & GNL_NETS )
+    {
         xroot->AddChild( makeListOfNets( aCtl ) );
+
+        // Net chains are a KiCad-internal extension that is not part of the public XML
+        // netlist schema (version "E"). Emit them only for the KiCad-internal consumer
+        // (eeschema -> pcbnew via NETLIST_EXPORTER_KICAD) so that generic XML, KiCost and
+        // other schema-validating tools do not see an unexpected element.
+        if( aCtl & GNL_OPT_KICAD )
+        {
+            if( XNODE* xchains = makeNetChains() )
+                xroot->AddChild( xchains );
+        }
+    }
 
     return xroot;
 }
@@ -385,7 +403,9 @@ XNODE* NETLIST_EXPORTER_XML::makeSymbols( unsigned aCtl )
                     xproperty->AddAttribute( wxT( "value" ), sheetField.GetText() );
             }
 
-            if( symbol->ResolveExcludedFromBOM( &sheet ) || sheet.GetExcludedFromBOM() )
+            const bool baseExcludedFromBOM = symbol->ResolveExcludedFromBOM( &sheet ) || sheet.GetExcludedFromBOM();
+
+            if( baseExcludedFromBOM )
             {
                 xcomp->AddChild( xproperty = node( wxT( "property" ) ) );
                 xproperty->AddAttribute( wxT( "name" ), wxT( "exclude_from_bom" ) );
@@ -397,76 +417,86 @@ XNODE* NETLIST_EXPORTER_XML::makeSymbols( unsigned aCtl )
                 xproperty->AddAttribute( wxT( "name" ), wxT( "exclude_from_board" ) );
             }
 
-            if( symbol->ResolveExcludedFromPosFiles( &sheet ) )
+            const bool baseExcludedFromPosFiles = symbol->ResolveExcludedFromPosFiles( &sheet );
+
+            if( baseExcludedFromPosFiles )
             {
                 xcomp->AddChild( xproperty = node( wxT( "property" ) ) );
                 xproperty->AddAttribute( wxT( "name" ), wxT( "exclude_from_pos_files" ) );
             }
 
-            if( symbol->ResolveDNP( &sheet ) || sheet.GetDNP() )
+            const bool baseDnp = symbol->ResolveDNP( &sheet ) || sheet.GetDNP();
+
+            if( baseDnp )
             {
                 xcomp->AddChild( xproperty = node( wxT( "property" ) ) );
                 xproperty->AddAttribute( wxT( "name" ), wxT( "dnp" ) );
             }
 
-            SCH_SYMBOL_INSTANCE instance;
+            // Iterate all variants in the schematic, not just those in the symbol instance,
+            // because a sheet can have variant-specific attributes even if the symbol does not.
+            const std::set<wxString>& variantNames = m_schematic->GetVariantNames();
 
-            if( symbol->GetInstance( instance, sheet.Path() ) && !instance.m_Variants.empty() )
+            if( !variantNames.empty() )
             {
-                const bool baseDnp = symbol->GetDNP( &sheet );
-                const bool baseExcludedFromBOM = symbol->GetExcludedFromBOM( &sheet );
-                const bool baseExcludedFromSim = symbol->GetExcludedFromSim( &sheet );
-                const bool baseExcludedFromPosFiles = symbol->GetExcludedFromPosFiles( &sheet );
+                const bool baseExcludedFromSim = symbol->ResolveExcludedFromSim( &sheet ) || sheet.GetExcludedFromSim();
                 XNODE*     xvariants = nullptr;
 
-                for( const auto& [variantName, variant] : instance.m_Variants )
+                for( const auto& variantName : variantNames )
                 {
-                    XNODE* xvariant = node( wxT( "variant" ) );
-                    bool   hasVariantData = false;
+                    XNODE* xvariant = nullptr;
 
-                    xvariant->AddAttribute( wxT( "name" ), variantName );
-
-                    if( variant.m_DNP != baseDnp )
+                    auto addToVariant = [this, &xvariant, &variantName]( XNODE* child ) -> void
                     {
-                        XNODE* xvarprop = node( wxT( "property" ) );
-                        xvarprop->AddAttribute( wxT( "name" ), wxT( "dnp" ) );
-                        xvarprop->AddAttribute( wxT( "value" ), variant.m_DNP ? wxT( "1" ) : wxT( "0" ) );
-                        xvariant->AddChild( xvarprop );
-                        hasVariantData = true;
-                    }
+                        if( !child )
+                            return;
 
-                    if( variant.m_ExcludedFromBOM != baseExcludedFromBOM )
+                        if( !xvariant )
+                        {
+                            xvariant = node( wxT( "variant" ) );
+                            xvariant->AddAttribute( wxT( "name" ), variantName );
+                        }
+                        xvariant->AddChild( child );
+                    };
+
+                    auto addBinaryProp = [this, &addToVariant]( wxString const& name, bool base,
+                                                                bool effective ) -> void
                     {
-                        XNODE* xvarprop = node( wxT( "property" ) );
-                        xvarprop->AddAttribute( wxT( "name" ), wxT( "exclude_from_bom" ) );
-                        xvarprop->AddAttribute( wxT( "value" ), variant.m_ExcludedFromBOM ? wxT( "1" ) : wxT( "0" ) );
-                        xvariant->AddChild( xvarprop );
-                        hasVariantData = true;
-                    }
+                        if( base == effective )
+                            return;
 
-                    if( variant.m_ExcludedFromSim != baseExcludedFromSim )
-                    {
                         XNODE* xvarprop = node( wxT( "property" ) );
-                        xvarprop->AddAttribute( wxT( "name" ), wxT( "exclude_from_sim" ) );
-                        xvarprop->AddAttribute( wxT( "value" ), variant.m_ExcludedFromSim ? wxT( "1" ) : wxT( "0" ) );
-                        xvariant->AddChild( xvarprop );
-                        hasVariantData = true;
-                    }
+                        xvarprop->AddAttribute( wxT( "name" ), name );
+                        xvarprop->AddAttribute( wxT( "value" ), effective ? wxT( "1" ) : wxT( "0" ) );
+                        addToVariant( xvarprop );
+                    };
 
-                    if( variant.m_ExcludedFromPosFiles != baseExcludedFromPosFiles )
-                    {
-                        XNODE* xvarprop = node( wxT( "property" ) );
-                        xvarprop->AddAttribute( wxT( "name" ), wxT( "exclude_from_pos_files" ) );
-                        xvarprop->AddAttribute( wxT( "value" ), variant.m_ExcludedFromPosFiles ? wxT( "1" ) : wxT( "0" ) );
-                        xvariant->AddChild( xvarprop );
-                        hasVariantData = true;
-                    }
+                    bool effectiveDnp = symbol->ResolveDNP( &sheet, variantName ) || sheet.GetDNP( variantName );
+                    addBinaryProp( wxT( "dnp" ), baseDnp, effectiveDnp );
 
-                    if( !variant.m_Fields.empty() )
+                    bool effectiveExcludedFromBOM = symbol->ResolveExcludedFromBOM( &sheet, variantName )
+                                                    || sheet.GetExcludedFromBOM( variantName );
+                    addBinaryProp( wxT( "exclude_from_bom" ), baseExcludedFromBOM, effectiveExcludedFromBOM );
+
+                    bool effectiveExcludedFromSim = symbol->ResolveExcludedFromSim( &sheet, variantName )
+                                                    || sheet.GetExcludedFromSim( variantName );
+                    addBinaryProp( wxT( "exclude_from_sim" ), baseExcludedFromSim, effectiveExcludedFromSim );
+
+                    bool effectiveExcludedFromPosFiles = symbol->ResolveExcludedFromPosFiles( &sheet, variantName );
+                    addBinaryProp( wxT( "exclude_from_pos_files" ), baseExcludedFromPosFiles,
+                                   effectiveExcludedFromPosFiles );
+
+                    SCH_SYMBOL_INSTANCE       instance;
+                    const SCH_SYMBOL_VARIANT* variant = nullptr;
+
+                    if( symbol->GetInstance( instance, sheet.Path() ) && instance.m_Variants.contains( variantName ) )
+                        variant = &instance.m_Variants.at( variantName );
+
+                    if( variant && !variant->m_Fields.empty() )
                     {
                         XNODE* xfields = nullptr;
 
-                        for( const auto& [fieldName, fieldValue] : variant.m_Fields )
+                        for( const auto& [fieldName, fieldValue] : variant->m_Fields )
                         {
                             const wxString baseValue =
                                     symbol->GetFieldText( fieldName, &sheet, wxEmptyString );
@@ -485,23 +515,17 @@ XNODE* NETLIST_EXPORTER_XML::makeSymbols( unsigned aCtl )
                             XNODE* xfield = node( wxT( "field" ), UnescapeString( resolvedValue ) );
                             xfield->AddAttribute( wxT( "name" ), UnescapeString( fieldName ) );
                             xfields->AddChild( xfield );
-                            hasVariantData = true;
                         }
 
-                        if( xfields )
-                            xvariant->AddChild( xfields );
+                        addToVariant( xfields );
                     }
 
-                    if( hasVariantData )
+                    if( xvariant )
                     {
                         if( !xvariants )
                             xvariants = node( wxT( "variants" ) );
 
                         xvariants->AddChild( xvariant );
-                    }
-                    else
-                    {
-                        delete xvariant;
                     }
                 }
 
@@ -598,13 +622,64 @@ XNODE* NETLIST_EXPORTER_XML::makeSymbols( unsigned aCtl )
             XNODE* xunitInfo;
             xcomp->AddChild( xunitInfo = node( wxT( "units" ) ) );
 
-            // Emit all units defined by the library symbol, independent of placement
             const std::unique_ptr<LIB_SYMBOL>& libSym = symbol->GetLibSymbolRef();
 
             if( libSym )
             {
-                for( const LIB_SYMBOL::UNIT_PIN_INFO& unitInfo : libSym->GetUnitPinInfo() )
+                // A multi-unit symbol can resolve to a different lib symbol per placed unit
+                // after unit-specific edits. For instane, if you have units A B C in a multi-unit
+                // symbol, and you edit only unit B, unit B will point to new, modified lib symbol
+                // but A and C will point to the original lib symbol.
+                //
+                // Export the unit metadata from the actual unit instances's lib symbols so the PCB
+                // footprint metadata matches during backannotation, which always works per unit.
+                //
+                // However, the user isn't required to place all units, so keep a fallback default unit info.
+                const std::vector<LIB_SYMBOL::UNIT_PIN_INFO>& defaultUnitInfo = libSym->GetUnitPinInfo();
+                std::map<int, SCH_SYMBOL*>                    symbolByUnit;
+
+                auto addUnitSymbol =
+                        [&]( SCH_SYMBOL* aUnitSymbol )
+                        {
+                            if( !aUnitSymbol )
+                                return;
+
+                            int unit = aUnitSymbol->GetUnitSelection( &sheet );
+
+                            if( unit > 0 )
+                                symbolByUnit.try_emplace( unit, aUnitSymbol );
+                        };
+
+                addUnitSymbol( symbol );
+
+                auto extraUnitRange = extra_units.equal_range( symbol );
+
+                // Collect the other placed units that share this reference so each unit number
+                // can be resolved back to the specific SCH_SYMBOL instance on the sheet.
+                for( auto it = extraUnitRange.first; it != extraUnitRange.second; ++it )
+                    addUnitSymbol( *it );
+
+                // Emit every unit slot from the default library symbol, but override that slot's
+                // metadata with the placed unit's resolved library symbol when one exists.
+                for( size_t unitIdx = 0; unitIdx < defaultUnitInfo.size(); ++unitIdx )
                 {
+                    LIB_SYMBOL::UNIT_PIN_INFO unitInfo = defaultUnitInfo[unitIdx];
+                    auto                      symbolIt = symbolByUnit.find( unitIdx + 1 );
+
+                    if( symbolIt != symbolByUnit.end() )
+                    {
+                        const std::unique_ptr<LIB_SYMBOL>& unitLibSym = symbolIt->second->GetLibSymbolRef();
+
+                        if( unitLibSym )
+                        {
+                            const std::vector<LIB_SYMBOL::UNIT_PIN_INFO>& unitSpecificInfo =
+                                    unitLibSym->GetUnitPinInfo();
+
+                            if( unitIdx < unitSpecificInfo.size() )
+                                unitInfo = unitSpecificInfo[unitIdx];
+                        }
+                    }
+
                     XNODE* xunit;
                     xunitInfo->AddChild( xunit = node( wxT( "unit" ) ) );
                     xunit->AddAttribute( wxT( "name" ), unitInfo.m_unitName );
@@ -667,6 +742,24 @@ XNODE* NETLIST_EXPORTER_XML::makeGroups()
                     XNODE* xmember;
                     xmembers->AddChild( xmember = node( wxT( "member" ) ) );
                     xmember->AddAttribute( wxT( "uuid" ), member->m_Uuid.AsString() );
+                }
+                else if( member->Type() == SCH_SHEET_T )
+                {
+                    SCH_SHEET_PATH              subSheetPath = sheet;
+                    std::vector<SCH_SHEET_PATH> descendantSheets;
+
+                    subSheetPath.push_back( static_cast<SCH_SHEET*>( member ) );
+                    sheetList.GetSheetsWithinPath( descendantSheets, subSheetPath );
+
+                    for( const SCH_SHEET_PATH& descendantSheet : descendantSheets )
+                    {
+                        for( SCH_ITEM* descendantItem : descendantSheet.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+                        {
+                            XNODE* xmember;
+                            xmembers->AddChild( xmember = node( wxT( "member" ) ) );
+                            xmember->AddAttribute( wxT( "uuid" ), descendantItem->m_Uuid.AsString() );
+                        }
+                    }
                 }
             }
         }
@@ -1058,6 +1151,11 @@ XNODE* NETLIST_EXPORTER_XML::makeListOfNets( unsigned aCtl )
 
     std::vector<NET_RECORD*> nets;
 
+    std::shared_ptr<NET_SETTINGS> netSettings;
+
+    if( m_schematic )
+        netSettings = m_schematic->Project().GetProjectFile().NetSettings();
+
     for( const auto& [ key, subgraphs ] : m_schematic->ConnectionGraph()->GetNetMap() )
     {
         wxString    net_name = key.Name;
@@ -1072,19 +1170,23 @@ XNODE* NETLIST_EXPORTER_XML::makeListOfNets( unsigned aCtl )
         nets.emplace_back( new NET_RECORD( net_name ) );
         net_record = nets.back();
 
+        // Resolve the effective netclass by net name through NET_SETTINGS. This matches
+        // the lookup used by the schematic painter and avoids relying on the subgraph's
+        // driver item, which is not set for bus-member subgraphs and which falls back to
+        // the schematic's current sheet path when looking up its connection (the exporter
+        // is not tied to any particular sheet view).
+        if( netSettings )
+        {
+            std::shared_ptr<NETCLASS> nc = netSettings->GetEffectiveNetClass( key.Name );
+
+            if( nc )
+                net_record->m_Class = UnescapeString( nc->GetName() );
+        }
+
         for( CONNECTION_SUBGRAPH* subgraph : subgraphs )
         {
             bool nc = subgraph->GetNoConnect() && subgraph->GetNoConnect()->Type() == SCH_NO_CONNECT_T;
             const SCH_SHEET_PATH& sheet = subgraph->GetSheet();
-
-            if( net_record->m_Class.IsEmpty() && subgraph->GetDriver() )
-            {
-                if( subgraph->GetDriver()->GetEffectiveNetClass() )
-                {
-                    net_record->m_Class = subgraph->GetDriver()->GetEffectiveNetClass()->GetName();
-                    net_record->m_Class = UnescapeString( net_record->m_Class );
-                }
-            }
 
             if( nc )
                 net_record->m_HasNoConnect = true;
@@ -1228,6 +1330,93 @@ XNODE* NETLIST_EXPORTER_XML::makeListOfNets( unsigned aCtl )
         delete record;
 
     return xnets;
+}
+
+XNODE* NETLIST_EXPORTER_XML::makeNetChains()
+{
+    const auto& committed = m_schematic->ConnectionGraph()->GetCommittedNetChains();
+
+    if( committed.empty() )
+        return nullptr;
+
+    XNODE* xchains = node( wxT( "net_chains" ) );
+
+    for( const std::unique_ptr<SCH_NETCHAIN>& chain : committed )
+    {
+        if( !chain )
+            continue;
+
+        XNODE* xchain;
+        xchains->AddChild( xchain = node( wxT( "net_chain" ) ) );
+        xchain->AddAttribute( wxT( "name" ), chain->GetName() );
+
+        if( !chain->GetNetClass().IsEmpty() )
+            xchain->AddAttribute( wxT( "net_class" ), chain->GetNetClass() );
+
+        // Carry the chain's class assignment (from project's NET_SETTINGS) so
+        // that downstream consumers of the netlist can see chain hierarchy
+        // without having to also parse the .kicad_pro file.
+        if( m_schematic )
+        {
+            PROJECT_FILE& pf = m_schematic->Project().GetProjectFile();
+            const std::shared_ptr<NET_SETTINGS>& ns = pf.NetSettings();
+
+            if( ns )
+            {
+                wxString className = ns->GetNetChainClass( chain->GetName() );
+
+                if( !className.IsEmpty() )
+                    xchain->AddAttribute( wxT( "net_chain_class" ), className );
+            }
+        }
+
+        if( chain->GetColor() != COLOR4D::UNSPECIFIED )
+        {
+            const COLOR4D& c = chain->GetColor();
+            xchain->AddAttribute( wxT( "color" ),
+                                   wxString::Format( wxT( "#%02X%02X%02X%02X" ),
+                                                     (int) std::clamp( KiROUND( c.r * 255.0 ), 0, 255 ),
+                                                     (int) std::clamp( KiROUND( c.g * 255.0 ), 0, 255 ),
+                                                     (int) std::clamp( KiROUND( c.b * 255.0 ), 0, 255 ),
+                                                     (int) std::clamp( KiROUND( c.a * 255.0 ), 0, 255 ) ) );
+        }
+
+        XNODE* xmembers;
+        xchain->AddChild( xmembers = node( wxT( "members" ) ) );
+
+        // Synthetic per-run subgraph names (__SG_*) embed run-specific subgraph codes
+        // that do not survive a reload, and downstream consumers cannot resolve them
+        // back to a real net.  Mirror the sexpr writer's filter so the XML output is
+        // limited to nets that have stable, user-visible names.
+        for( const wxString& net : chain->GetNets() )
+        {
+            if( net.IsEmpty() || net.StartsWith( SCH_NETCHAIN::SYNTHETIC_NET_PREFIX ) )
+                continue;
+
+            XNODE* xmember;
+            xmembers->AddChild( xmember = node( wxT( "member" ) ) );
+            xmember->AddAttribute( wxT( "net" ), net );
+        }
+
+        if( !chain->GetTerminalRef( 0 ).IsEmpty() || !chain->GetTerminalRef( 1 ).IsEmpty() )
+        {
+            XNODE* xterms;
+            xchain->AddChild( xterms = node( wxT( "terminal_pins" ) ) );
+
+            for( int i = 0; i < 2; ++i )
+            {
+                if( chain->GetTerminalRef( i ).IsEmpty() )
+                    continue;
+
+                XNODE* xterm;
+                xterms->AddChild( xterm = node( wxT( "terminal_pin" ) ) );
+                xterm->AddAttribute( wxT( "ref" ), chain->GetTerminalRef( i ) );
+                xterm->AddAttribute( wxT( "pin" ), chain->GetTerminalPinNum( i ) );
+            }
+        }
+    }
+
+    return xchains;
 }
 
 

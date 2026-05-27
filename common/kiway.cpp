@@ -124,7 +124,6 @@ const wxString KIWAY::dso_search_path( FACE_T aFaceId )
     case FACE_PL_EDITOR:        name = KIFACE_PREFIX "pl_editor";           break;
     case FACE_PCB_CALCULATOR:   name = KIFACE_PREFIX "pcb_calculator";      break;
     case FACE_BMP2CMP:          name = KIFACE_PREFIX "bitmap2component";    break;
-    case FACE_PYTHON:           name = KIFACE_PREFIX "kipython";            break;
 
     default:
         wxASSERT_MSG( 0, wxT( "caller has a bug, passed a bad aFaceId" ) );
@@ -187,7 +186,6 @@ const wxString KIWAY::dso_search_path( FACE_T aFaceId )
         switch( aFaceId )
         {
             case FACE_PL_EDITOR: dirName = "pagelayout_editor";   break;
-            case FACE_PYTHON:    dirName = "scripting";           break;
             default:             dirName = name + 1;              break;
         }
 
@@ -364,9 +362,6 @@ KIWAY::FACE_T KIWAY::KifaceType( FRAME_T aFrameType )
     case FRAME_CVPCB:
     case FRAME_CVPCB_DISPLAY:
         return FACE_CVPCB;
-
-    case FRAME_PYTHON:
-        return FACE_PYTHON;
 
     case FRAME_GERBER:
         return FACE_GERBVIEW;
@@ -609,6 +604,15 @@ void KIWAY::CommonSettingsChanged( int aFlags )
             top->CommonSettingsChanged( aFlags );
     }
 
+    if( aFlags & ENVVARS_CHANGED )
+    {
+        if( KIFACE* sch = KiFACE( FACE_SCH, false ) )
+            sch->PreloadLibraries( this );
+
+        if( KIFACE* pcb = KiFACE( FACE_PCB, false ) )
+            pcb->PreloadLibraries( this );
+    }
+
     for( unsigned i=0;  i < KIWAY_PLAYER_COUNT;  ++i )
     {
         KIWAY_PLAYER* frame = GetPlayerFrame( ( FRAME_T )i );
@@ -664,11 +668,13 @@ void KIWAY::ProjectChanged()
             top->ProjectChanged();
     }
 
-    // Cancel an in-progress load of libraries; handled through the schematic and PCB ifaces
-    if ( KIFACE* schface = KiFACE( KIWAY::FACE_SCH ) )
+    // Cancel an in-progress load of libraries; handled through the schematic and PCB ifaces.
+    // Use doLoad=false: only notify already-loaded kifaces, don't force-load absent ones
+    // (e.g. eeschema kiface isn't available in standalone pcbnew).
+    if ( KIFACE* schface = KiFACE( KIWAY::FACE_SCH, false ) )
         schface->ProjectChanged();
 
-    if ( KIFACE* pcbface = KiFACE( KIWAY::FACE_PCB ) )
+    if ( KIFACE* pcbface = KiFACE( KIWAY::FACE_PCB, false ) )
         pcbface->ProjectChanged();
 
     for( unsigned i=0;  i < KIWAY_PLAYER_COUNT;  ++i )

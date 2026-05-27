@@ -132,6 +132,9 @@ DIALOG_GIT_COMMIT::DIALOG_GIT_COMMIT( wxWindow* parent, git_repository* repo,
     wxStaticText* commitMessageLabel = new wxStaticText( this, wxID_ANY, _( "Commit Message:" ) );
     m_commitMessageTextCtrl =
             new wxTextCtrl( this, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE );
+
+    OptOut( m_commitMessageTextCtrl );
+
     sizer->Add( commitMessageLabel, 0, wxALL, 5 );
     sizer->Add( m_commitMessageTextCtrl, 1, wxEXPAND | wxALL, 5 );
 
@@ -189,6 +192,12 @@ void DIALOG_GIT_COMMIT::OnTextChanged( wxCommandEvent& aEvent )
 wxString DIALOG_GIT_COMMIT::GetCommitMessage() const
 {
     return m_commitMessageTextCtrl->GetValue();
+}
+
+
+void DIALOG_GIT_COMMIT::SetCommitMessage( const wxString& aMessage )
+{
+    m_commitMessageTextCtrl->SetValue( aMessage );
 }
 
 

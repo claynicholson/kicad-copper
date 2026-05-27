@@ -115,7 +115,7 @@ TOOL_ACTION ACTIONS::saveAll( TOOL_ACTION_ARGS()
         .Scope( AS_GLOBAL )
         .FriendlyName( _( "Save All" ) )
         .Tooltip( _( "Save all changes" ) )
-        .Icon( BITMAPS::save ) );
+        .Icon( BITMAPS::save_all ) );
 
 TOOL_ACTION ACTIONS::revert( TOOL_ACTION_ARGS()
         .Name( "common.Control.revert" )
@@ -352,14 +352,18 @@ TOOL_ACTION ACTIONS::selectSetRect( TOOL_ACTION_ARGS()
         .Scope( AS_GLOBAL )
         .FriendlyName( _( "Rectangle" ) )
         .Tooltip( _( "Set selection mode to use rectangle" ) )
-        .Icon( BITMAPS::cursor ) );
+        .ToolbarState( TOOLBAR_STATE::TOGGLE )
+        .Icon( BITMAPS::cursor )
+        .Flags( AF_ACTIVATE ) );
 
 TOOL_ACTION ACTIONS::selectSetLasso( TOOL_ACTION_ARGS()
         .Name( "common.Interactive.selectSetLasso" )
         .Scope( AS_GLOBAL )
         .FriendlyName( _( "Lasso" ) )
         .Tooltip( _( "Set selection mode to use polygon lasso" ) )
-        .Icon( BITMAPS::lasso ) );
+        .ToolbarState( TOOLBAR_STATE::TOGGLE )
+        .Icon( BITMAPS::lasso )
+        .Flags( AF_ACTIVATE ) );
 
 TOOL_ACTION ACTIONS::selectAll( TOOL_ACTION_ARGS()
         .Name( "common.Interactive.selectAll" )
@@ -570,7 +574,9 @@ TOOL_ACTION ACTIONS::editTable( TOOL_ACTION_ARGS()
 
 TOOL_ACTION ACTIONS::exportTableCSV( TOOL_ACTION_ARGS()
         .Name( "common.TableEditor.exportTableCSV" )
+        .ToolbarState( TOOLBAR_STATE::HIDDEN )
         .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Export Table to CSV" ) )
         .MenuText( _( "Export Table to CSV..." ) )
         .Tooltip( _( "Export table contents to CSV file with resolved text variables" ) )
         .Icon( BITMAPS::export_file ) );

@@ -80,6 +80,7 @@ class PCB_MARKER;
 class NETCLASS;
 class NETLIST;
 class NETINFO_ITEM;
+class ZONE;
 class PROGRESS_REPORTER;
 class REPORTER;
 class wxFileName;
@@ -288,8 +289,8 @@ public:
 
     REPORTER* GetLogReporter() const { return m_logReporter; }
 
-    bool QueryWorstConstraint( DRC_CONSTRAINT_T aRuleId, DRC_CONSTRAINT& aConstraint,
-                               bool aUnconditionalOnly = false );
+    bool QueryWorstConstraint( DRC_CONSTRAINT_T aRuleId, DRC_CONSTRAINT& aConstraint, bool aUnconditionalOnly = false );
+    bool HasUserDefinedPhysicalConstraint();
     std::set<int> QueryDistinctConstraints( DRC_CONSTRAINT_T aConstraintId );
 
     std::vector<DRC_TEST_PROVIDER*> GetTestProviders() const { return m_testProviders; };
@@ -350,6 +351,11 @@ private:
         DRC_RULE_CONDITION*        condition;
         std::shared_ptr<DRC_RULE>  parentRule;
         DRC_CONSTRAINT             constraint;
+
+        // Pre-resolved zone pointer for implicit keepout disallow rules. Allows the fast
+        // path in processConstraint to skip UUID parsing and expression evaluation by
+        // doing a direct bounding box pre-filter against the keepout zone.
+        ZONE*                      implicitKeepoutZone = nullptr;
     };
 
     void loadImplicitRules();

@@ -21,6 +21,7 @@ target_link_libraries( allegro_convert
 
 set( ALLEGRO2PCBNEW_SRCS
     allegro_builder.cpp
+    allegro_db_utils.cpp
     pcb_io_allegro.cpp
 )
 
@@ -38,4 +39,3 @@ target_include_directories( allegro2pcbnew
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
-

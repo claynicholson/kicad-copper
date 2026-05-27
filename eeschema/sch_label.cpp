@@ -52,6 +52,7 @@
 #include <sch_label.h>
 #include <sch_rule_area.h>
 #include <magic_enum.hpp>
+#include <api/api_enums.h>
 #include <api/api_utils.h>
 #include <api/schematic/schematic_types.pb.h>
 #include <properties/property.h>
@@ -256,7 +257,7 @@ bool SCH_LABEL_BASE::IsType( const std::vector<KICAD_T>& aScanTypes ) const
     if( m_connected_items.find( Schematic()->CurrentSheet() ) == m_connected_items.end() )
         return false;
 
-    const SCH_ITEM_VEC& item_set = m_connected_items.at( Schematic()->CurrentSheet() );
+    const std::vector<SCH_ITEM*>& item_set = m_connected_items.at( Schematic()->CurrentSheet() );
 
     for( KICAD_T scanType : aScanTypes )
     {
@@ -601,9 +602,6 @@ bool SCH_LABEL_BASE::operator==( const SCH_ITEM& aOther ) const
     if( m_shape != other->m_shape )
         return false;
 
-    if( m_connectionType != other->m_connectionType )
-        return false;
-
     if( m_fields.size() != other->m_fields.size() )
         return false;
 
@@ -633,9 +631,6 @@ double SCH_LABEL_BASE::Similarity( const SCH_ITEM& aOther ) const
         similarity *= 0.9;
 
     if( m_shape == other->m_shape )
-        similarity *= 0.9;
-
-    if( m_connectionType == other->m_connectionType )
         similarity *= 0.9;
 
     for( size_t ii = 0; ii < m_fields.size(); ++ii )
@@ -782,10 +777,12 @@ void SCH_LABEL_BASE::GetContextualTextVars( wxArrayString* aVars ) const
 
 bool SCH_LABEL_BASE::ResolveTextVar( const SCH_SHEET_PATH* aPath, wxString* token, int aDepth ) const
 {
-    static wxRegEx operatingPoint( wxT( "^"
-                                        "OP"
-                                        "(.([0-9])?([a-zA-Z]*))?"
-                                        "$" ) );
+    // Per-thread regex.  CONNECTION_GRAPH::resolveAllDrivers calls this from worker
+    // threads, and wxRegEx::Matches is not safe to call concurrently on one instance.
+    thread_local wxRegEx operatingPoint( wxT( "^"
+                                              "OP"
+                                              "(.([0-9])?([a-zA-Z]*))?"
+                                              "$" ) );
 
     wxCHECK( aPath, false );
 
@@ -928,8 +925,14 @@ bool SCH_LABEL_BASE::ResolveTextVar( const SCH_SHEET_PATH* aPath, wxString* toke
     {
         SCH_SHEET* sheet = static_cast<SCH_SHEET*>( m_parent );
 
+        // aPath is expected to be either the sheet pin's owner-screen path (parent sheet as
+        // Last()) or the already-extended path whose Last() is the owning sheet itself.
+        // Only push the owner sheet when it isn't already at the end; a double-push produces
+        // a nonsense path and breaks lookups keyed on the instance (e.g. ${#} page number).
         SCH_SHEET_PATH path = *aPath;
-        path.push_back( sheet );
+
+        if( path.Last() != sheet )
+            path.push_back( sheet );
 
         if( sheet->ResolveTextVar( &path, token, aDepth + 1 ) )
             return true;
@@ -1449,12 +1452,22 @@ void SCH_LABEL_BASE::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_O
     int              layer = ( connection && connection->IsBus() ) ? LAYER_BUS : m_layer;
     COLOR4D          color = settings->GetLayerColor( layer );
     int              penWidth = GetEffectiveTextPenWidth( settings->GetDefaultPenWidth() );
+    COLOR4D          bg = settings->GetBackgroundColor();
+
+    if( bg == COLOR4D::UNSPECIFIED || !aPlotter->GetColorMode() )
+        bg = COLOR4D::WHITE;
 
     if( aPlotter->GetColorMode() && GetLabelColor() != COLOR4D::UNSPECIFIED )
         color = GetLabelColor();
 
     if( color.m_text && Schematic() )
         color = COLOR4D( ResolveText( *color.m_text, &Schematic()->CurrentSheet() ) );
+
+    if( aDimmed )
+    {
+        color.Desaturate();
+        color = color.Mix( bg, 0.5f );
+    }
 
     penWidth = std::max( penWidth, settings->GetMinPenWidth() );
     aPlotter->SetCurrentLineWidth( penWidth );
@@ -1480,10 +1493,20 @@ void SCH_LABEL_BASE::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_O
         {
             // For the graphic shape use the override color or the layer color, but not the
             // net/netclass color.
+            COLOR4D shapeColor;
+
             if( GetTextColor() != COLOR4D::UNSPECIFIED )
-                aPlotter->SetColor( GetTextColor() );
+                shapeColor = GetTextColor();
             else
-                aPlotter->SetColor( settings->GetLayerColor( m_layer ) );
+                shapeColor = settings->GetLayerColor( m_layer );
+
+            if( aDimmed )
+            {
+                shapeColor.Desaturate();
+                shapeColor = shapeColor.Mix( bg, 0.5f );
+            }
+
+            aPlotter->SetColor( shapeColor );
         }
 
         if( GetShape() == LABEL_FLAG_SHAPE::F_DOT )
@@ -1589,12 +1612,66 @@ SCH_LABEL::SCH_LABEL( const VECTOR2I& pos, const wxString& text ) :
 }
 
 
+template<typename LabelProto>
+void packLabel( LabelProto& aOutput, const SCH_LABEL_BASE& aLabel )
+{
+    using namespace kiapi::schematic;
+
+    aOutput.mutable_id()->set_value( aLabel.m_Uuid.AsStdString() );
+    aOutput.set_spin_style( ToProtoEnum<SPIN_STYLE::SPIN, types::SchematicLabelSpinStyle>( aLabel.GetSpinStyle().Spin() ) );
+    aOutput.set_locked( aLabel.IsLocked() ? kiapi::common::types::LockedState::LS_LOCKED
+                                          : kiapi::common::types::LockedState::LS_UNLOCKED );
+
+    google::protobuf::Any any;
+    aLabel.EDA_TEXT::Serialize( any, schIUScale );
+    any.UnpackTo( aOutput.mutable_text() );
+    kiapi::common::PackVector2( *aOutput.mutable_position(), aLabel.GetPosition(), schIUScale );
+
+    for( const SCH_FIELD& field : aLabel.GetFields() )
+    {
+        if( field.IsMandatory() )
+            continue;
+
+        field.Serialize( any );
+        any.UnpackTo( aOutput.mutable_fields()->Add() );
+    }
+}
+
+
+template<typename LabelProto>
+bool unpackLabel( const LabelProto& aInput, SCH_LABEL_BASE& aLabel )
+{
+    using namespace kiapi::schematic;
+
+    const_cast<KIID&>( aLabel.m_Uuid ) = KIID( aInput.id().value() );
+    aLabel.SetSpinStyle( FromProtoEnum<SPIN_STYLE::SPIN, types::SchematicLabelSpinStyle>( aInput.spin_style() ) );
+    aLabel.SetLocked( aInput.locked() == kiapi::common::types::LockedState::LS_LOCKED );
+
+    google::protobuf::Any any;
+    any.PackFrom( aInput.text() );
+
+    if( !aLabel.EDA_TEXT::Deserialize( any, schIUScale ) )
+        return false;
+
+    aLabel.SetPosition( kiapi::common::UnpackVector2( aInput.position(), schIUScale ) );
+    aLabel.GetFields().clear();
+
+    for( const types::SchematicField& field : aInput.fields() )
+    {
+        aLabel.GetFields().emplace_back( &aLabel, FIELD_T::USER );
+        any.PackFrom( field );
+        aLabel.GetFields().back().Deserialize( any );
+    }
+
+    return true;
+}
+
+
 void SCH_LABEL::Serialize( google::protobuf::Any& aContainer ) const
 {
     kiapi::schematic::types::LocalLabel label;
 
-    label.mutable_id()->set_value( m_Uuid.AsStdString() );
-    kiapi::common::PackVector2( *label.mutable_position(), GetPosition() );
+    packLabel( label, *this );
 
     aContainer.PackFrom( label );
 }
@@ -1607,10 +1684,7 @@ bool SCH_LABEL::Deserialize( const google::protobuf::Any& aContainer )
     if( !aContainer.UnpackTo( &label ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( label.id().value() );
-    SetPosition( kiapi::common::UnpackVector2( label.position() ) );
-
-    return true;
+    return unpackLabel( label, *this );
 }
 
 
@@ -1694,14 +1768,50 @@ SCH_DIRECTIVE_LABEL::~SCH_DIRECTIVE_LABEL()
 
 void SCH_DIRECTIVE_LABEL::Serialize( google::protobuf::Any& aContainer ) const
 {
-    UNIMPLEMENTED_FOR( GetClass() );
+    kiapi::schematic::types::DirectiveLabel label;
+
+    packLabel( label, *this );
+    label.set_shape( ToProtoEnum<LABEL_FLAG_SHAPE, kiapi::schematic::types::SchematicLabelShape>( GetShape() ) );
+    kiapi::common::PackDistance( *label.mutable_pin_length(), m_pinLength, schIUScale );
+    kiapi::common::PackDistance( *label.mutable_symbol_size(), m_symbolSize, schIUScale );
+
+    aContainer.PackFrom( label );
 }
 
 
 bool SCH_DIRECTIVE_LABEL::Deserialize( const google::protobuf::Any& aContainer )
 {
-    UNIMPLEMENTED_FOR( GetClass() );
-    return false;
+    kiapi::schematic::types::DirectiveLabel label;
+
+    if( !aContainer.UnpackTo( &label ) )
+        return false;
+
+    if( !unpackLabel( label, *this ) )
+        return false;
+
+    SetShape( FromProtoEnum<LABEL_FLAG_SHAPE, kiapi::schematic::types::SchematicLabelShape>( label.shape() ) );
+
+    if( label.has_pin_length() )
+        m_pinLength = kiapi::common::UnpackDistance( label.pin_length(), schIUScale );
+
+    if( label.has_symbol_size() )
+        m_symbolSize = kiapi::common::UnpackDistance( label.symbol_size(), schIUScale );
+
+    return true;
+}
+
+
+bool SCH_DIRECTIVE_LABEL::operator==( const SCH_ITEM& aOther ) const
+{
+    if( !SCH_LABEL_BASE::operator==( aOther ) )
+        return false;
+
+    const SCH_DIRECTIVE_LABEL* other = dynamic_cast<const SCH_DIRECTIVE_LABEL*>( &aOther );
+
+    if( !other )
+        return false;
+
+    return m_pinLength == other->m_pinLength && m_symbolSize == other->m_symbolSize;
 }
 
 
@@ -2014,14 +2124,63 @@ SCH_GLOBALLABEL::SCH_GLOBALLABEL( const SCH_GLOBALLABEL& aGlobalLabel ) :
 
 void SCH_GLOBALLABEL::Serialize( google::protobuf::Any& aContainer ) const
 {
-    UNIMPLEMENTED_FOR( GetClass() );
+    using namespace kiapi::schematic;
+
+    types::GlobalLabel label;
+
+    label.mutable_id()->set_value( m_Uuid.AsStdString() );
+    label.set_spin_style( ToProtoEnum<SPIN_STYLE::SPIN, types::SchematicLabelSpinStyle>( GetSpinStyle().Spin() ) );
+    label.set_locked( IsLocked() ? kiapi::common::types::LockedState::LS_LOCKED
+                                 : kiapi::common::types::LockedState::LS_UNLOCKED );
+
+    google::protobuf::Any any;
+    EDA_TEXT::Serialize( any, schIUScale );
+    any.UnpackTo( label.mutable_text() );
+    kiapi::common::PackVector2( *label.mutable_position(), GetPosition(), schIUScale );
+
+    label.set_shape( ToProtoEnum<LABEL_FLAG_SHAPE, types::SchematicLabelShape>( GetShape() ) );
+
+    for( const SCH_FIELD& field : GetFields() )
+    {
+        if( field.IsMandatory() )
+            continue;
+
+        field.Serialize( any );
+        any.UnpackTo( label.mutable_fields()->Add() );
+    }
+
+    if( const SCH_FIELD* field = GetField( FIELD_T::INTERSHEET_REFS ) )
+    {
+        google::protobuf::Any fieldAny;
+        field->Serialize( fieldAny );
+        fieldAny.UnpackTo( label.mutable_intersheet_refs_field() );
+    }
+
+    aContainer.PackFrom( label );
 }
 
 
 bool SCH_GLOBALLABEL::Deserialize( const google::protobuf::Any& aContainer )
 {
-    UNIMPLEMENTED_FOR( GetClass() );
-    return false;
+    kiapi::schematic::types::GlobalLabel label;
+
+    if( !aContainer.UnpackTo( &label ) )
+        return false;
+
+    if( !unpackLabel( label, *this ) )
+        return false;
+
+    SetShape( FromProtoEnum<LABEL_FLAG_SHAPE, kiapi::schematic::types::SchematicLabelShape>(
+            label.shape() ) );
+
+    if( label.has_intersheet_refs_field() )
+    {
+        google::protobuf::Any any;
+        any.PackFrom( label.intersheet_refs_field() );
+        GetField( FIELD_T::INTERSHEET_REFS )->Deserialize( any );
+    }
+
+    return true;
 }
 
 
@@ -2231,14 +2390,28 @@ SCH_HIERLABEL::SCH_HIERLABEL( const VECTOR2I& pos, const wxString& text, KICAD_T
 
 void SCH_HIERLABEL::Serialize( google::protobuf::Any& aContainer ) const
 {
-    UNIMPLEMENTED_FOR( GetClass() );
+    kiapi::schematic::types::HierarchicalLabel label;
+
+    packLabel( label, *this );
+    label.set_shape( ToProtoEnum<LABEL_FLAG_SHAPE, kiapi::schematic::types::SchematicLabelShape>( GetShape() ) );
+
+    aContainer.PackFrom( label );
 }
 
 
 bool SCH_HIERLABEL::Deserialize( const google::protobuf::Any& aContainer )
 {
-    UNIMPLEMENTED_FOR( GetClass() );
-    return false;
+    kiapi::schematic::types::HierarchicalLabel label;
+
+    if( !aContainer.UnpackTo( &label ) )
+        return false;
+
+    if( !unpackLabel( label, *this ) )
+        return false;
+
+    SetShape( FromProtoEnum<LABEL_FLAG_SHAPE, kiapi::schematic::types::SchematicLabelShape>( label.shape() ) );
+
+    return true;
 }
 
 

@@ -26,6 +26,7 @@
 #include <drawing_sheet/ds_data_model.h>
 #include <drc/drc_engine.h>
 #include <filename_resolver.h>
+#include <ki_exception.h>
 #include <pcb_marker.h>
 #include <pgm_base.h>
 #include <project.h>
@@ -33,7 +34,9 @@
 #include <properties/property.h>
 #include <reporter.h>
 #include <wildcards_and_files_ext.h>
+#include <unordered_set>
 #include <wx/image.h>
+#include <wx/log.h>
 
 
 std::unique_ptr<BOARD> BOARD_LOADER::Load( const wxString& aFileName,
@@ -146,5 +149,59 @@ void BOARD_LOADER::initializeLoadedBoard( BOARD* aBoard, const wxString& aFileNa
     aBoard->BuildConnectivity();
     aBoard->BuildListOfNets();
     aBoard->SynchronizeNetsAndNetClasses( true );
+
+    // Apply component class assignment rules from the project. Without this, conditions like
+    // A.hasComponentClass('Inductor') in custom DRC rules never match because no footprints
+    // have any dynamic component class assigned. The interactive load path does this in
+    // PCB_EDIT_FRAME::OpenProjectFiles; CLI and API consumers go through here.
+    if( !aBoard->SynchronizeComponentClasses( std::unordered_set<wxString>() )
+        && aOptions.reporter )
+    {
+        aOptions.reporter->Report( _( "Could not load component class assignment rules" ),
+                                   RPT_SEVERITY_WARNING );
+    }
+
+    aBoard->SynchronizeTuningProfileProperties();
+
     aBoard->UpdateUserUnits( aBoard, nullptr );
+}
+
+
+std::unique_ptr<BOARD> BOARD_LOADER::CreateEmptyBoard( PROJECT* aProject )
+{
+    std::unique_ptr<BOARD> brd = std::make_unique<BOARD>();
+    brd->SetProject( aProject );
+    return brd;
+}
+
+
+bool BOARD_LOADER::SaveBoard( wxString& aFileName, BOARD* aBoard, PCB_IO_MGR::PCB_FILE_T aFormat )
+{
+    aBoard->BuildConnectivity();
+    aBoard->SynchronizeNetsAndNetClasses( false );
+
+    try
+    {
+        PCB_IO_MGR::Save( aFormat, aFileName, aBoard, nullptr );
+    }
+    catch( const IO_ERROR& ioe )
+    {
+        wxLogError( _( "Cannot save board '%s': %s" ), aFileName, ioe.What() );
+        return false;
+    }
+    catch( const std::exception& e )
+    {
+        // Rethrow so std::bad_alloc and similar aren't silently turned into a false return.
+        wxLogError( _( "Unexpected error saving board '%s': %s" ), aFileName,
+                    wxString::FromUTF8( e.what() ) );
+        throw;
+    }
+
+    return true;
+}
+
+
+bool BOARD_LOADER::SaveBoard( wxString& aFileName, BOARD* aBoard )
+{
+    return SaveBoard( aFileName, aBoard, PCB_IO_MGR::KICAD_SEXP );
 }

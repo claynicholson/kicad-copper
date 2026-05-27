@@ -44,10 +44,14 @@
 #include <status_popup.h>
 #include <string_utils.h>
 #include <footprint_library_adapter.h>
+#include <pcb_painter.h>
 #include <pcb_shape.h>
 #include <widgets/appearance_controls.h>
 #include <widgets/wx_html_report_box.h>
 #include <widgets/footprint_diff_widget.h>
+#include <wx/choice.h>
+#include <wx/sizer.h>
+#include <wx/stattext.h>
 #include <drc/drc_item.h>
 #include <pad.h>
 #include <pcb_track.h>
@@ -444,6 +448,25 @@ void BOARD_INSPECTION_TOOL::reportHeader( const wxString& aTitle, BOARD_ITEM* a,
                + wxT( "<li>" ) + EscapeHTML( getItemDescription( a ) ) + wxT( "</li>" )
                + wxT( "<li>" ) + EscapeHTML( getItemDescription( b ) ) + wxT( "</li></ul>" ) );
 }
+
+
+namespace
+{
+class VECTOR_REPORTER : public REPORTER
+{
+public:
+    REPORTER& Report( const wxString& aText, SEVERITY aSeverity = RPT_SEVERITY_UNDEFINED ) override
+    {
+        m_messages.push_back( aText );
+        return *this;
+    }
+
+    bool      HasMessage() const override { return !m_messages.empty(); }
+    EDA_UNITS GetUnits() const override { return EDA_UNITS::UNSCALED; }
+
+    std::vector<wxString> m_messages;
+};
+} // namespace
 
 
 wxString reportMin( PCB_BASE_FRAME* aFrame, DRC_CONSTRAINT& aConstraint )
@@ -1164,46 +1187,117 @@ void BOARD_INSPECTION_TOOL::reportClearance( BOARD_ITEM* aItemA, BOARD_ITEM* aIt
     }
     else if( copperIntersection.any() && !aFP && !bFP )
     {
-        PCB_LAYER_ID layer = active;
+        bool sameNet = ac && bc && ac->GetNetCode() > 0 && ac->GetNetCode() == bc->GetNetCode();
 
-        if( !copperIntersection.test( layer ) )
-            layer = copperIntersection.Seq().front();
+        std::vector<PCB_LAYER_ID> layers;
 
-        r = dialog->AddHTMLPage( m_frame->GetBoard()->GetLayerName( layer ) );
-        reportHeader( _( "Clearance resolution for:" ), a, b, layer, r );
+        if( copperIntersection.test( active ) )
+            layers.push_back( active );
 
-        if( ac && bc && ac->GetNetCode() > 0 && ac->GetNetCode() == bc->GetNetCode() )
+        for( PCB_LAYER_ID layer : copperIntersection.Seq() )
         {
-            r->Report( _( "Items belong to the same net. Min clearance is 0." ) );
+            if( layer != active )
+                layers.push_back( layer );
         }
-        else
+
+        auto fillReport = [&]( PCB_LAYER_ID layer, REPORTER* rep )
         {
-            constraint = drcEngine->EvalRules( CLEARANCE_CONSTRAINT, a, b, layer, r );
+            reportHeader( _( "Clearance resolution for:" ), a, b, layer, rep );
+
+            if( sameNet )
+            {
+                rep->Report( _( "Items belong to the same net. Min clearance is 0." ) );
+                return;
+            }
+
+            constraint = drcEngine->EvalRules( CLEARANCE_CONSTRAINT, a, b, layer, rep );
             clearance = constraint.m_Value.Min();
 
             if( compileError )
-                reportCompileError( r );
+                reportCompileError( rep );
 
-            r->Report( "" );
+            rep->Report( "" );
 
             if( constraint.IsNull() )
             {
-                r->Report( _( "Min clearance is 0." ) );
+                rep->Report( _( "Min clearance is 0." ) );
             }
             else if( clearance < 0 )
             {
-                r->Report( wxString::Format( _( "Resolved clearance: %s; clearance will not be "
-                                                "tested." ),
-                                             m_frame->StringFromValue( clearance, true ) ) );
+                rep->Report( wxString::Format( _( "Resolved clearance: %s; clearance will "
+                                                  "not be tested." ),
+                                               m_frame->StringFromValue( clearance, true ) ) );
             }
             else
             {
-                r->Report( wxString::Format( _( "Resolved min clearance: %s." ),
-                                             m_frame->StringFromValue( clearance, true ) ) );
+                rep->Report( wxString::Format( _( "Resolved min clearance: %s." ),
+                                               m_frame->StringFromValue( clearance, true ) ) );
             }
-        }
+        };
 
-        r->Flush();
+        if( layers.size() == 1 )
+        {
+            PCB_LAYER_ID layer = layers.front();
+
+            r = dialog->AddHTMLPage( m_frame->GetBoard()->GetLayerName( layer ) );
+            fillReport( layer, r );
+            r->Flush();
+        }
+        else
+        {
+            auto perLayerMessages = std::make_shared<std::vector<std::vector<wxString>>>();
+            perLayerMessages->reserve( layers.size() );
+
+            for( PCB_LAYER_ID layer : layers )
+            {
+                VECTOR_REPORTER tmp;
+                fillReport( layer, &tmp );
+                perLayerMessages->push_back( std::move( tmp.m_messages ) );
+            }
+
+            wxPanel*    panel = dialog->AddBlankPage( _( "Clearance" ) );
+            wxBoxSizer* vbox = new wxBoxSizer( wxVERTICAL );
+
+            wxChoice* choice = new wxChoice( panel, wxID_ANY );
+
+            for( PCB_LAYER_ID layer : layers )
+                choice->Append( m_frame->GetBoard()->GetLayerName( layer ) );
+
+            choice->SetSelection( 0 );
+
+            WX_HTML_REPORT_BOX* reportBox = new WX_HTML_REPORT_BOX( panel, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                                                                    wxHW_SCROLLBAR_AUTO | wxBORDER_SIMPLE );
+            reportBox->SetUnits( m_frame->GetUserUnits() );
+
+            wxStaticText* layerLabel = new wxStaticText( panel, wxID_ANY, _( "Layer:" ) );
+
+            vbox->Add( layerLabel, 0, wxLEFT | wxRIGHT | wxTOP, 5 );
+            vbox->Add( choice, 0, wxEXPAND | wxALL, 5 );
+            vbox->Add( reportBox, 1, wxEXPAND | wxALL, 5 );
+            panel->SetSizer( vbox );
+            panel->Layout();
+
+            auto refresh = [reportBox, perLayerMessages]( int sel )
+            {
+                reportBox->Clear();
+
+                if( sel >= 0 && sel < (int) perLayerMessages->size() )
+                {
+                    for( const wxString& line : ( *perLayerMessages )[sel] )
+                        reportBox->Report( line );
+                }
+
+                reportBox->Flush();
+            };
+
+            choice->Bind( wxEVT_CHOICE,
+                          [refresh]( wxCommandEvent& evt )
+                          {
+                              refresh( evt.GetSelection() );
+                          } );
+
+            refresh( 0 );
+        }
     }
 
     if( ac && bc )
@@ -1215,10 +1309,16 @@ void BOARD_INSPECTION_TOOL::reportClearance( BOARD_ITEM* aItemA, BOARD_ITEM* aIt
         if( DRC_ENGINE::MatchDpSuffix( refNet->GetNetname(), coupledNet, dummy )
                 && bc->GetNetname() == coupledNet )
         {
-            r = dialog->AddHTMLPage( _( "Diff Pair" ) );
-            reportHeader( _( "Diff-pair gap resolution for:" ), ac, bc, active, r );
+            LSET         dpIntersection = ac->GetLayerSet() & bc->GetLayerSet() & LSET::AllCuMask();
+            PCB_LAYER_ID dpLayer = active;
 
-            constraint = drcEngine->EvalRules( DIFF_PAIR_GAP_CONSTRAINT, ac, bc, active, r );
+            if( !dpIntersection.test( dpLayer ) && dpIntersection.any() )
+                dpLayer = dpIntersection.Seq().front();
+
+            r = dialog->AddHTMLPage( _( "Diff Pair" ) );
+            reportHeader( _( "Diff-pair gap resolution for:" ), ac, bc, dpLayer, r );
+
+            constraint = drcEngine->EvalRules( DIFF_PAIR_GAP_CONSTRAINT, ac, bc, dpLayer, r );
 
             r->Report( "" );
             r->Report( wxString::Format( _( "Resolved gap constraints: min %s; opt %s; max %s." ),
@@ -1229,8 +1329,7 @@ void BOARD_INSPECTION_TOOL::reportClearance( BOARD_ITEM* aItemA, BOARD_ITEM* aIt
             r->Report( "" );
             r->Report( "" );
             r->Report( "" );
-            reportHeader( _( "Diff-pair max uncoupled length resolution for:" ), ac, bc,
-                          active, r );
+            reportHeader( _( "Diff-pair max uncoupled length resolution for:" ), ac, bc, dpLayer, r );
 
             if( !drcEngine->HasRulesForConstraintType( MAX_UNCOUPLED_CONSTRAINT ) )
             {
@@ -1239,7 +1338,7 @@ void BOARD_INSPECTION_TOOL::reportClearance( BOARD_ITEM* aItemA, BOARD_ITEM* aIt
             }
             else
             {
-                constraint = drcEngine->EvalRules( MAX_UNCOUPLED_CONSTRAINT, ac, bc, active, r );
+                constraint = drcEngine->EvalRules( MAX_UNCOUPLED_CONSTRAINT, ac, bc, dpLayer, r );
 
                 r->Report( "" );
                 r->Report( wxString::Format( _( "Resolved max uncoupled length: %s." ),
@@ -1339,7 +1438,7 @@ void BOARD_INSPECTION_TOOL::reportClearance( BOARD_ITEM* aItemA, BOARD_ITEM* aIt
             layer = active;
         else if( a->HasHole() && b->IsOnCopperLayer() )
             layer = b->GetLayer();
-        else if( b->HasHole() && b->IsOnCopperLayer() )
+        else if( b->HasHole() && a->IsOnCopperLayer() )
             layer = a->GetLayer();
 
         if( layer >= 0 )
@@ -2087,9 +2186,54 @@ int BOARD_INSPECTION_TOOL::HighlightItem( const TOOL_EVENT& aEvent )
 
     const std::set<int>& netcodes = settings->GetHighlightNetCodes();
 
-    // Toggle highlight when the same net was picked
-    if( !aUseSelection && netcodes.size() == 1 && netcodes.contains( net ) )
+    if( !aUseSelection && net >= 0 && netcodes.size() == 1 && netcodes.contains( net ) && settings->IsHighlightEnabled() )
+    {
+        if( BOARD* board2 = m_frame->GetBoard() )
+        {
+            if( NETINFO_ITEM* netinfo = board2->FindNet( net ) )
+            {
+                wxString sig = netinfo->GetNetChain();
+                if( !sig.IsEmpty() )
+                {
+                    int count = 0;
+                    for( NETINFO_ITEM* n : board2->GetNetInfo() )
+                        if( n->GetNetChain() == sig )
+                            count++;
+
+                    if( count > 1 )
+                    {
+                        std::set<int> sigCodes;
+
+
+                        for( NETINFO_ITEM* n : board2->GetNetInfo() )
+                            if( n->GetNetChain() == sig )
+                                sigCodes.insert( n->GetNetCode() );
+
+                        settings->SetHighlight( sigCodes, true );
+                        m_toolMgr->GetView()->UpdateAllLayersColor();
+                        m_currentlyHighlighted = sigCodes;
+                        m_highlightedNetChain    = sig;
+
+                        board2->ResetNetHighLight();
+                        for( int c : sigCodes )
+                            board2->SetHighLightNet( c, true );
+                        board2->HighLightON();
+
+                        if( auto pcbSettings = dynamic_cast<KIGFX::PCB_RENDER_SETTINGS*>( settings ) )
+                            pcbSettings->SetHighlightedNetChain( sig );
+
+                        return true;
+                    }
+                }
+            }
+        }
+
         enableHighlight = !settings->IsHighlightEnabled();
+    }
+    else if( !aUseSelection && netcodes.size() == 1 && netcodes.contains( net ) )
+    {
+        enableHighlight = !settings->IsHighlightEnabled();
+    }
 
     if( enableHighlight != settings->IsHighlightEnabled() || !netcodes.count( net ) )
     {
@@ -2142,6 +2286,31 @@ int BOARD_INSPECTION_TOOL::HighlightNet( const TOOL_EVENT& aEvent )
         m_toolMgr->GetView()->UpdateAllLayersColor();
         m_currentlyHighlighted.clear();
         m_currentlyHighlighted.insert( netcode );
+
+        // If this net belongs to a multi-net chain and was already highlighted, escalate to chain highlight
+        if( BOARD* board = m_frame->GetBoard() )
+        {
+            if( NETINFO_ITEM* net = board->FindNet( netcode ) )
+            {
+                wxString sig = net->GetNetChain();
+                if( !sig.IsEmpty() )
+                {
+                    int count = 0;
+                    for( NETINFO_ITEM* n : board->GetNetInfo() )
+                        if( n->GetNetChain() == sig )
+                            count++;
+                    bool alreadyHighlighted = highlighted.count( netcode );
+                    if( count > 1 && alreadyHighlighted )
+                    {
+                        if( m_highlightedNetChain != sig )
+                        {
+                            TOOL_EVENT sigEvt = PCB_ACTIONS::highlightNetChain.MakeEvent();
+                            HighlightNetChain( sigEvt );
+                        }
+                    }
+                }
+            }
+        }
     }
     else if( aEvent.IsAction( &PCB_ACTIONS::highlightNetSelection ) )
     {
@@ -2171,6 +2340,111 @@ int BOARD_INSPECTION_TOOL::HighlightNet( const TOOL_EVENT& aEvent )
 }
 
 
+int BOARD_INSPECTION_TOOL::HighlightNetChain( const TOOL_EVENT& aEvent )
+{
+    KIGFX::VIEW_CONTROLS* controls = getViewControls();
+    VECTOR2D cursorPos = controls->GetCursorPosition( !aEvent.DisableGridSnapping() );
+    BOARD_ITEM* item = nullptr;
+    {
+        // Collect nearest connectable item at cursor position
+        BOARD* board = m_frame->GetBoard();
+        GENERAL_COLLECTORS_GUIDE guide = m_frame->GetCollectorsGuide();
+        GENERAL_COLLECTOR collector;
+        collector.Collect( board, { PCB_PAD_T, PCB_VIA_T, PCB_TRACE_T, PCB_ARC_T, PCB_SHAPE_T }, cursorPos,
+                           guide );
+
+        if( collector.GetCount() > 0 )
+            item = static_cast<BOARD_ITEM*>( collector[0] );
+    }
+    wxString sig;
+
+    if( item )
+    {
+        NETINFO_ITEM* net = nullptr;
+
+        if( auto pad = dynamic_cast<PAD*>( item ) )
+            net = pad->GetNet();
+        else if( auto ci = dynamic_cast<BOARD_CONNECTED_ITEM*>( item ) )
+            net = ci->GetNet();
+
+        if( net )
+            sig = net->GetNetChain();
+    }
+
+    KIGFX::RENDER_SETTINGS* settings = m_toolMgr->GetView()->GetPainter()->GetSettings();
+
+    // If no chain under cursor and a chain is currently highlighted, toggle off
+    if( sig.IsEmpty() && !m_highlightedNetChain.IsEmpty() )
+    {
+        m_highlightedNetChain.clear();
+        settings->SetHighlight( false );
+        m_currentlyHighlighted.clear();
+        m_toolMgr->GetView()->UpdateAllLayersColor();
+    if( auto pcbSettings = dynamic_cast<KIGFX::PCB_RENDER_SETTINGS*>( settings ) )
+            pcbSettings->SetHighlightedNetChain( wxString() );
+        return 0;
+    }
+
+    // If same chain already highlighted, clear highlight
+    if( !sig.IsEmpty() && sig == m_highlightedNetChain )
+    {
+        m_highlightedNetChain.clear();
+        settings->SetHighlight( false );
+        m_currentlyHighlighted.clear();
+        m_toolMgr->GetView()->UpdateAllLayersColor();
+    if( auto pcbSettings = dynamic_cast<KIGFX::PCB_RENDER_SETTINGS*>( settings ) )
+            pcbSettings->SetHighlightedNetChain( wxString() );
+        return 0;
+    }
+
+    // If we have a net highlight active but no chain highlight, convert to chain highlight
+    if( !sig.IsEmpty() && m_highlightedNetChain.IsEmpty() && !m_currentlyHighlighted.empty() )
+    {
+        // Determine chain from first highlighted net if cursor item had no chain
+        if( sig.IsEmpty() )
+        {
+            int firstCode = *m_currentlyHighlighted.begin();
+            if( NETINFO_ITEM* net = m_frame->GetBoard()->FindNet( firstCode ) )
+                sig = net->GetNetChain();
+        }
+    }
+
+    m_highlightedNetChain = sig;
+    if( auto pcbSettings = dynamic_cast<KIGFX::PCB_RENDER_SETTINGS*>( settings ) )
+        pcbSettings->SetHighlightedNetChain( sig );
+
+    std::set<int> codes;
+    if( !sig.IsEmpty() )
+    {
+        for( NETINFO_ITEM* net : m_frame->GetBoard()->GetNetInfo() )
+        {
+            if( net->GetNetChain() == sig )
+                codes.insert( net->GetNetCode() );
+        }
+    }
+
+    settings->SetHighlight( codes, true );
+    m_toolMgr->GetView()->UpdateAllLayersColor();
+    m_currentlyHighlighted = codes;
+
+    return 0;
+}
+
+
+int BOARD_INSPECTION_TOOL::ReplaceTerminalPad( const TOOL_EVENT& aEvent )
+{
+    if( m_highlightedNetChain.IsEmpty() )
+        return 0;
+
+    // Parameters are passed as a single pair<old,new>
+    auto ids = aEvent.Parameter<std::pair<wxString, wxString>>();
+    KIID oldId( ids.first );
+    KIID newId( ids.second );
+    m_frame->GetBoard()->ReplaceNetChainTerminalPad( m_highlightedNetChain, oldId, newId );
+    return 0;
+}
+
+
 int BOARD_INSPECTION_TOOL::ClearHighlight( const TOOL_EVENT& aEvent )
 {
     BOARD*                  board = static_cast<BOARD*>( m_toolMgr->GetModel() );
@@ -2181,6 +2455,9 @@ int BOARD_INSPECTION_TOOL::ClearHighlight( const TOOL_EVENT& aEvent )
 
     board->ResetNetHighLight();
     settings->SetHighlight( false );
+    // Also clear any chain-specific state
+    if( auto pcbSettings = dynamic_cast<KIGFX::PCB_RENDER_SETTINGS*>( settings ) )
+        pcbSettings->SetHighlightedNetChain( wxString() );
     m_toolMgr->GetView()->UpdateAllLayersColor();
     m_frame->SetMsgPanel( board );
     m_frame->SendCrossProbeNetName( "" );
@@ -2446,9 +2723,11 @@ void BOARD_INSPECTION_TOOL::setTransitions()
     Go( &BOARD_INSPECTION_TOOL::HighlightNet,        PCB_ACTIONS::highlightNet.MakeEvent() );
     Go( &BOARD_INSPECTION_TOOL::HighlightNet,        PCB_ACTIONS::highlightNetSelection.MakeEvent() );
     Go( &BOARD_INSPECTION_TOOL::HighlightNet,        PCB_ACTIONS::toggleLastNetHighlight.MakeEvent() );
+    Go( &BOARD_INSPECTION_TOOL::HighlightNetChain,     PCB_ACTIONS::highlightNetChain.MakeEvent() );
     Go( &BOARD_INSPECTION_TOOL::ClearHighlight,      PCB_ACTIONS::clearHighlight.MakeEvent() );
     Go( &BOARD_INSPECTION_TOOL::HighlightNet,        PCB_ACTIONS::toggleNetHighlight.MakeEvent() );
     Go( &BOARD_INSPECTION_TOOL::HighlightItem,       PCB_ACTIONS::highlightItem.MakeEvent() );
+    Go( &BOARD_INSPECTION_TOOL::ReplaceTerminalPad,  PCB_ACTIONS::setTerminalPad.MakeEvent() );
 
     Go( &BOARD_INSPECTION_TOOL::HideNetInRatsnest,   PCB_ACTIONS::hideNetInRatsnest.MakeEvent() );
     Go( &BOARD_INSPECTION_TOOL::ShowNetInRatsnest,   PCB_ACTIONS::showNetInRatsnest.MakeEvent() );

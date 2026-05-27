@@ -92,10 +92,12 @@ public:
 
     PCB_IO_KICAD_SEXPR_PARSER( LINE_READER* aReader, BOARD* aAppendToMe,
                                std::function<bool( wxString, int, wxString, wxString )> aQueryUserCallback,
-                               PROGRESS_REPORTER* aProgressReporter = nullptr, unsigned aLineCount = 0 ) :
+                               PROGRESS_REPORTER* aProgressReporter = nullptr, unsigned aLineCount = 0,
+                               bool aPreserveDestinationStackup = false ) :
             PCB_LEXER( aReader ),
             m_board( aAppendToMe ),
             m_appendToExisting( aAppendToMe != nullptr ),
+            m_preserveDestinationStackup( aPreserveDestinationStackup ),
             m_progressReporter( aProgressReporter ),
             m_lastProgressTime( std::chrono::steady_clock::now() ),
             m_lineCount( aLineCount ),
@@ -227,6 +229,7 @@ private:
     void parseDefaultTextDims( BOARD_DESIGN_SETTINGS& aSettings, int aLayer );
     void parseNETINFO_ITEM();
     void parseNETCLASS();
+    void parseNET_CHAINS_SECTION();
 
     void parseTEARDROP_PARAMETERS( TEARDROP_PARAMETERS* tdParams );
 
@@ -358,7 +361,7 @@ private:
      */
     void parseRenderCache( EDA_TEXT* text );
 
-    FP_3DMODEL* parse3DModel();
+    FP_3DMODEL* parse3DModel( bool aFileNameAlreadyParsed = false );
 
     /**
      * Parse the current token as an ASCII numeric string with possible leading
@@ -443,6 +446,7 @@ private:
     int                 m_requiredVersion;  ///< set to the KiCad format version this board requires
     wxString            m_generatorVersion; ///< Set to the generator version this board requires
     bool                m_appendToExisting; ///< reading into an existing board; reset UUIDs
+    bool                m_preserveDestinationStackup; ///< append keeps destination stackup
 
     ///< if resetting UUIDs, record new ones to update groups with.
     KIID_MAP            m_resetKIIDMap;

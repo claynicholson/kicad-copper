@@ -25,6 +25,9 @@
 
 #include "pcb_reference_image.h"
 
+#include <api/api_enums.h>
+#include <api/api_utils.h>
+#include <api/board/board_types.pb.h>
 #include <base_units.h>
 #include <bitmaps.h>
 #include <board.h>
@@ -40,7 +43,8 @@
 #include <settings/color_settings.h>
 #include <trigo.h>
 
-#include <wx/mstream.h>
+#include <string>
+#include <google/protobuf/any.pb.h>
 #include <properties/property.h>
 #include <properties/property_mgr.h>
 
@@ -168,6 +172,56 @@ void PCB_REFERENCE_IMAGE::Move( const VECTOR2I& aMoveVector )
 {
     // Defer to SetPosition to check the new position overflow
     SetPosition( GetPosition() + aMoveVector );
+}
+
+
+void PCB_REFERENCE_IMAGE::Serialize( google::protobuf::Any& aContainer ) const
+{
+    using namespace kiapi::board::types;
+
+    ReferenceImage refImage;
+
+    refImage.mutable_id()->set_value( m_Uuid.AsStdString() );
+    refImage.set_layer( ToProtoEnum<PCB_LAYER_ID, BoardLayer>( m_layer ) );
+    kiapi::common::PackVector2( *refImage.mutable_position(), m_referenceImage.GetPosition() );
+    kiapi::common::PackVector2( *refImage.mutable_transform_origin_offset(),
+                                m_referenceImage.GetTransformOriginOffset() );
+
+    refImage.mutable_image_scale()->set_value( m_referenceImage.GetImageScale() );
+    refImage.set_locked( IsLocked() ? kiapi::common::types::LockedState::LS_LOCKED
+                                    : kiapi::common::types::LockedState::LS_UNLOCKED );
+
+    m_referenceImage.PackToBytes( *refImage.mutable_image_data() );
+
+    aContainer.PackFrom( refImage );
+}
+
+
+bool PCB_REFERENCE_IMAGE::Deserialize( const google::protobuf::Any& aContainer )
+{
+    using namespace kiapi::board::types;
+
+    ReferenceImage refImage;
+
+    if( !aContainer.UnpackTo( &refImage ) )
+        return false;
+
+    SetUuidDirect( KIID( refImage.id().value() ) );
+    SetLayer( FromProtoEnum<PCB_LAYER_ID, BoardLayer>( refImage.layer() ) );
+    SetPosition( kiapi::common::UnpackVector2( refImage.position() ) );
+    m_referenceImage.SetTransformOriginOffset( kiapi::common::UnpackVector2( refImage.transform_origin_offset() ) );
+
+    if( !refImage.image_data().empty() )
+    {
+        if( !m_referenceImage.UnpackFromBytes( refImage.image_data() ) )
+            return false;
+    }
+
+    if( refImage.has_image_scale() )
+        m_referenceImage.SetImageScale( refImage.image_scale().value() );
+
+    SetLocked( refImage.locked() == kiapi::common::types::LockedState::LS_LOCKED );
+    return true;
 }
 
 

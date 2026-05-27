@@ -54,7 +54,6 @@
 
 // Needed to handle adding the plugins to the toolbar
 // TODO (ISM): This should be better abstracted away from the toolbars
-#include <python_scripting.h>
 #include <api/api_plugin_manager.h>
 
 
@@ -292,13 +291,8 @@ void ACTION_TOOLBAR::ApplyConfiguration( const TOOLBAR_CONFIGURATION& aConfig )
 {
     wxASSERT( GetParent() );
 
-    std::map<std::string, std::string> currentGroupItems;
-
-    for( const auto& [id, group] : m_actionGroups )
-    {
-        if( m_toolActions[group->GetUIId()] )
-            currentGroupItems[group->GetName()] = m_toolActions[group->GetUIId()]->GetName();
-    }
+    // Keep each group's selection across the rebuild.
+    std::map<std::string, std::string> currentGroupItems = m_groupSelections;
 
     // Remove existing tools
     ClearToolbar();
@@ -351,6 +345,10 @@ void ACTION_TOOLBAR::ApplyConfiguration( const TOOLBAR_CONFIGURATION& aConfig )
                         defaultTool = grpAction;
                 }
             }
+
+            // A group needs at least one action
+            if( tools.empty() )
+                continue;
 
             std::unique_ptr<ACTION_GROUP> group = std::make_unique<ACTION_GROUP>( groupName, tools );
 
@@ -611,6 +609,7 @@ void ACTION_TOOLBAR::doSelectAction( ACTION_GROUP* aGroup, const TOOL_ACTION& aA
 
     // Update the currently selected action
     m_toolActions[ groupId ] = &aAction;
+    m_groupSelections[aGroup->GetName()] = aAction.GetName();
 
     Refresh();
 }
@@ -734,6 +733,18 @@ void ACTION_TOOLBAR::onToolEvent( wxAuiToolBarEvent& aEvent )
         // Determine if the tool is actually cancellable
         bool isCancellable = ( cancelIt != m_toolCancellable.end() ) ? cancelIt->second : false;
 
+        // The selection tool is a special case because it is the "default" tool and does not show
+        // up on the tool stack. We want to toggle through selection modes only when the tool is
+        // already active.
+        bool selectionSpecialCase = false;
+
+        if( actionIt != m_toolActions.end() )
+        {
+            selectionSpecialCase = m_parent->ToolStackIsEmpty()
+                                   && ( actionIt->second->GetId() == ACTIONS::selectSetRect.GetId()
+                                        || actionIt->second->GetId() == ACTIONS::selectSetLasso.GetId() );
+        }
+
         // The toolbar item is toggled before the event is sent, so we check for it not being
         // toggled to see if it was toggled originally
         if( isCancellable && !GetToolToggled( id ) )
@@ -743,12 +754,13 @@ void ACTION_TOOLBAR::onToolEvent( wxAuiToolBarEvent& aEvent )
             handled = true;
         }
         else if( groupIt != m_actionGroups.end()
-                 && std::none_of( groupIt->second->GetActions().begin(),
-                                  groupIt->second->GetActions().end(),
-                                  []( const TOOL_ACTION* a )
-                                  {
-                                      return a->IsActivation();
-                                  } ) )
+                 && ( selectionSpecialCase
+                      || std::none_of( groupIt->second->GetActions().begin(),
+                                       groupIt->second->GetActions().end(),
+                                       []( const TOOL_ACTION* a )
+                                       {
+                                           return a->IsActivation();
+                                       } ) ) )
         {
             // For non-tool toggle groups (units, crosshair, line modes), cycle to the next
             // action on click. Tool groups (route track, etc.) fall through and just dispatch
@@ -903,8 +915,13 @@ void ACTION_TOOLBAR::onPaletteEvent( wxCommandEvent& aEvent )
     if( !m_palette )
         return;
 
+    // Clear m_palette up front so a re-entrant dispatch (modal dialog pumping events)
+    // hits the null guard above instead of double-destroying.
+    ACTION_TOOLBAR_PALETTE* palette = m_palette;
+    m_palette = nullptr;
+
     OPT_TOOL_EVENT evt;
-    ACTION_GROUP*  group = m_palette->GetGroup();
+    ACTION_GROUP*  group = palette->GetGroup();
 
     // Find the action corresponding to the button press
     auto actionIt = std::find_if( group->GetActions().begin(), group->GetActions().end(),
@@ -928,9 +945,8 @@ void ACTION_TOOLBAR::onPaletteEvent( wxCommandEvent& aEvent )
     }
 
     // Hide the palette
-    m_palette->Hide();
-    m_palette->Destroy();
-    m_palette = nullptr;
+    palette->Hide();
+    palette->Destroy();
 }
 
 
@@ -1221,4 +1237,4 @@ ACTION_TOOLBAR_CONTROL ACTION_TOOLBAR_CONTROLS::bodyStyleSelector( "control.Body
 ACTION_TOOLBAR_CONTROL ACTION_TOOLBAR_CONTROLS::overrideLocks( "control.OverrideLocks",
                                                                _( "Override locks" ),
                                                                _( "Allow moving of locked items with the mouse" ),
-                                                               { FRAME_PCB_EDITOR } );
+                                                               { FRAME_PCB_EDITOR, FRAME_SCH } );

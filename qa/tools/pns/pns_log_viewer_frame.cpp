@@ -353,7 +353,10 @@ void PNS_LOG_VIEWER_FRAME::LoadLogFile( const wxString& aFile )
     logFn.MakeAbsolute();
 
     if( logFile->Load( logFn, m_reporter.get() ) )
+    {
         SetLogFile( logFile.release() );
+        m_mruPath = logFn.GetPath();
+    }
 }
 
 
@@ -451,10 +454,18 @@ void PNS_LOG_VIEWER_FRAME::onSaveAs( wxCommandEvent& event )
 
         wxASSERT_MSG( create_me.IsAbsolute(), wxS( "wxFileDialog returned non-absolute path" ) );
 
+        int option = SelectSingleOption( this, _( "Select test case type" ), _( "Select test case type" ),
+                                         { _( "Testcase (strict geometry)" ), _( "Testcase (connectivity only)" ),
+                                           _( "Testcase (expected failure)" ), _( "Known bug" ) } );
+
+        if ( option >= 0 )
+        {
+            m_logFile->SetTestCaseType( static_cast<PNS::LOGGER::TEST_CASE_TYPE>( option ) );
+        }
+
         m_logFile->SaveLog( create_me, m_reporter.get() );
         m_mruPath = create_me.GetPath();
     }
-
 }
 
 
@@ -1019,7 +1030,7 @@ int render_perftest_main_func( int argc, char* argv[] )
     std::shared_ptr<BOARD> brd ( loadBoard( argv[1] ) );
     cnt.Stop();
 
-    KI_TRACE( traceGalProfile, "%s\n", cnt.to_string() );
+    wxLogTrace( traceGalProfile, "%s", cnt.to_string() );
 
     frame->SetBoard2( brd );
 

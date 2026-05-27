@@ -29,6 +29,7 @@
 #include <wx/log.h>
 #include <wx/filename.h>
 #include <wx/filedlg.h>
+#include <wx/hyperlink.h>
 #include <wx/socket.h>
 #include <wx/wupdlock.h>
 
@@ -57,6 +58,7 @@
 #include <dialogs/dialog_find_by_properties.h>
 #include <dialog_footprint_properties.h>
 #include <dialogs/dialog_exchange_footprints.h>
+#include <dialogs/dialog_migrate_3d_models.h>
 #include <dialog_board_setup.h>
 #include <dialogs/dialog_dimension_properties.h>
 #include <dialogs/dialog_table_properties.h>
@@ -67,13 +69,15 @@
 #include <pcb_track.h>
 #include <layer_pairs.h>
 #include <drawing_sheet/ds_proxy_view_item.h>
+#include <board_text_var_adapter.h>
+#include <text_var_dependency.h>
+#include <view/view.h>
 #include <wildcards_and_files_ext.h>
 #include <functional>
 #include <pcb_barcode.h>
 #include <pcb_painter.h>
 #include <project/project_file.h>
 #include <project/project_local_settings.h>
-#include <python_scripting.h>
 #include <settings/common_settings.h>
 #include <settings/settings_manager.h>
 #include <local_history.h>
@@ -117,7 +121,6 @@
 #include <tools/multichannel_tool.h>
 #include <router/router_tool.h>
 #include <autorouter/autoplace_tool.h>
-#include <python/scripting/pcb_scripting_tool.h>
 #include <netlist_reader/netlist_reader.h>
 #include <dialog_drc.h>     // for DIALOG_DRC_WINDOW_NAME definition
 #include <ratsnest/ratsnest_view_item.h>
@@ -146,11 +149,7 @@
 #include <api/api_utils.h>
 #endif
 
-#include <action_plugin.h>
-#include <pcbnew_scripting_helpers.h>
 #include <richio.h>
-
-#include "../scripting/python_scripting.h"
 
 using namespace std::placeholders;
 
@@ -307,6 +306,18 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     CreateInfoBar();
 
+    // Secondary infobar stacked above the main one.  Load-time notices (such as
+    // the WRL -> STEP migration prompt) belong here so they aren't clobbered by
+    // the main infobar's read-only warnings, DRC rule errors, etc.
+#if defined( __WXOSX_MAC__ )
+    m_loadNoticeInfoBar = new WX_INFOBAR( GetToolCanvas() );
+#else
+    m_loadNoticeInfoBar = new WX_INFOBAR( this, &m_auimgr );
+    m_auimgr.AddPane( m_loadNoticeInfoBar,
+                      EDA_PANE().InfoBar().Name( wxS( "LoadNoticeInfoBar" ) ).Top().Layer( 1 )
+                              .Row( 1 ) );
+#endif
+
     unsigned int auiFlags = wxAUI_MGR_DEFAULT;
 #if !defined( _WIN32 )
     // Windows cannot redraw the UI fast enough during a live resize and may lead to all kinds
@@ -410,6 +421,16 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_auimgr.GetPane( "SelectionFilter" ).dock_proportion = 0;
     FinishAUIInitialization();
 
+    // FinishAUIInitialization only hides the primary "InfoBar" pane; the
+    // stacked load-notice bar has to be hidden explicitly.
+#if !defined( __WXOSX_MAC__ )
+    if( wxAuiPaneInfo& pane = m_auimgr.GetPane( wxS( "LoadNoticeInfoBar" ) ); pane.IsOk() )
+    {
+        pane.Hide();
+        m_auimgr.Update();
+    }
+#endif
+
     if( aui_cfg.right_panel_width > 0 )
     {
         wxAuiPaneInfo& layersManager = m_auimgr.GetPane( wxS( "LayersManager" ) );
@@ -502,10 +523,6 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     catch( PARSE_ERROR& )
     {
     }
-
-    // Ensure the Python interpreter is up to date with its environment variables
-    PythonSyncEnvironmentVariables();
-    PythonSyncProjectName();
 
     // Sync action plugins in case they changed since the last time the frame opened
     GetToolManager()->RunAction( ACTIONS::pluginsReload );
@@ -748,7 +765,9 @@ void PCB_EDIT_FRAME::OnCrossProbeFlashTimer( wxTimerEvent& aEvent )
 
 PCB_EDIT_FRAME::~PCB_EDIT_FRAME()
 {
-    ScriptingOnDestructPcbEditFrame( this );
+    // PCB_BASE_FRAME's dtor deletes m_pcb; canvas children outlive it.  Drop
+    // every cached TEXT_VAR_TRACKER* before the tracker is freed.
+    detachTextVarTracker();
 
     if( ADVANCED_CFG::GetCfg().m_ShowEventCounters )
     {
@@ -786,11 +805,32 @@ PCB_EDIT_FRAME::~PCB_EDIT_FRAME()
 }
 
 
-void PCB_EDIT_FRAME::SetBoard( BOARD* aBoard, bool aBuildConnectivity,
-                               PROGRESS_REPORTER* aReporter )
+void PCB_EDIT_FRAME::detachTextVarTracker()
 {
+    if( GetCanvas() )
+    {
+        if( DS_PROXY_VIEW_ITEM* sheet = GetCanvas()->GetDrawingSheet() )
+            sheet->AttachToTracker( nullptr );
+    }
+
+    if( m_textVarListenerTracker && m_textVarListenerHandle != TEXT_VAR_TRACKER::INVALID_LISTENER )
+    {
+        m_textVarListenerTracker->RemoveInvalidateListener( m_textVarListenerHandle );
+        m_textVarListenerHandle = TEXT_VAR_TRACKER::INVALID_LISTENER;
+        m_textVarListenerTracker = nullptr;
+    }
+}
+
+
+void PCB_EDIT_FRAME::SetBoard( BOARD* aBoard, bool aBuildConnectivity, PROGRESS_REPORTER* aReporter )
+{
+    // PCB_BASE_FRAME::SetBoard() deletes m_pcb; detach tracker consumers first.
     if( m_pcb )
+    {
+        detachTextVarTracker();
         m_pcb->ClearProject();
+        Kiway().LocalHistory().UnregisterSaver( m_pcb );
+    }
 
     PCB_BASE_EDIT_FRAME::SetBoard( aBoard, aReporter );
 
@@ -893,6 +933,55 @@ void PCB_EDIT_FRAME::SetPageSettings( const PAGE_INFO& aPageSettings )
 
     // PCB_DRAW_PANEL_GAL takes ownership of the drawing-sheet
     GetCanvas()->SetDrawingSheet( drawingSheet );
+
+    // Reactive title-block repaint: register the proxy with the BOARD's
+    // text-var tracker so source changes fan out to a repaint. The one-time
+    // listener installation is idempotent; calling AddInvalidateListener
+    // here each time would accumulate stale listeners across SetPageSettings
+    // calls, which is why the listener check below is guarded.
+    if( BOARD* board = GetBoard() )
+    {
+        if( BOARD_TEXT_VAR_ADAPTER* adapter = board->GetTextVarAdapter() )
+        {
+            TEXT_VAR_TRACKER* tracker = &adapter->Tracker();
+
+            drawingSheet->AttachToTracker( tracker );
+
+            // Project reload / board swap can point GetBoard() at a new
+            // tracker; detach from the previous one first so we don't leak
+            // a stale lambda that still captures `this`.
+            if( m_textVarListenerTracker != tracker
+                && m_textVarListenerHandle != TEXT_VAR_TRACKER::INVALID_LISTENER )
+            {
+                m_textVarListenerTracker->RemoveInvalidateListener( m_textVarListenerHandle );
+                m_textVarListenerHandle = TEXT_VAR_TRACKER::INVALID_LISTENER;
+                m_textVarListenerTracker = nullptr;
+            }
+
+            if( m_textVarListenerHandle == TEXT_VAR_TRACKER::INVALID_LISTENER )
+            {
+                KIGFX::VIEW* view = GetCanvas()->GetView();
+                m_textVarListenerTracker = tracker;
+                m_textVarListenerHandle = tracker->AddInvalidateListener(
+                        [this, view]( EDA_ITEM* aDep, const TEXT_VAR_REF_KEY& )
+                        {
+                            if( !aDep )
+                                return;
+
+                            DS_PROXY_VIEW_ITEM* current = GetCanvas()->GetDrawingSheet();
+
+                            if( aDep == current )
+                            {
+                                view->Update( current, KIGFX::REPAINT );
+                                return;
+                            }
+
+                            if( aDep->IsBOARD_ITEM() )
+                                view->Update( aDep, KIGFX::REPAINT );
+                        } );
+            }
+        }
+    }
 }
 
 
@@ -946,7 +1035,6 @@ void PCB_EDIT_FRAME::setupTools()
     m_toolManager->RegisterTool( new CONVERT_TOOL );
     m_toolManager->RegisterTool( new PCB_GROUP_TOOL );
     m_toolManager->RegisterTool( new GENERATOR_TOOL );
-    m_toolManager->RegisterTool( new SCRIPTING_TOOL );
     m_toolManager->RegisterTool( new PROPERTIES_TOOL );
     m_toolManager->RegisterTool( new MULTICHANNEL_TOOL );
     m_toolManager->RegisterTool( new EMBED_TOOL );
@@ -1039,9 +1127,6 @@ void PCB_EDIT_FRAME::setupUIConditions()
     mgr->SetConditions( PCB_ACTIONS::trackDisplayMode, CHECK( !cond.TrackFillDisplay() ) );
     mgr->SetConditions( PCB_ACTIONS::graphicsOutlines, CHECK( !cond.GraphicsFillDisplay() ) );
     mgr->SetConditions( PCB_ACTIONS::textOutlines,     CHECK( !cond.TextFillDisplay() ) );
-
-    if( SCRIPTING::IsWxAvailable() )
-        mgr->SetConditions( PCB_ACTIONS::showPythonConsole, CHECK( cond.ScriptingConsoleVisible() ) );
 
     auto enableZoneControlCondition =
             [this] ( const SELECTION& )
@@ -1270,6 +1355,9 @@ void PCB_EDIT_FRAME::setupUIConditions()
     mgr->SetConditions( PCB_ACTIONS::drawSimilarZone, ENABLE( singleZoneCond ) );
     mgr->SetConditions( PCB_ACTIONS::zoneMerge,       ENABLE( zoneMergeCond ) );
 
+    mgr->SetConditions( ACTIONS::selectSetRect,       CHECK( cond.CurrentTool( ACTIONS::selectionTool ) ) );
+    mgr->SetConditions( ACTIONS::selectSetLasso,      CHECK( cond.CurrentTool( ACTIONS::selectionTool ) ) );
+
 #define CURRENT_TOOL( action ) mgr->SetConditions( action, CHECK( cond.CurrentTool( action ) ) )
 
     // These tools can be used at any time to inspect the board
@@ -1305,6 +1393,8 @@ void PCB_EDIT_FRAME::setupUIConditions()
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawLine );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawRectangle );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawCircle );
+    CURRENT_EDIT_TOOL( PCB_ACTIONS::drawEllipse );
+    CURRENT_EDIT_TOOL( PCB_ACTIONS::drawEllipseArc );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawArc );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawPolygon );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawBezier );
@@ -1373,7 +1463,8 @@ void PCB_EDIT_FRAME::ResolveDRCExclusions( bool aCreateMarkers )
 bool PCB_EDIT_FRAME::canCloseWindow( wxCloseEvent& aEvent )
 {
     // Shutdown blocks must be determined and vetoed as early as possible
-    if( KIPLATFORM::APP::SupportsShutdownBlockReason() && aEvent.GetId() == wxEVT_QUERY_END_SESSION
+    if( KIPLATFORM::APP::SupportsShutdownBlockReason()
+            && aEvent.GetId() == wxEVT_QUERY_END_SESSION
             && IsContentModified() )
     {
         return false;
@@ -1442,8 +1533,8 @@ bool PCB_EDIT_FRAME::canCloseWindow( wxCloseEvent& aEvent )
 
             if( !projPath.IsEmpty() && Kiway().LocalHistory().HistoryExists( projPath ) )
             {
-                Kiway().LocalHistory().CommitDuplicateOfLastSave( projPath, wxS("pcb"),
-                        wxS("Discard unsaved pcb changes") );
+                Kiway().LocalHistory().CommitDuplicateOfLastSave( projPath, wxS( "pcb" ),
+                                                                  wxS( "Discard unsaved pcb changes" ) );
             }
         }
     }
@@ -1470,13 +1561,11 @@ void PCB_EDIT_FRAME::doCloseWindow()
 
 #ifdef KICAD_IPC_API
     Pgm().GetApiServer().DeregisterHandler( m_apiHandler.get() );
-    wxTheApp->Unbind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED,
-                      &PCB_EDIT_FRAME::onPluginAvailabilityChanged, this );
+    wxTheApp->Unbind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED, &PCB_EDIT_FRAME::onPluginAvailabilityChanged, this );
 #endif
 
     // Clean up mode-less dialogs.
-    Unbind( EDA_EVT_CLOSE_DIALOG_BOOK_REPORTER, &PCB_EDIT_FRAME::onCloseModelessBookReporterDialogs,
-            this );
+    Unbind( EDA_EVT_CLOSE_DIALOG_BOOK_REPORTER, &PCB_EDIT_FRAME::onCloseModelessBookReporterDialogs, this );
 
     wxWindow* drcDlg = wxWindow::FindWindowByName( DIALOG_DRC_WINDOW_NAME );
 
@@ -1487,7 +1576,6 @@ void PCB_EDIT_FRAME::doCloseWindow()
 
     if( ruleEditorDlg )
         ruleEditorDlg->Close( true );
-
 
     if( m_findDialog )
     {
@@ -1525,8 +1613,13 @@ void PCB_EDIT_FRAME::doCloseWindow()
         m_footprintDiffDlg = nullptr;
     }
 
-    // Delete the auto save file if it exists.
-    wxFileName fn = GetBoard()->GetFileName();
+    // Delete the auto save file if it exists.  Only sweep when the board was actually
+    // dirtied in this session; otherwise an existing autosave is a previous-session
+    // leftover the user explicitly deferred in the recovery dialog.
+    if( !Prj().IsNullProject() && GetBoard() && IsContentModified() )
+    {
+        Kiway().LocalHistory().RemoveAutosaveFiles( Prj().GetProjectPath(), { GetBoard()->GetFileName() } );
+    }
 
     // Make sure local settings are persisted
     if( Prj().GetLocalSettings().ShouldAutoSave() )
@@ -1622,6 +1715,11 @@ void PCB_EDIT_FRAME::ShowBoardSetupDialog( const wxString& aInitialPage, wxWindo
 
         Prj().IncrementTextVarsTicker();
         Prj().IncrementNetclassesTicker();
+
+        // CROSS_REF keys deliberately excluded — those are driven by per-item
+        // BOARD_COMMIT changes.
+        if( BOARD_TEXT_VAR_ADAPTER* adapter = GetBoard()->GetTextVarAdapter() )
+            adapter->Tracker().InvalidateProjectScoped();
 
         PCBNEW_SETTINGS* settings = GetPcbNewSettings();
         static LSET      maskAndPasteLayers = LSET( { F_Mask, F_Paste, B_Mask, B_Paste } );
@@ -1884,7 +1982,10 @@ void PCB_EDIT_FRAME::SetActiveLayer( PCB_LAYER_ID aLayer, bool aForceRedraw )
 void PCB_EDIT_FRAME::OnBoardLoaded()
 {
     wxFileName fn( GetBoard()->GetFileName() );
-    Kiway().LocalHistory().Init( fn.GetPath() );
+
+    if( !Prj().IsNullProject() )
+        Kiway().LocalHistory().Init( Prj().GetProjectPath() );
+
     ENUM_MAP<PCB_LAYER_ID>& layerEnum = ENUM_MAP<PCB_LAYER_ID>::Instance();
 
     layerEnum.Choices().Clear();
@@ -1912,6 +2013,50 @@ void PCB_EDIT_FRAME::OnBoardLoaded()
     }
 
     GetBoard()->InitializeClearanceCache();
+
+    // Migrate obsolete WRL 3D model references to current STEP models.  Only
+    // runs in the GUI: CLI and scripting load paths must not mutate board
+    // state on load.  The STEP exporter does its own WRL->STEP substitution at
+    // export time via the --subst-models flag, and the 3D cache quietly falls
+    // back to sibling STEP files for missing WRLs in headless contexts.
+    if( Pgm().IsGUI() )
+    {
+        // Silently replace references whose filename uniquely identifies a
+        // STEP sibling.  Leaves ambiguous cases for the infobar below.
+        DIALOG_MIGRATE_3D_MODELS::AutoMigrateByFilename( this );
+
+        const int unresolved = DIALOG_MIGRATE_3D_MODELS::CountUnresolvedWrlReferences( this );
+
+        if( unresolved > 0 )
+        {
+            wxString msg = wxString::Format( wxPLURAL( "%d WRL 3D model could not be matched "
+                                                       "to an equivalent STEP model.",
+                                                       "%d WRL 3D models could not be matched "
+                                                       "to equivalent STEP models.",
+                                                       unresolved ),
+                                             unresolved );
+
+            wxHyperlinkCtrl* link = new wxHyperlinkCtrl( m_loadNoticeInfoBar, wxID_ANY,
+                                                         _( "Show options" ), wxEmptyString );
+
+            link->Bind( wxEVT_COMMAND_HYPERLINK, std::function<void( wxHyperlinkEvent& )>(
+                    [this]( wxHyperlinkEvent& )
+                    {
+                        DIALOG_MIGRATE_3D_MODELS dlg( this );
+                        dlg.ShowModal();
+
+                        // Dismiss the infobar if nothing remains to resolve;
+                        // otherwise leave it so the user can try again.
+                        if( DIALOG_MIGRATE_3D_MODELS::CountUnresolvedWrlReferences( this ) == 0 )
+                            m_loadNoticeInfoBar->Dismiss();
+                    } ) );
+
+            m_loadNoticeInfoBar->RemoveAllButtons();
+            m_loadNoticeInfoBar->AddButton( link );
+            m_loadNoticeInfoBar->AddCloseButton();
+            m_loadNoticeInfoBar->ShowMessageFor( msg, 10000, wxICON_INFORMATION );
+        }
+    }
 
     UpdateTitle();
 
@@ -2118,7 +2263,11 @@ void PCB_EDIT_FRAME::UpdateUserInterface()
     if( !activeLayers.test( GetActiveLayer() ) )
         SetActiveLayer( activeLayers.Seq().front() );
 
-    m_SelLayerBox->SetLayerSelection( GetActiveLayer() );
+    // The layer selector lives on the top auxiliary toolbar. Users can remove every
+    // entry from that toolbar via Preferences, in which case the control is destroyed
+    // and m_SelLayerBox is null. Avoid dereferencing it here.
+    if( m_SelLayerBox )
+        m_SelLayerBox->SetLayerSelection( GetActiveLayer() );
 
     ENUM_MAP<PCB_LAYER_ID>& layerEnum = ENUM_MAP<PCB_LAYER_ID>::Instance();
 
@@ -2329,34 +2478,6 @@ bool PCB_EDIT_FRAME::FetchNetlistFromSchematic( NETLIST& aNetlist,
 }
 
 
-void PCB_EDIT_FRAME::PythonSyncEnvironmentVariables()
-{
-    const ENV_VAR_MAP& vars = Pgm().GetLocalEnvVariables();
-
-    // Set the environment variables for python scripts
-    // note: the string will be encoded UTF8 for python env
-    for( const std::pair<const wxString, ENV_VAR_ITEM>& var : vars )
-        UpdatePythonEnvVar( var.first, var.second.GetValue() );
-
-    // Because the env vars can be modified by the python scripts (rewritten in UTF8),
-    // regenerate them (in Unicode) for our normal environment
-    for( const std::pair<const wxString, ENV_VAR_ITEM>& var : vars )
-        wxSetEnv( var.first, var.second.GetValue() );
-}
-
-
-void PCB_EDIT_FRAME::PythonSyncProjectName()
-{
-    wxString evValue;
-    wxGetEnv( PROJECT_VAR_NAME, &evValue );
-    UpdatePythonEnvVar( wxString( PROJECT_VAR_NAME ).ToStdString(), evValue );
-
-    // Because PROJECT_VAR_NAME can be modified by the python scripts (rewritten in UTF8),
-    // regenerate it (in Unicode) for our normal environment
-    wxSetEnv( PROJECT_VAR_NAME, evValue );
-}
-
-
 void PCB_EDIT_FRAME::ShowFootprintPropertiesDialog( FOOTPRINT* aFootprint )
 {
     if( aFootprint == nullptr )
@@ -2498,7 +2619,7 @@ static void processTextItem( const PCB_TEXT& aSrc, PCB_TEXT& aDest, const VECTOR
     }
 
     aDest.SetLocked( aSrc.IsLocked() );
-    const_cast<KIID&>( aDest.m_Uuid ) = aSrc.m_Uuid;
+    aDest.SetUuid( aSrc.m_Uuid );
 }
 
 
@@ -2627,9 +2748,9 @@ void PCB_EDIT_FRAME::ExchangeFootprint( FOOTPRINT* aExisting, FOOTPRINT* aNew,
 
     aNew->SetLocked( aExisting->IsLocked() );
 
-    const_cast<KIID&>( aNew->m_Uuid ) = aExisting->m_Uuid;
-    const_cast<KIID&>( aNew->Reference().m_Uuid ) = aExisting->Reference().m_Uuid;
-    const_cast<KIID&>( aNew->Value().m_Uuid ) = aExisting->Value().m_Uuid;
+    aNew->SetUuid( aExisting->m_Uuid );
+    aNew->Reference().SetUuid( aExisting->Reference().m_Uuid );
+    aNew->Value().SetUuid( aExisting->Value().m_Uuid );
 
     std::vector<PAD*> oldPads;
     oldPads.reserve( aExisting->Pads().size() );
@@ -2652,7 +2773,7 @@ void PCB_EDIT_FRAME::ExchangeFootprint( FOOTPRINT* aExisting, FOOTPRINT* aNew,
         PAD* newPad = match.second;
 
         matchedNewPads.insert( newPad );
-        const_cast<KIID&>( newPad->m_Uuid ) = oldPad->m_Uuid;
+        newPad->SetUuid( oldPad->m_Uuid );
         newPad->SetLocalRatsnestVisible( oldPad->GetLocalRatsnestVisible() );
         newPad->SetPinFunction( oldPad->GetPinFunction() );
         newPad->SetPinType( oldPad->GetPinType() );
@@ -2668,7 +2789,7 @@ void PCB_EDIT_FRAME::ExchangeFootprint( FOOTPRINT* aExisting, FOOTPRINT* aNew,
         if( matchedNewPads.find( newPad ) != matchedNewPads.end() )
             continue;
 
-        const_cast<KIID&>( newPad->m_Uuid ) = KIID();
+        newPad->ResetUuid();
         newPad->SetNetCode( NETINFO_LIST::UNCONNECTED );
     }
 
@@ -2695,13 +2816,13 @@ void PCB_EDIT_FRAME::ExchangeFootprint( FOOTPRINT* aExisting, FOOTPRINT* aNew,
 
         oldToNewDrawings[ oldItem ] = newItem;
         matchedNewDrawings.insert( newItem );
-        const_cast<KIID&>( newItem->m_Uuid ) = oldItem->m_Uuid;
+        newItem->SetUuid( oldItem->m_Uuid );
     }
 
     for( BOARD_ITEM* newItem : newDrawings )
     {
         if( matchedNewDrawings.find( newItem ) == matchedNewDrawings.end() )
-            const_cast<KIID&>( newItem->m_Uuid ) = KIID();
+            newItem->ResetUuid();
     }
 
     std::vector<ZONE*> oldZones;
@@ -2725,13 +2846,13 @@ void PCB_EDIT_FRAME::ExchangeFootprint( FOOTPRINT* aExisting, FOOTPRINT* aNew,
         ZONE* newZone = match.second;
 
         matchedNewZones.insert( newZone );
-        const_cast<KIID&>( newZone->m_Uuid ) = oldZone->m_Uuid;
+        newZone->SetUuid( oldZone->m_Uuid );
     }
 
     for( ZONE* newZone : newZones )
     {
         if( matchedNewZones.find( newZone ) == matchedNewZones.end() )
-            const_cast<KIID&>( newZone->m_Uuid ) = KIID();
+            newZone->ResetUuid();
     }
 
     std::vector<PCB_POINT*> oldPoints;
@@ -2755,13 +2876,13 @@ void PCB_EDIT_FRAME::ExchangeFootprint( FOOTPRINT* aExisting, FOOTPRINT* aNew,
         PCB_POINT* newPoint = match.second;
 
         matchedNewPoints.insert( newPoint );
-        const_cast<KIID&>( newPoint->m_Uuid ) = oldPoint->m_Uuid;
+        newPoint->SetUuid( oldPoint->m_Uuid );
     }
 
     for( PCB_POINT* newPoint : newPoints )
     {
         if( matchedNewPoints.find( newPoint ) == matchedNewPoints.end() )
-            const_cast<KIID&>( newPoint->m_Uuid ) = KIID();
+            newPoint->ResetUuid();
     }
 
     std::vector<PCB_GROUP*> oldGroups;
@@ -2785,13 +2906,13 @@ void PCB_EDIT_FRAME::ExchangeFootprint( FOOTPRINT* aExisting, FOOTPRINT* aNew,
         PCB_GROUP* newGroup = match.second;
 
         matchedNewGroups.insert( newGroup );
-        const_cast<KIID&>( newGroup->m_Uuid ) = oldGroup->m_Uuid;
+        newGroup->SetUuid( oldGroup->m_Uuid );
     }
 
     for( PCB_GROUP* newGroup : newGroups )
     {
         if( matchedNewGroups.find( newGroup ) == matchedNewGroups.end() )
-            const_cast<KIID&>( newGroup->m_Uuid ) = KIID();
+            newGroup->ResetUuid();
     }
 
     std::vector<PCB_FIELD*> oldFieldsVec;
@@ -2832,13 +2953,13 @@ void PCB_EDIT_FRAME::ExchangeFootprint( FOOTPRINT* aExisting, FOOTPRINT* aNew,
 
         oldToNewFields[ oldField ] = newField;
         matchedNewFields.insert( newField );
-        const_cast<KIID&>( newField->m_Uuid ) = oldField->m_Uuid;
+        newField->SetUuid( oldField->m_Uuid );
     }
 
     for( PCB_FIELD* newField : newFieldsVec )
     {
         if( matchedNewFields.find( newField ) == matchedNewFields.end() )
-            const_cast<KIID&>( newField->m_Uuid ) = KIID();
+            newField->ResetUuid();
     }
 
     std::unordered_map<PCB_TEXT*, PCB_TEXT*> oldToNewTexts;
@@ -3033,6 +3154,12 @@ void PCB_EDIT_FRAME::ExchangeFootprint( FOOTPRINT* aExisting, FOOTPRINT* aNew,
         // Preserve model references and all embedded model data.
         aNew->Models() = aExisting->Models();
 
+        // Preserve extruded 3D body settings.
+        if( aExisting->HasExtrudedBody() )
+            aNew->SetExtrudedBody( std::make_unique<EXTRUDED_3D_BODY>( *aExisting->GetExtrudedBody() ) );
+        else
+            aNew->ClearExtrudedBody();
+
         for( const auto& [name, file] : aExisting->GetEmbeddedFiles()->EmbeddedFileMap() )
         {
             if( file->type != EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::MODEL )
@@ -3067,6 +3194,7 @@ void PCB_EDIT_FRAME::ExchangeFootprint( FOOTPRINT* aExisting, FOOTPRINT* aNew,
 void PCB_EDIT_FRAME::CommonSettingsChanged( int aFlags )
 {
     PCB_BASE_EDIT_FRAME::CommonSettingsChanged( aFlags );
+    m_appearancePanel->CommonSettingsChanged( aFlags );
 
     PrepareLayerIndicator();
 
@@ -3109,10 +3237,6 @@ void PCB_EDIT_FRAME::CommonSettingsChanged( int aFlags )
     GetCanvas()->GetView()->MarkTargetDirty( KIGFX::TARGET_NONCACHED );
     GetCanvas()->ForceRefresh();
 
-    // Update the environment variables in the Python interpreter
-    if( aFlags & ENVVARS_CHANGED )
-        PythonSyncEnvironmentVariables();
-
     Layout();
     SendSizeEvent();
 }
@@ -3126,16 +3250,23 @@ void PCB_EDIT_FRAME::ThemeChanged()
 
 void PCB_EDIT_FRAME::ProjectChanged()
 {
-    PythonSyncProjectName();
-
     // Register autosave history saver for the board.
     // Saver serializes the in-memory BOARD into HISTORY_FILE_DATA. Prettify and
     // file I/O happen on a background thread to avoid blocking the UI.
     if( GetBoard() )
     {
-        Kiway().LocalHistory().RegisterSaver( GetBoard(),
+        Kiway().LocalHistory().RegisterSaver(
+                GetBoard(),
                 [this]( const wxString& aProjectPath, std::vector<HISTORY_FILE_DATA>& aFileData )
                 {
+                    // See SCHEMATIC::SaveToHistory: the dirty check is only valid in ZIP
+                    // mode.  In INCREMENTAL mode the manual-save flow clears the dirty
+                    // flag before the saver runs, so filtering would drop the snapshot.
+                    bool filterClean = Pgm().GetCommonSettings()->m_Backup.format == BACKUP_FORMAT::ZIP;
+
+                    if( filterClean && !IsContentModified() )
+                        return;
+
                     GetBoard()->SaveToHistory( aProjectPath, aFileData );
                 } );
     }
@@ -3174,6 +3305,28 @@ bool PCB_EDIT_FRAME::CanAcceptApiCommands()
     return EDA_BASE_FRAME::CanAcceptApiCommands();
 }
 
+
+std::vector<const PLUGIN_ACTION*> PCB_EDIT_FRAME::GetOrderedPluginActions()
+{
+    PCBNEW_SETTINGS* cfg = GetAppSettings<PCBNEW_SETTINGS>( "pcbnew" );
+    return EDA_DRAW_FRAME::GetOrderedPluginActions( PLUGIN_ACTION_SCOPE::PCB, cfg );
+}
+
+
+bool PCB_EDIT_FRAME::GetPluginActionButtonVisible( const wxString& aPluginPath, bool aPluginDefault )
+{
+    if( PCBNEW_SETTINGS* cfg = GetAppSettings<PCBNEW_SETTINGS>( "pcbnew" ) )
+    {
+        for( const auto& [identifier, visible] : cfg->m_Plugins.actions )
+        {
+            if( identifier == aPluginPath )
+                return visible;
+        }
+    }
+
+    // Plugin is not in settings, return default.
+    return  aPluginDefault;
+}
 
 
 wxString PCB_EDIT_FRAME::GetCurrentFileName() const
@@ -3315,7 +3468,7 @@ void PCB_EDIT_FRAME::onCloseModelessBookReporterDialogs( wxCommandEvent& aEvent 
 void PCB_EDIT_FRAME::onPluginAvailabilityChanged( wxCommandEvent& aEvt )
 {
     wxLogTrace( traceApi, "PCB frame: EDA_EVT_PLUGIN_AVAILABILITY_CHANGED" );
-    ReCreateHToolbar();
+    RecreateToolbars();
     aEvt.Skip();
 }
 #endif

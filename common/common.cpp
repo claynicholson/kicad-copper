@@ -34,6 +34,7 @@
 #include <macros.h>
 #include <string_utils.h>
 #include <text_eval/text_eval_wrapper.h>
+#include <text_var_dependency.h>
 #include <mutex>
 #include <wx/config.h>
 #include <wx/log.h>
@@ -261,7 +262,10 @@ wxString ExpandTextVars( const wxString& aSource, const std::function<bool( wxSt
                     // Also evaluate math expressions after expanding variables
                     if( token.Contains( wxT( "@{" ) ) )
                     {
-                        static EXPRESSION_EVALUATOR evaluator;
+                        // Must not be static. ExpandTextVars runs on parallel workers
+                        // (e.g. CONNECTION_GRAPH) and a shared evaluator races on its
+                        // internal error collector.
+                        EXPRESSION_EVALUATOR evaluator;
                         token = evaluator.Evaluate( token );
                     }
                 }
@@ -300,7 +304,10 @@ wxString ResolveTextVars( const wxString& aSource, const std::function<bool( wxS
     wxString  text = aSource;
     const int maxDepth = ADVANCED_CFG::GetCfg().m_ResolveTextRecursionDepth;
 
-    static EXPRESSION_EVALUATOR evaluator;
+    // Must not be static. ResolveTextVars runs on parallel workers (e.g.
+    // CONNECTION_GRAPH) and a shared evaluator races on its internal error
+    // collector.
+    EXPRESSION_EVALUATOR evaluator;
 
     while( ( text.Contains( wxT( "${" ) ) || text.Contains( wxT( "@{" ) ) ) && ++aDepth <= maxDepth )
     {
@@ -320,6 +327,124 @@ wxString ResolveTextVars( const wxString& aSource, const std::function<bool( wxS
 }
 
 
+namespace
+{
+// Scan @p aText beginning at @p aStart (pointing just past an opening `${` or
+// `@{`), collect every nested and sibling reference, and advance @p aStart past
+// the matching closing brace. Returns the raw token body for the outer
+// reference so the caller can classify it. Escape markers (\${…} and \@{…})
+// are skipped. Brace nesting mirrors the ExpandTextVars state machine so
+// tokens like `${FOO:BAR(${BAZ})}` are captured as a single outer token with
+// BAZ picked up as a nested sibling.
+wxString walkRef( const wxString& aText, std::size_t& aPos, std::vector<TEXT_VAR_REF_KEY>& aOut );
+
+void collectRefsFrom( const wxString& aText, std::size_t aStart, std::size_t aEnd,
+                      std::vector<TEXT_VAR_REF_KEY>& aOut )
+{
+    for( std::size_t i = aStart; i < aEnd; ++i )
+    {
+        const wxUniChar c = aText[i];
+
+        // Escape sequences: skip the whole escaped expression; its contents
+        // are a user literal, not a dependency source.
+        if( c == wxT( '\\' ) && i + 2 < aEnd && ( aText[i + 1] == wxT( '$' ) || aText[i + 1] == wxT( '@' ) )
+            && aText[i + 2] == wxT( '{' ) )
+        {
+            std::size_t j = i + 3;
+            int         depth = 1;
+
+            while( j < aEnd && depth > 0 )
+            {
+                if( aText[j] == wxT( '{' ) )
+                    depth++;
+                else if( aText[j] == wxT( '}' ) )
+                    depth--;
+
+                ++j;
+            }
+
+            i = j - 1;
+            continue;
+        }
+
+        if( ( c == wxT( '$' ) || c == wxT( '@' ) ) && i + 1 < aEnd && aText[i + 1] == wxT( '{' ) )
+        {
+            std::size_t    pos = i + 2;
+            const wxString token = walkRef( aText, pos, aOut );
+
+            // Math expressions (`@{...}`) contribute their nested variables as
+            // dependency edges but do not produce a named edge themselves — the
+            // expression text is not a resolvable source name.
+            if( c == wxT( '$' ) && !token.IsEmpty() )
+                aOut.push_back( TEXT_VAR_REF_KEY::FromToken( token ) );
+
+            // Clamp to aEnd - 1 so the outer for-loop increment doesn't go past
+            // the end on a malformed token.
+            i = ( pos > 0 ? pos - 1 : pos );
+        }
+    }
+}
+
+
+wxString walkRef( const wxString& aText, std::size_t& aPos, std::vector<TEXT_VAR_REF_KEY>& aOut )
+{
+    const std::size_t len   = aText.length();
+    const std::size_t start = aPos;
+    int               depth = 1;
+
+    while( aPos < len )
+    {
+        const wxUniChar c = aText[aPos];
+
+        if( c == wxT( '{' ) )
+        {
+            depth++;
+        }
+        else if( c == wxT( '}' ) )
+        {
+            depth--;
+
+            if( depth == 0 )
+            {
+                wxString body = aText.Mid( start, aPos - start );
+                aPos++; // consume the matching close-brace
+
+                // Recurse into the body so nested references are captured
+                // regardless of whether the outer resolves. ExpandTextVars'
+                // resolver path would suppress this for outer tokens beginning
+                // with ERC_WARNING / DRC_WARNING; a dependency tracker must
+                // not care about that (codex finding 3).
+                collectRefsFrom( body, 0, body.length(), aOut );
+                return body;
+            }
+        }
+
+        aPos++;
+    }
+
+    // Malformed token (ran off the end without a matching close-brace).
+    // Recurse into the partial body so nested inner references are still
+    // captured — `${FOO${BAR}` at EOF must still produce a BAR dependency.
+    wxString partial = aText.Mid( start, aPos - start );
+    collectRefsFrom( partial, 0, partial.length(), aOut );
+    return partial;
+}
+}
+
+
+std::vector<TEXT_VAR_REF_KEY> ExtractTextVarReferences( const wxString& aSource )
+{
+    std::vector<TEXT_VAR_REF_KEY> refs;
+
+    // Fast path: no reference syntax at all.
+    if( !aSource.Contains( wxT( "${" ) ) && !aSource.Contains( wxT( "@{" ) ) )
+        return refs;
+
+    collectRefsFrom( aSource, 0, aSource.length(), refs );
+    return refs;
+}
+
+
 wxString GetGeneratedFieldDisplayName( const wxString& aSource )
 {
     std::function<bool( wxString* )> tokenExtractor = [&]( wxString* token ) -> bool
@@ -334,7 +459,8 @@ wxString GetGeneratedFieldDisplayName( const wxString& aSource )
 
 bool IsGeneratedField( const wxString& aSource )
 {
-    static wxRegEx expr( wxS( "^\\$\\{\\w*\\}$" ) );
+    // Per-thread regex.  Callers include parallel ERC/connection-graph workers.
+    thread_local wxRegEx expr( wxS( "^\\$\\{\\w*\\}$" ) );
     return expr.Matches( aSource );
 }
 
@@ -494,6 +620,30 @@ wxString KIwxExpandEnvVars( const wxString& str, const PROJECT* aProject, std::s
                         strResult << str[n - 1];
 
                 strResult << str_n << strVarName;
+            }
+
+            // When a versioned-wildcard branch matched but no env var was found, emit
+            // the original ${VARNAME} text so the closing-bracket handler can append the
+            // closing bracket.  Without this, the handler emits only '}', producing a
+            // garbage path like "}/Device.kicad_sym" instead of the full unexpanded var.
+            if( !expanded && bracket != Bracket_None )
+            {
+                auto isVersionedWildcard =
+                        strVarName.Contains( wxT( "KISYS3DMOD" ) )
+                        || strVarName.Matches( wxT( "KICAD*_3DMODEL_DIR" ) )
+                        || strVarName.Matches( wxT( "KICAD*_SYMBOL_DIR" ) )
+                        || strVarName.Matches( wxT( "KICAD*_FOOTPRINT_DIR" ) )
+                        || strVarName.Matches( wxT( "KICAD*_3RD_PARTY" ) );
+
+                if( isVersionedWildcard )
+                {
+#ifdef __WINDOWS__
+                    if( bracket != Bracket_Windows )
+#endif
+                        strResult << str[n - 1];
+
+                    strResult << str_n << strVarName;
+                }
             }
 
             // check the closing bracket

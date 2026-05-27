@@ -126,7 +126,10 @@ public:
             VERTEX* holeRing = createRing( aPolygon[i], baseIndex, false );
             baseIndex += aPolygon[i].PointCount();
 
-            if( holeRing && holeRing->next != holeRing )
+            // Reject rings collapsed below 3 vertices.  Match the outer-ring guard at
+            // line 119 so degenerate holes (single point or two-vertex sliver) cannot
+            // reach eliminateHoles().
+            if( holeRing && holeRing->prev != holeRing->next )
                 holeRings.push_back( holeRing );
         }
 
@@ -624,6 +627,14 @@ private:
      */
     bool earcutList( VERTEX* aPoint, int pass = 0 )
     {
+        constexpr int kMaxRecursion = 64;
+
+        if( pass >= kMaxRecursion )
+        {
+            wxLogTrace( TRIANGULATE_TRACE, "earcutList recursion limit reached; aborting triangulation", pass );
+            return false;
+        }
+
         wxLogTrace( TRIANGULATE_TRACE, "earcutList starting at %p for pass %d", aPoint, pass );
 
         if( !aPoint )
@@ -734,7 +745,7 @@ private:
                 // If we don't have any NULL triangles left, cut the polygon in two and try again
                 wxLogTrace( TRIANGULATE_TRACE, "Splitting polygon" );
 
-                if( !splitPolygon( aPoint ) )
+                if( !splitPolygon( aPoint, pass + 1 ) )
                     return false;
 
                 break;
@@ -834,7 +845,10 @@ private:
                 addVertex( i );
         }
 
-        if( tail && ( *tail == *tail->next ) )
+        // Collapse a final duplicate, but never on a single-vertex ring.  When the
+        // simplification pass leaves only one vertex, tail->next == tail and removing
+        // it would leave the caller holding a vertex with null next/prev pointers.
+        if( tail && tail->next != tail && ( *tail == *tail->next ) )
             tail->next->remove();
 
         return tail;
@@ -882,8 +896,8 @@ private:
             if( bridge )
             {
                 VERTEX* bridgeReverse = bridge->split( hi.leftmost );
-                filterPoints( aOuterRing, aOuterRing->next );
                 filterPoints( bridgeReverse, bridgeReverse->next );
+                aOuterRing = filterPoints( bridge, bridge->next );
             }
             else
             {
@@ -898,10 +912,10 @@ private:
     /**
      * Remove consecutive duplicate vertices from the linked list.
      */
-    void filterPoints( VERTEX* aStart, VERTEX* aEnd = nullptr )
+    VERTEX* filterPoints( VERTEX* aStart, VERTEX* aEnd = nullptr )
     {
         if( !aStart )
-            return;
+            return aStart;
 
         if( !aEnd )
             aEnd = aStart;
@@ -915,10 +929,15 @@ private:
 
             if( *p == *p->next )
             {
-                p->next->remove();
+                VERTEX* toRemove = p->next;
+                
+                if( toRemove == aEnd )
+                    aEnd = p;
+
+                toRemove->remove();
 
                 if( p == p->next )
-                    return;
+                    return p;
 
                 p = p->prev;
                 again = true;
@@ -928,7 +947,10 @@ private:
                 p = p->next;
             }
         } while( again || p != aEnd );
+
+        return aEnd;
     }
+
 
     /**
      * Find a vertex on the outer ring visible from the hole's leftmost vertex
@@ -1102,7 +1124,7 @@ private:
      * independently.  This is assured to generate at least one new ear if the
      * split is successful
      */
-    bool splitPolygon( VERTEX* start )
+    bool splitPolygon( VERTEX* start, int aPass )
     {
         VERTEX* origPoly = start;
 
@@ -1156,7 +1178,8 @@ private:
             overlapPoints[1]->updateList();
             logVertices( overlapPoints[0], nullptr );
             logVertices( overlapPoints[1], nullptr );
-            bool retval = earcutList( overlapPoints[0] ) && earcutList( overlapPoints[1] );
+            bool retval = earcutList( overlapPoints[0], aPass )
+                          && earcutList( overlapPoints[1], aPass );
 
             wxLogTrace( TRIANGULATE_TRACE, "%s at first overlap split", retval ? "Success" : "Failed" );
             return retval;
@@ -1182,7 +1205,7 @@ private:
                     origPoly->updateList();
                     newPoly->updateList();
 
-                    bool retval = earcutList( origPoly ) && earcutList( newPoly );
+                    bool retval = earcutList( origPoly, aPass ) && earcutList( newPoly, aPass );
 
                     wxLogTrace( TRIANGULATE_TRACE, "%s at split", retval ? "Success" : "Failed" );
                     return retval;

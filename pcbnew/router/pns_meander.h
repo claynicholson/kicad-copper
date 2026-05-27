@@ -82,6 +82,9 @@ public:
     void SetTargetLength( long long int aOpt );
     void SetTargetLength( const MINOPTMAX<int>& aConstraint );
 
+    void SetTargetSignalLength( long long int aOpt );
+    void SetTargetSignalLength( const MINOPTMAX<int>& aConstraint );
+
     void SetTargetLengthDelay( long long int aOpt );
     void SetTargetLengthDelay( const MINOPTMAX<int>& aConstraint );
 
@@ -90,6 +93,9 @@ public:
 
     void SetTargetSkewDelay( int aOpt );
     void SetTargetSkewDelay( const MINOPTMAX<int>& aConstraint );
+
+    void SetTargetSignalLengthDelay( long long int aOpt );
+    void SetTargetSignalLengthDelay( const MINOPTMAX<int>& aConstraint );
 
     ///< Minimum meandering amplitude.
     int m_minAmplitude;
@@ -106,11 +112,26 @@ public:
     ///< Length PadToDie.
     int m_lenPadToDie;
 
+    ///< Additional pre-existing length contributed by other nets in the same logical chain
+    ///< (used when chain-level tuning mode is active). Stored in internal units.
+    long long int m_signalExtraLength;
+
+    ///< Additional pre-existing delay contributed by other nets in the same logical chain
+    ///< (used when chain-level tuning mode is active and in time-domain tuning). Stored in internal
+    ///< time internal units (ps * IU_PER_PS).
+    long long int m_signalExtraDelay;
+
     ///< Desired length of the tuned line/diff pair (this is in nm, so allow more than board width).
     MINOPTMAX<long long int> m_targetLength;
 
     ///< Desired propagation delay of the tuned line
     MINOPTMAX<long long int> m_targetLengthDelay;
+
+    ///< Desired chain length (copper-only, bridging subtracted).
+    MINOPTMAX<long long int> m_targetSignalLength;
+
+    ///< Desired overall chain propagation delay.
+    MINOPTMAX<long long int> m_targetSignalLengthDelay;
 
     ///< Target skew value for diff pair de-skewing.
     MINOPTMAX<int>           m_targetSkew;

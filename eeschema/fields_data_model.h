@@ -27,6 +27,20 @@
 struct BOM_FIELD;
 struct BOM_PRESET;
 struct BOM_FMT_PRESET;
+class SCH_SYMBOL;
+
+
+struct FIELD_CASE_CONFLICT
+{
+    SCH_SYMBOL*                                symbol;
+    SCH_SHEET_PATH                             sheetPath;
+    wxString                                   reference;
+    wxString                                   caseFoldedKey;
+    std::vector<std::pair<wxString, wxString>> variants;
+};
+
+
+std::vector<FIELD_CASE_CONFLICT> DetectFieldCaseConflicts( const SCH_REFERENCE_LIST& aSymbols );
 
 
 // Columns for the View Fields grid
@@ -139,7 +153,8 @@ public:
             m_excludeDNP( false ),
             m_includeExcluded( false ),
             m_rebuildsEnabled( true ),
-            m_urlEditor( aURLEditor )
+            m_urlEditor( aURLEditor ),
+            m_textVarRenderer( nullptr )
     {
         m_symbolsList.SplitReferences();
     }
@@ -147,6 +162,7 @@ public:
     ~FIELDS_EDITOR_GRID_DATA_MODEL() override
     {
         wxSafeDecRef( m_urlEditor );
+        wxSafeDecRef( m_textVarRenderer );
     }
 
     static const wxString QUANTITY_VARIABLE;
@@ -209,6 +225,7 @@ public:
     }
 
     wxString GetValue( int aRow, int aCol ) override;
+    wxString        GetResolvedValue( int aRow, int aCol );
     wxGridCellAttr* GetAttr( int aRow, int aCol, wxGridCellAttr::wxAttrKind aKind ) override;
 
     wxString GetValue( const DATA_MODEL_ROW& group, int aCol,
@@ -328,6 +345,12 @@ public:
     void RemoveSymbol( const SCH_SYMBOL& aSymbol );
     void UpdateReferences( const SCH_REFERENCE_LIST& aRefs, const wxString& aVariantName );
 
+    // Identity-based undo serialization (keyed by symbol, not row position) for the dialog's
+    // Ctrl+Z, so it stays correct as rows are grouped/sorted/reordered.
+    bool     HasUndoStateSerialization() const override { return true; }
+    wxString SerializeUndoState() const override;
+    void     RestoreUndoState( const wxString& aState ) override;
+
     bool DeleteRows( size_t aPosition = 0, size_t aNumRows = 1 ) override;
 
     const SCH_REFERENCE_LIST& GetReferenceList() const { return m_symbolsList; }
@@ -413,6 +436,7 @@ protected:
     bool               m_includeExcluded;
     bool               m_rebuildsEnabled;
     wxGridCellAttr*    m_urlEditor;
+    wxGridCellRenderer*     m_textVarRenderer; ///< Renderer for cells with text variable references
     wxString                m_currentVariant;  ///< Current variant name for highlighting
     std::vector<wxString>   m_variantNames;    ///< Variant names for multi-variant DNP filtering
 

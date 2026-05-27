@@ -20,7 +20,17 @@
 
 #define BOOST_TEST_NO_MAIN
 #include <boost/test/unit_test.hpp>
+#include <atomic>
+#include <filesystem>
+#include <optional>
+#include <thread>
+#include <vector>
 #include <common.h>
+#include <env_paths.h>
+#include <pgm_base.h>
+#include <settings/environment.h>
+#include <wx/filename.h>
+#include <wx/utils.h>
 
 /**
  * Test fixture for ExpandTextVars tests
@@ -172,6 +182,276 @@ BOOST_AUTO_TEST_CASE( ConsecutiveEscaped )
     }
 
     BOOST_CHECK_EQUAL( dollarCount, 2 );
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+
+/**
+ * Regression tests for overlapping-prefix environment variables. Reproduces the scenario
+ * from a KiCad V10 bug report where users set both a versioned package path and a narrower
+ * user library path that is a descendant of the package path, e.g.
+ *
+ *   KICAD10_3RD_PARTY = /tmp/kicadlib
+ *   KICAD_USER_LIB    = /tmp/kicadlib/V10
+ *
+ * Creating a symbol library at `${KICAD_USER_LIB}/symbols/test.kicad_sym` round-trips
+ * through NormalizePath (at InsertRow time) and ExpandEnvVarSubstitutions (at plugin
+ * CreateLibrary time). If the round-trip loses fidelity, the plugin tries to open a
+ * malformed path and fails with a generic "Could not create the library file" error.
+ */
+struct OverlappingEnvVarsFixture
+{
+    wxString rootDir;
+    wxString outerDir;
+    wxString innerDir;
+    wxString targetDir;
+
+    OverlappingEnvVarsFixture()
+    {
+        std::filesystem::path tmp = std::filesystem::temp_directory_path() /
+                                     "kicad_qa_overlap_env_vars";
+        std::error_code       ec;
+        std::filesystem::remove_all( tmp, ec );
+        std::filesystem::create_directories( tmp / "V10" / "symbols", ec );
+
+        rootDir   = wxString::FromUTF8( tmp.string() );
+        outerDir  = rootDir;
+        innerDir  = wxString::FromUTF8( ( tmp / "V10" ).string() );
+        targetDir = wxString::FromUTF8( ( tmp / "V10" / "symbols" ).string() );
+
+        wxSetEnv( wxS( "KICAD_QA_3RD_PARTY_OUTER" ), outerDir );
+        wxSetEnv( wxS( "KICAD_QA_USER_LIB_INNER" ), innerDir );
+    }
+
+    ~OverlappingEnvVarsFixture()
+    {
+        wxUnsetEnv( wxS( "KICAD_QA_3RD_PARTY_OUTER" ) );
+        wxUnsetEnv( wxS( "KICAD_QA_USER_LIB_INNER" ) );
+
+        std::filesystem::path tmp = std::filesystem::temp_directory_path() /
+                                     "kicad_qa_overlap_env_vars";
+        std::error_code ec;
+        std::filesystem::remove_all( tmp, ec );
+    }
+
+    ENV_VAR_MAP BuildEnvMap() const
+    {
+        ENV_VAR_MAP map;
+        map[wxS( "KICAD_QA_3RD_PARTY_OUTER" )] = ENV_VAR_ITEM( outerDir );
+        map[wxS( "KICAD_QA_USER_LIB_INNER" )]  = ENV_VAR_ITEM( innerDir );
+        return map;
+    }
+};
+
+
+BOOST_FIXTURE_TEST_SUITE( OverlappingEnvVarPaths, OverlappingEnvVarsFixture )
+
+
+BOOST_AUTO_TEST_CASE( NormalizePicksLongestPrefix )
+{
+    wxFileName target( targetDir, wxS( "test.kicad_sym" ) );
+    ENV_VAR_MAP envMap = BuildEnvMap();
+
+    wxString normalized = NormalizePath( target, &envMap, wxEmptyString );
+
+    // NormalizePath should pick KICAD_QA_USER_LIB_INNER because it is a deeper match.
+    BOOST_CHECK_MESSAGE(
+            normalized == wxS( "${KICAD_QA_USER_LIB_INNER}/symbols/test.kicad_sym" ),
+            wxString::Format( wxS( "Expected '%s' but got '%s'" ),
+                              wxS( "${KICAD_QA_USER_LIB_INNER}/symbols/test.kicad_sym" ),
+                              normalized ) );
+}
+
+
+BOOST_AUTO_TEST_CASE( RoundTripPreservesAbsolutePath )
+{
+    wxFileName target( targetDir, wxS( "test.kicad_sym" ) );
+    ENV_VAR_MAP envMap = BuildEnvMap();
+
+    wxString normalized = NormalizePath( target, &envMap, wxEmptyString );
+    wxString expanded   = ExpandEnvVarSubstitutions( normalized, nullptr );
+
+    wxFileName expandedFn( expanded );
+    expandedFn.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+
+    wxFileName originalFn( target );
+    originalFn.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+
+    BOOST_CHECK_MESSAGE(
+            expandedFn.GetFullPath() == originalFn.GetFullPath(),
+            wxString::Format(
+                    wxS( "Round-trip mismatch: normalized='%s' expanded='%s' original='%s'" ),
+                    normalized, expandedFn.GetFullPath(), originalFn.GetFullPath() ) );
+}
+
+
+BOOST_AUTO_TEST_SUITE_END()
+
+
+/**
+ * Regression test for KiCad GitLab issue #23962.
+ *
+ * ResolveTextVars and ExpandTextVars used a function-local static EXPRESSION_EVALUATOR
+ * shared across all threads. CONNECTION_GRAPH evaluates schematic labels in parallel
+ * via a thread pool and label text may contain @{...} expressions, which caused the
+ * shared evaluator's internal ERROR_COLLECTOR vector to be mutated concurrently, leading
+ * to heap corruption and a segfault inside std::vector::clear.
+ *
+ * This test hammers ResolveTextVars from many threads to make the race observable,
+ * primarily under TSan. It also serves as a smoke test that no thread crashes.
+ */
+BOOST_AUTO_TEST_SUITE( TextVarExpressionEvaluatorConcurrency )
+
+BOOST_AUTO_TEST_CASE( ParallelResolveTextVarsWithMathExpressions )
+{
+    std::function<bool( wxString* )> resolver = []( wxString* token ) -> bool
+    {
+        if( *token == wxT( "#" ) )
+        {
+            *token = wxT( "3" );
+            return true;
+        }
+
+        if( *token == wxT( "ROW" ) )
+        {
+            *token = wxT( "4" );
+            return true;
+        }
+
+        return false;
+    };
+
+    const std::vector<wxString> inputs = {
+        wxT( "Out@{(${#}-2)*8+0}" ),
+        wxT( "Net_@{${ROW}*2+1}" ),
+        wxT( "@{(2-2)*8+0}" ),
+        wxT( "${ROW}:@{${ROW}*${ROW}}" ),
+        wxT( "plain_label_no_expr" ),
+        wxT( "@{1+1}_@{2+2}_@{3+3}" ),
+    };
+
+    const unsigned int numThreads = std::max( 4u, std::thread::hardware_concurrency() );
+    const int          iterations = 2000;
+
+    std::atomic<bool>        failed{ false };
+    std::atomic<int>         totalRuns{ 0 };
+    std::vector<std::thread> threads;
+    threads.reserve( numThreads );
+
+    for( unsigned int t = 0; t < numThreads; ++t )
+    {
+        threads.emplace_back(
+                [&, t]()
+                {
+                    try
+                    {
+                        for( int i = 0; i < iterations; ++i )
+                        {
+                            const wxString& src = inputs[( t + i ) % inputs.size()];
+                            int             depth = 0;
+                            wxString        result = ResolveTextVars( src, &resolver, depth );
+                            (void) result;
+                            totalRuns.fetch_add( 1, std::memory_order_relaxed );
+                        }
+                    }
+                    catch( ... )
+                    {
+                        failed.store( true, std::memory_order_relaxed );
+                    }
+                } );
+    }
+
+    for( auto& th : threads )
+        th.join();
+
+    BOOST_CHECK( !failed.load() );
+    BOOST_CHECK_EQUAL( totalRuns.load(), static_cast<int>( numThreads ) * iterations );
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+
+/**
+ * Regression test for KiCad GitLab issue #24244.
+ *
+ * When KICAD_USER_TEMPLATE_DIR (or any path env var) itself references another env var
+ * (e.g. value "${KICAD_CONFIG_HOME}/templates"), the value must be recursively expanded
+ * before being treated as a filesystem path.  In v10 the new-project flow used the raw
+ * value, which caused KiCad to create directories literally named "${KICAD_CONFIG_HOME}"
+ * relative to the working directory.
+ */
+struct EnvVarRecursiveExpansionFixture
+{
+    wxString                innerPath;
+    std::optional<wxString> oldInner;
+    std::optional<wxString> oldOuter;
+
+    EnvVarRecursiveExpansionFixture()
+    {
+        wxString existing;
+
+        if( wxGetEnv( wxS( "KICAD_QA_INNER" ), &existing ) )
+            oldInner = existing;
+
+        if( wxGetEnv( wxS( "KICAD_QA_OUTER" ), &existing ) )
+            oldOuter = existing;
+
+        innerPath = wxString::FromUTF8(
+                ( std::filesystem::temp_directory_path() / "kicad-qa-24244" ).generic_string() );
+
+        wxSetEnv( wxS( "KICAD_QA_INNER" ), innerPath );
+        wxSetEnv( wxS( "KICAD_QA_OUTER" ), wxS( "${KICAD_QA_INNER}/templates" ) );
+    }
+
+    ~EnvVarRecursiveExpansionFixture()
+    {
+        if( oldInner )
+            wxSetEnv( wxS( "KICAD_QA_INNER" ), *oldInner );
+        else
+            wxUnsetEnv( wxS( "KICAD_QA_INNER" ) );
+
+        if( oldOuter )
+            wxSetEnv( wxS( "KICAD_QA_OUTER" ), *oldOuter );
+        else
+            wxUnsetEnv( wxS( "KICAD_QA_OUTER" ) );
+    }
+};
+
+BOOST_FIXTURE_TEST_SUITE( EnvVarRecursiveExpansion, EnvVarRecursiveExpansionFixture )
+
+BOOST_AUTO_TEST_CASE( ExpandsNestedReferences )
+{
+    wxString rawValue;
+    BOOST_REQUIRE( wxGetEnv( wxS( "KICAD_QA_OUTER" ), &rawValue ) );
+
+    // The raw value should still contain the unexpanded reference.
+    BOOST_CHECK( rawValue.Contains( wxS( "${KICAD_QA_INNER}" ) ) );
+
+    wxString expanded = ExpandEnvVarSubstitutions( rawValue, nullptr );
+    wxString expected = innerPath + wxS( "/templates" );
+
+    // After expansion the inner reference must be resolved to its concrete path.
+    BOOST_CHECK_MESSAGE( expanded == expected,
+                         wxString::Format( wxS( "Expected '%s', got '%s'" ), expected, expanded ) );
+}
+
+
+BOOST_AUTO_TEST_CASE( UndefinedReferenceLeavesLiteralMarker )
+{
+    // If a referenced variable is undefined, ExpandEnvVarSubstitutions preserves the
+    // original token.  Callers that then mkdir the result would create a literal
+    // "${MISSING}" directory; production code must detect this and bail out.
+    wxUnsetEnv( wxS( "KICAD_QA_INNER" ) );
+
+    wxString rawValue;
+    BOOST_REQUIRE( wxGetEnv( wxS( "KICAD_QA_OUTER" ), &rawValue ) );
+
+    wxString expanded = ExpandEnvVarSubstitutions( rawValue, nullptr );
+    BOOST_CHECK( expanded.Contains( wxS( "${" ) ) );
+
+    // Restore so the fixture destructor sees a known state.
+    wxSetEnv( wxS( "KICAD_QA_INNER" ), innerPath );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -1,5 +1,6 @@
 class
 code
+color
 comp
 components
 component_classes
@@ -31,6 +32,10 @@ name
 names
 net
 nets
+net_chain
+net_chain_class
+net_chains
+net_class
 node
 num
 part
@@ -55,3 +60,5 @@ aliases
 alias
 unit
 units
+terminal_pins
+terminal_pin

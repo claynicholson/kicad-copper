@@ -143,7 +143,7 @@ bool PCB_TEXT::Deserialize( const google::protobuf::Any& aContainer )
         return false;
 
     SetLayer( FromProtoEnum<PCB_LAYER_ID, kiapi::board::types::BoardLayer>( boardText.layer() ) );
-    const_cast<KIID&>( m_Uuid ) = KIID( boardText.id().value() );
+    SetUuidDirect( KIID( boardText.id().value() ) );
     SetIsKnockout( boardText.knockout() );
     SetLocked( boardText.locked() == types::LockedState::LS_LOCKED );
 
@@ -246,7 +246,7 @@ double PCB_TEXT::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) const
     KIGFX::PCB_PAINTER&         painter = static_cast<KIGFX::PCB_PAINTER&>( *aView->GetPainter() );
     KIGFX::PCB_RENDER_SETTINGS& renderSettings = *painter.GetSettings();
 
-    if( !aView->IsLayerVisible( GetLayer() ) )
+    if( !aView->IsLayerVisibleCached( GetLayer() ) )
         return LOD_HIDE;
 
     if( aLayer == LAYER_LOCKED_ITEM_SHADOW )
@@ -264,23 +264,28 @@ double PCB_TEXT::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) const
         // Handle Render tab switches
         if( GetText() == wxT( "${VALUE}" ) )
         {
-            if( !aView->IsLayerVisible( LAYER_FP_VALUES ) )
+            if( !aView->IsLayerVisibleCached( LAYER_FP_VALUES ) )
                 return LOD_HIDE;
         }
 
         if( GetText() == wxT( "${REFERENCE}" ) )
         {
-            if( !aView->IsLayerVisible( LAYER_FP_REFERENCES ) )
+            if( !aView->IsLayerVisibleCached( LAYER_FP_REFERENCES ) )
                 return LOD_HIDE;
         }
 
-        if( parentFP->GetLayer() == F_Cu && !aView->IsLayerVisible( LAYER_FOOTPRINTS_FR ) )
+        PCB_LAYER_ID checkLayer = GetLayer();
+
+        if( !IsFrontLayer( checkLayer ) && !IsBackLayer( checkLayer ) )
+            checkLayer = parentFP->GetLayer();
+
+        if( IsFrontLayer( checkLayer ) && !aView->IsLayerVisibleCached( LAYER_FOOTPRINTS_FR ) )
             return LOD_HIDE;
 
-        if( parentFP->GetLayer() == B_Cu && !aView->IsLayerVisible( LAYER_FOOTPRINTS_BK ) )
+        if( IsBackLayer( checkLayer ) && !aView->IsLayerVisibleCached( LAYER_FOOTPRINTS_BK ) )
             return LOD_HIDE;
 
-        if( !aView->IsLayerVisible( LAYER_FP_TEXT ) )
+        if( !aView->IsLayerVisibleCached( LAYER_FP_TEXT ) )
             return LOD_HIDE;
     }
 

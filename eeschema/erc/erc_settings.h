@@ -21,6 +21,9 @@
 
 #pragma once
 
+#include <map>
+#include <set>
+
 #include <erc/erc_item.h>
 #include <pin_type.h>
 #include <settings/nested_settings.h>

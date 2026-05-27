@@ -71,6 +71,9 @@ public:
 
     SCH_PIN& operator=( const SCH_PIN& aPin );
 
+    void Serialize( google::protobuf::Any& aContainer ) const override;
+    bool Deserialize( const google::protobuf::Any& aContainer ) override;
+
     wxString GetClass() const override
     {
         return wxT( "SCH_PIN" );
@@ -311,6 +314,8 @@ public:
     static wxString GetCanonicalElectricalTypeName( ELECTRICAL_PINTYPE aType );
 
     bool IsConnectable() const override { return true; }
+
+    bool IsLocked() const override;
 
     bool HasConnectivityChanges( const SCH_ITEM* aItem,
                                  const SCH_SHEET_PATH* aInstance = nullptr ) const override;

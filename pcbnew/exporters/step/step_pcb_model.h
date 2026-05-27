@@ -64,6 +64,7 @@ static constexpr double COPPER_THICKNESS_DEFAULT_MM = 0.035;
 // Max error to approximate an arc by segments (in mm)
 static constexpr double ARC_TO_SEGMENT_MAX_ERROR_MM = 0.005;
 
+class FOOTPRINT;
 class PAD;
 
 class TDocStd_Document;
@@ -220,6 +221,33 @@ public:
                      bool aConvertToArcs, double aThickness, double aZposition, const VECTOR2D& aOrigin );
 
     /**
+     * Add an extruded 3D body from a 2D outline polygon.
+     * @param aOutline is the 2D outline polygon in board coordinates.
+     * @param aBottom true if the footprint is on the bottom side.
+     * @param aStandoff is the standoff height in mm (gap between board surface and body bottom).
+     * @param aHeight is the body height in mm.
+     * @param aOrigin is the coordinate origin.
+     * @param aColor is the body color (RGBA packed as uint32_t).
+     * @param aMaterial is the surface material type.
+     * @param aRefDes is the footprint reference used for the STEP label.
+     * @return true if the body was successfully created.
+     */
+    bool AddExtrudedBody( const SHAPE_POLY_SET& aOutline, bool aBottom, double aStandoff, double aHeight,
+                          const VECTOR2D& aOrigin, uint32_t aColor, EXTRUSION_MATERIAL aMaterial,
+                          const wxString& aRefDes );
+
+    /**
+     * Add metallic pin extrusions for through-hole pads.
+     * Pins run from the opposite board surface (with 1mm protrusion) to the standoff height.
+     * @param aFootprint the footprint whose THT pads to extrude.
+     * @param aBottom true if the footprint is on the bottom side.
+     * @param aStandoff is the standoff height in mm.
+     * @param aOrigin is the coordinate origin.
+     * @return true if any pins were created.
+     */
+    bool AddExtrudedPins( const FOOTPRINT* aFootprint, bool aBottom, double aStandoff, const VECTOR2D& aOrigin );
+
+    /**
      * Make a segment shape based on start and end point. If they're too close, make a cylinder.
      * It is a specialized version of MakeShape()
      * @param aShape is the TopoDS_Shape to initialize (must be empty)
@@ -331,18 +359,6 @@ private:
     TDF_Label transferModel( Handle( TDocStd_Document )& source, Handle( TDocStd_Document ) & dest,
                              const VECTOR3D& aScale );
 
-    /**
-     * Transfer color information from source document to destination document.
-     *
-     * This is necessary because TDocStd_XLinkTool::Copy may not properly transfer color
-     * associations which are stored separately in the ColorTool section of XDE documents.
-     * Colors are matched by searching for equivalent shapes in the destination document.
-     */
-    void transferColors( Handle( XCAFDoc_ShapeTool )& aSrcShapeTool,
-                         Handle( XCAFDoc_ColorTool )& aSrcColorTool,
-                         Handle( XCAFDoc_ShapeTool )& aDstShapeTool,
-                         Handle( XCAFDoc_ColorTool )& aDstColorTool );
-
     bool CompressSTEP( wxString& inputFile, wxString& outputFile );
 
     Handle( XCAFApp_Application )   m_app;
@@ -386,6 +402,18 @@ private:
     std::vector<TopoDS_Shape> m_board_back_silk;
     std::vector<TopoDS_Shape> m_board_front_mask;
     std::vector<TopoDS_Shape> m_board_back_mask;
+
+    // Extruded 3D bodies from footprint outlines
+    struct EXTRUDED_BODY_ENTRY
+    {
+        std::vector<TopoDS_Shape> bodyShapes;
+        std::vector<TopoDS_Shape> pinShapes;
+        wxString                  refDes;
+        uint32_t                  colorKey;
+        EXTRUSION_MATERIAL        material;
+    };
+
+    std::vector<EXTRUDED_BODY_ENTRY> m_extruded_bodies;
 
     // Data for pads. Key example: Pad_F_U2_1_GND
     std::map<wxString, std::vector<std::pair<gp_Pnt, TopoDS_Shape>>> m_pad_points;

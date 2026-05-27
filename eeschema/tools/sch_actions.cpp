@@ -524,7 +524,7 @@ TOOL_ACTION SCH_ACTIONS::placeNoConnect( TOOL_ACTION_ARGS()
         .Scope( AS_GLOBAL )
         .DefaultHotkey( 'Q' )
         .LegacyHotkeyName( "Add No Connect Flag" )
-        .FriendlyName( _( "Place No Connect Flags" ) )
+        .FriendlyName( _( "Place/Remove No Connect Flags" ) )
         .ToolbarState( TOOLBAR_STATE::TOGGLE )
         .Icon( BITMAPS::noconn )
         .Flags( AF_ACTIVATE )
@@ -704,6 +704,24 @@ TOOL_ACTION SCH_ACTIONS::drawCircle( TOOL_ACTION_ARGS()
         .Flags( AF_ACTIVATE )
         .Parameter( SHAPE_T::CIRCLE ) );
 
+TOOL_ACTION SCH_ACTIONS::drawEllipse( TOOL_ACTION_ARGS()
+        .Name( "eeschema.InteractiveDrawing.drawEllipse" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Draw Ellipses" ) )
+        .ToolbarState( TOOLBAR_STATE::TOGGLE )
+        .Icon( BITMAPS::add_ellipse )
+        .Flags( AF_ACTIVATE )
+        .Parameter( SHAPE_T::ELLIPSE ) );
+
+TOOL_ACTION SCH_ACTIONS::drawEllipseArc( TOOL_ACTION_ARGS()
+        .Name( "eeschema.InteractiveDrawing.drawEllipseArc" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Draw Elliptical Arcs" ) )
+        .ToolbarState( TOOLBAR_STATE::TOGGLE )
+        .Icon( BITMAPS::add_ellipse_arc )
+        .Flags( AF_ACTIVATE )
+        .Parameter( SHAPE_T::ELLIPSE_ARC ) );
+
 TOOL_ACTION SCH_ACTIONS::drawArc( TOOL_ACTION_ARGS()
         .Name( "eeschema.InteractiveDrawing.drawArc" )
         .Scope( AS_GLOBAL )
@@ -831,6 +849,27 @@ TOOL_ACTION SCH_ACTIONS::swapUnitLabels( TOOL_ACTION_ARGS()
         .FriendlyName( _( "Swap Unit Labels" ) )
         .Tooltip( _( "Swap labels between selected units" ) )
         .Icon( BITMAPS::swap ) );
+
+TOOL_ACTION SCH_ACTIONS::toggleLock( TOOL_ACTION_ARGS()
+        .Name( "eeschema.InteractiveEdit.toggleLock" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Toggle Lock" ) )
+        .Tooltip( _( "Lock or unlock selected items" ) )
+        .Icon( BITMAPS::lock_unlock ) );
+
+TOOL_ACTION SCH_ACTIONS::lock( TOOL_ACTION_ARGS()
+        .Name( "eeschema.InteractiveEdit.lock" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Lock" ) )
+        .Tooltip( _( "Prevent items from being moved and/or resized on the canvas" ) )
+        .Icon( BITMAPS::locked ) );
+
+TOOL_ACTION SCH_ACTIONS::unlock( TOOL_ACTION_ARGS()
+        .Name( "eeschema.InteractiveEdit.unlock" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Unlock" ) )
+        .Tooltip( _( "Allow items to be moved and/or resized on the canvas" ) )
+        .Icon( BITMAPS::unlocked ) );
 
 TOOL_ACTION SCH_ACTIONS::properties( TOOL_ACTION_ARGS()
         .Name( "eeschema.InteractiveEdit.properties" )
@@ -1065,6 +1104,42 @@ TOOL_ACTION SCH_ACTIONS::highlightNetTool( TOOL_ACTION_ARGS()
         .Icon( BITMAPS::net_highlight_schematic )
         .Flags( AF_ACTIVATE ) );
 
+TOOL_ACTION SCH_ACTIONS::highlightNetChain( TOOL_ACTION_ARGS()
+        .Name( "eeschema.EditorControl.highlightNetChain" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Highlight Net Chain" ) )
+        .Tooltip( _( "Highlight the net chain under the cursor" ) )
+        .Icon( BITMAPS::net_highlight_schematic ) );
+
+TOOL_ACTION SCH_ACTIONS::removeFromNetChain( TOOL_ACTION_ARGS()
+        .Name( "eeschema.EditorControl.removeFromNetChain" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Remove from Net Chain" ) )
+        .Tooltip( _( "Remove the selected net from its net chain by disabling propagation on the bridging component(s)" ) ) );
+
+TOOL_ACTION SCH_ACTIONS::replaceTerminalPin( TOOL_ACTION_ARGS()
+        .Name( "eeschema.EditorControl.replaceTerminalPin" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Replace Terminal Pin" ) ) );
+
+TOOL_ACTION SCH_ACTIONS::nameNetChain( TOOL_ACTION_ARGS()
+        .Name( "eeschema.EditorControl.nameNetChain" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Name Net Chain" ) )
+        .Tooltip( _( "Assign a name to the net chain" ) ) );
+
+TOOL_ACTION SCH_ACTIONS::createNetChainBetweenPins( TOOL_ACTION_ARGS()
+        .Name( "eeschema.EditorControl.createNetChainBetweenPins" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Create Net Chain Between Pins" ) )
+        .Tooltip( _( "Create a new net chain connecting the two selected pins" ) ) );
+
+TOOL_ACTION SCH_ACTIONS::createNetChain( TOOL_ACTION_ARGS()
+        .Name( "eeschema.EditorControl.createNetChain" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Create Net Chain..." ) )
+        .Tooltip( _( "Detect net chain paths through passives and create a named net chain" ) ) );
+
 TOOL_ACTION SCH_ACTIONS::showNetNavigator( TOOL_ACTION_ARGS()
         .Name( "eeschema.EditorControl.showNetNavigator" )
         .Scope( AS_GLOBAL )
@@ -1212,6 +1287,13 @@ TOOL_ACTION SCH_ACTIONS::importGraphics( TOOL_ACTION_ARGS()
         .Tooltip( _( "Import 2D drawing file" ) )
         .Icon( BITMAPS::import_vector )
         .Flags( AF_ACTIVATE ) );
+
+TOOL_ACTION SCH_ACTIONS::importNonKicadSchematic( TOOL_ACTION_ARGS()
+        .Name( "eeschema.EditorControl.importNonKicadSchematic" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Import Non-KiCad Schematic..." ) )
+        .Tooltip( _( "Replace current schematic sheet with one imported from another application" ) )
+        .Icon( BITMAPS::import_document ) );
 
 TOOL_ACTION SCH_ACTIONS::showPcbNew( TOOL_ACTION_ARGS()
         .Name( "eeschema.EditorControl.showPcbNew" )
@@ -1780,5 +1862,11 @@ TOOL_ACTION SCH_ACTIONS::removeVariant( TOOL_ACTION_ARGS()
         .Scope( AS_GLOBAL )
         .FriendlyName( _( "Remove Design Variant..." ) )
         .Tooltip( _( "Remove an existing design variant from the schematic." ) ) );
+
+TOOL_ACTION SCH_ACTIONS::editVariantDescription( TOOL_ACTION_ARGS()
+        .Name( "eeschema.EditorControl.editVariantDescription" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Edit Variant Description..." ) )
+        .Tooltip( _( "Edit the description of an existing design variant." ) ) );
 
 // clang-format on

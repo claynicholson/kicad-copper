@@ -768,7 +768,11 @@ void SCH_SCREEN::UpdateSymbolLinks( REPORTER* aReporter )
         // LIB_TABLE_BASE::LoadSymbol() throws an IO_ERROR if the library nickname
         // is not found in the table so check if the library still exists in the table
         // before attempting to load the symbol.
-        if( !libs->HasLibrary( symbol->GetLibId().GetLibNickname() ) && !legacyLibs )
+        std::optional<LIBRARY_TABLE_ROW*> libRow = libs->GetRow( symbol->GetLibId().GetLibNickname() );
+        bool hasLibraryRow = libRow.has_value();
+        bool hasLoadedLibrary = libs->HasLibrary( symbol->GetLibId().GetLibNickname() );
+
+        if( !hasLibraryRow && !legacyLibs )
         {
             if( aReporter )
             {
@@ -781,7 +785,13 @@ void SCH_SCREEN::UpdateSymbolLinks( REPORTER* aReporter )
             continue;
         }
 
-        if( libs->HasLibrary( symbol->GetLibId().GetLibNickname() ) )
+        if( hasLibraryRow && !hasLoadedLibrary )
+        {
+            libs->LoadOne( symbol->GetLibId().GetLibNickname() );
+            hasLoadedLibrary = libs->HasLibrary( symbol->GetLibId().GetLibNickname() );
+        }
+
+        if( hasLoadedLibrary )
         {
             try
             {
@@ -915,7 +925,7 @@ void SCH_SCREEN::Plot( PLOTTER* aPlotter, const SCH_PLOT_OPTS& aPlotOpts, const 
 
     if( !aItems.empty() && aItems[0]->Schematic() )
     {
-        hopOverScale = aItems[0]->Schematic()->Settings().m_HopOverScale;
+        hopOverScale = aItems[0]->Schematic()->Settings().GetHopOverScale();
         defaultLineWidth = aItems[0]->Schematic()->Settings().m_DefaultLineWidth;
     }
 
@@ -990,7 +1000,7 @@ void SCH_SCREEN::Plot( PLOTTER* aPlotter, const SCH_PLOT_OPTS& aPlotOpts, const 
         {
             SCH_LINE* aLine = static_cast<SCH_LINE*>( item );
 
-            if( !aLine->IsWire() || !aPlotOpts.m_plotHopOver )
+            if( ( !aLine->IsWire() && !aLine->IsBus() ) || !aPlotOpts.m_plotHopOver )
             {
                 item->Plot( aPlotter, !background, aPlotOpts, 0, 0, { 0, 0 }, false );
             }

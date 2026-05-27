@@ -48,6 +48,7 @@
 #include <netlist_reader/pcb_netlist.h>
 #include <netlist_reader/board_netlist_updater.h>
 #include <gal/painter.h>
+#include <pcb_painter.h>
 #include <pcb_edit_frame.h>
 #include <pcbnew_settings.h>
 #include <render_settings.h>
@@ -115,11 +116,19 @@ void PCB_EDIT_FRAME::ExecuteRemoteCommand( const char* cmdline )
     }
     else if( strcmp( idcmd, "$CLEAR" ) == 0 )
     {
-        if( renderSettings->IsHighlightEnabled() )
-        {
+        auto* pcbRender = dynamic_cast<KIGFX::PCB_RENDER_SETTINGS*>( renderSettings );
+
+        bool hadHighlight = renderSettings->IsHighlightEnabled();
+        bool hadChain = pcbRender && !pcbRender->GetHighlightedNetChain().IsEmpty();
+
+        if( hadHighlight )
             renderSettings->SetHighlight( false );
+
+        if( hadChain )
+            pcbRender->SetHighlightedNetChain( wxString() );
+
+        if( hadHighlight || hadChain )
             view->UpdateAllLayersColor();
-        }
 
         if( pcb->IsHighLightNetON() )
         {
@@ -146,6 +155,35 @@ void PCB_EDIT_FRAME::ExecuteRemoteCommand( const char* cmdline )
             std::vector<MSG_PANEL_ITEM> items;
             netinfo->GetMsgPanelInfo( this, items );
             SetMsgPanel( items );
+
+            // If the incoming net belongs to a net chain, promote the single-net
+            // highlight into a multi-net highlight covering every chain member so
+            // the PCB mirrors the chain highlight happening on the schematic side.
+            const wxString& chainName = netinfo->GetNetChain();
+
+            if( !chainName.IsEmpty() )
+            {
+                pcb->SetHighLightNet( netcode );
+                renderSettings->SetHighlight( true, netcode );
+                multiHighlight = true;
+
+                for( NETINFO_ITEM* candidate : pcb->GetNetInfo() )
+                {
+                    if( !candidate || candidate == netinfo )
+                        continue;
+
+                    if( candidate->GetNetChain() == chainName )
+                    {
+                        pcb->SetHighLightNet( candidate->GetNetCode(), true );
+                        renderSettings->SetHighlight( true, candidate->GetNetCode(), true );
+                    }
+                }
+
+                if( auto* pcbRender = dynamic_cast<KIGFX::PCB_RENDER_SETTINGS*>( renderSettings ) )
+                    pcbRender->SetHighlightedNetChain( chainName );
+
+                netcode = -1;
+            }
         }
 
         // fall through to highlighting section
@@ -734,6 +772,12 @@ void PCB_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
         GetToolManager()->RunAction( ACTIONS::pluginsReload );
         break;
 
+    case MAIL_PCB_SAVE:
+        if( SavePcbFile( Prj().AbsolutePath( GetBoard()->GetFileName() ) ) )
+            payload = "success";
+
+        break;
+
     case MAIL_RELOAD_LIB:
     {
         m_designBlocksPane->RefreshLibs();
@@ -745,7 +789,7 @@ void PCB_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
             wxString errors = adapter->GetLibraryLoadErrors();
 
             if( !errors.IsEmpty() )
-                statusBar->SetLoadWarningMessages( errors );
+                statusBar->AddWarningMessages( "load", errors );
         }
 
         break;

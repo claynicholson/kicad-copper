@@ -27,7 +27,6 @@
 #include <settings/app_settings.h>
 #include <variant>
 
-class ACTION_PLUGIN;
 class PCB_SCREEN;
 class BOARD;
 class BOARD_COMMIT;
@@ -62,6 +61,7 @@ class ACTION_MENU;
 class TOOL_ACTION;
 class DIALOG_BOARD_SETUP;
 class PCB_DESIGN_BLOCK_PANE;
+class WX_INFOBAR;
 
 #ifdef KICAD_IPC_API
 class KICAD_API_SERVER;
@@ -101,16 +101,6 @@ public:
      * @return true if the any changes have not been saved
      */
     bool IsContentModified() const override;
-
-    /**
-     * Synchronize the environment variables from KiCad's environment into the Python interpreter.
-     */
-    void PythonSyncEnvironmentVariables();
-
-    /**
-     * Synchronize the project name from KiCad's environment into the Python interpreter.
-     */
-    void PythonSyncProjectName();
 
     /**
      * Update the layer manager and other widgets from the board setup
@@ -216,13 +206,13 @@ public:
      * Return true if button visibility action plugin setting was set to true
      * or it is unset and plugin defaults to true.
      */
-    static bool GetActionPluginButtonVisible( const wxString& aPluginPath, bool aPluginDefault );
+    static bool GetPluginActionButtonVisible( const wxString& aPluginPath, bool aPluginDefault );
 
     /**
      * Return ordered list of plugins in sequence in which they should appear on toolbar or
-     * in settings.  Handles both legacy (SWIG) and API plugins, so returns a heterogenous list.
+     * in settings.
      */
-    static std::vector<std::variant<ACTION_PLUGIN*, const PLUGIN_ACTION*>> GetOrderedActionPlugins();
+    static std::vector<const PLUGIN_ACTION*> GetOrderedPluginActions();
 
     void SaveProjectLocalSettings() override;
 
@@ -762,37 +752,6 @@ protected:
      */
     void SwitchCanvas( EDA_DRAW_PANEL_GAL::GAL_TYPE aCanvasType ) override;
 
-    /**
-     * Fill action menu with all registered action plugins
-     */
-    void buildActionPluginMenus( ACTION_MENU* aActionMenu );
-
-    /**
-     * Append action plugin buttons to given toolbar
-     */
-    void addActionPluginTools( ACTION_TOOLBAR* aToolbar );
-
-    /**
-     * Execute action plugin's Run() method and updates undo buffer.
-     *
-     * @param aActionPlugin action plugin
-     */
-    void RunActionPlugin( ACTION_PLUGIN* aActionPlugin );
-
-    /**
-     * Launched by the menu when an action is called.
-     *
-     * @param aEvent sent by wx
-     */
-    void OnActionPluginMenu( wxCommandEvent& aEvent);
-
-    /**
-     * Launched by the button when an action is called.
-     *
-     * @param aEvent sent by wx
-     */
-    void OnActionPluginButton( wxCommandEvent& aEvent );
-
     PLUGIN_ACTION_SCOPE PluginActionScope() const override { return PLUGIN_ACTION_SCOPE::PCB; }
 
     /**
@@ -859,6 +818,21 @@ public:
 
     bool      m_ProbingSchToPcb;         // Recursion guard when synchronizing selection from schematic
 
+    /// Reactive text-var invalidation listener state. The handle alone is
+    /// ambiguous across board/project swaps — the tracker it belongs to must
+    /// be remembered so the destructor (and tracker-change detection)
+    /// removes from the correct tracker, not whatever GetBoard() points at
+    /// post-swap. Handle == 0 means not installed.
+    std::size_t             m_textVarListenerHandle = 0;
+    class TEXT_VAR_TRACKER* m_textVarListenerTracker = nullptr;
+
+    /**
+     * Drop every cached reference into the current BOARD's text-var tracker.
+     * Must run before the BOARD is freed (SetBoard replacement or frame
+     * teardown).
+     */
+    void detachTextVarTracker();
+
     void StartCrossProbeFlash( const std::vector<BOARD_ITEM*>& aItems );
     void OnCrossProbeFlashTimer( wxTimerEvent& aEvent );
     void UpdateProperties() override;
@@ -886,6 +860,12 @@ private:
 
     std::vector<LIB_ID>    m_designBlockHistoryList;
     PCB_DESIGN_BLOCK_PANE* m_designBlocksPane;
+
+    /// Secondary infobar that stacks above the main one; reserved for load-time
+    /// notices (currently the WRL -> STEP migration prompt) that must not be
+    /// stomped by later infobar messages such as read-only warnings or DRC
+    /// rule errors.
+    WX_INFOBAR*            m_loadNoticeInfoBar = nullptr;
 
     const std::map<std::string, UTF8>* m_importProperties; // Properties used for non-KiCad import.
 

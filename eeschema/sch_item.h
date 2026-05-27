@@ -154,8 +154,6 @@ public:
                                          std::vector<DANGLING_END_ITEM>& aItemListByPos );
 };
 
-typedef std::vector<SCH_ITEM*> SCH_ITEM_VEC;
-
 
 /**
  * Base class for any item which can be embedded within the #SCHEMATIC container class,
@@ -252,6 +250,9 @@ public:
 
     void SetPrivate( bool aPrivate ) { m_private = aPrivate; }
     bool IsPrivate() const { return m_private; }
+
+    bool IsLocked() const override;
+    void SetLocked( bool aLocked ) override { m_isLocked = aLocked; }
 
     virtual void SetExcludedFromSim( bool aExclude, const SCH_SHEET_PATH* aInstance = nullptr,
                                      const wxString& aVariantName = wxEmptyString ) { }
@@ -559,7 +560,7 @@ public:
     /**
      * Retrieve the set of items connected to this item on the given sheet.
      */
-    const SCH_ITEM_VEC& ConnectedItems( const SCH_SHEET_PATH& aPath );
+    const std::vector<SCH_ITEM*>& ConnectedItems( const SCH_SHEET_PATH& aPath );
 
     /**
      * Add a connection link between this item and another.
@@ -784,21 +785,21 @@ protected:
                                             // an initial position of the item or mouse cursor
 
     /// Store pointers to other items that are connected to this one, per sheet.
-    std::map<SCH_SHEET_PATH, SCH_ITEM_VEC, SHEET_PATH_CMP> m_connected_items;
+    std::map<SCH_SHEET_PATH, std::vector<SCH_ITEM*>, SHEET_PATH_CMP> m_connected_items;
 
     /// Store connectivity information, per sheet.
-    std::unordered_map<SCH_SHEET_PATH, SCH_CONNECTION*>    m_connection_map;
+    std::unordered_map<SCH_SHEET_PATH, SCH_CONNECTION*>              m_connection_map;
 
-    bool                                                   m_connectivity_dirty;
+    bool                                                             m_connectivity_dirty;
 
     /// Store pointers to rule areas which this item is contained within
-    std::unordered_set<SCH_RULE_AREA*>                     m_rule_areas_cache;
+    std::unordered_set<SCH_RULE_AREA*>                               m_rule_areas_cache;
+
+    bool                                                   m_isLocked;
 
 private:
     friend class LIB_SYMBOL;
 };
 
-#ifndef SWIG
 DECLARE_ENUM_TO_WXANY( SCH_LAYER_ID );
-#endif
 

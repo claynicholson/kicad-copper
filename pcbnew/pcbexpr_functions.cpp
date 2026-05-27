@@ -30,6 +30,7 @@
 
 #include <board.h>
 #include <board_design_settings.h>
+#include <project/net_settings.h>
 #include <component_classes/component_class.h>
 #include <drc/drc_rtree.h>
 #include <drc/drc_engine.h>
@@ -225,8 +226,11 @@ static bool testFootprintSelector( FOOTPRINT* aFp, const wxString& aSelector )
     // logic here, so that people can use text variables to contain references or LIBIDs.
     // (see: https://gitlab.com/kicad/code/kicad/-/issues/11231)
 
+    if( aSelector.IsEmpty() )
+        return false;
+
     // First check if we have a known directive
-    if( aSelector.Upper().StartsWith( wxT( "${CLASS:" ) ) && aSelector.EndsWith( '}' ) )
+    if( aSelector[0] == '$' && aSelector.Last() == '}' && aSelector.Upper().StartsWith( wxT( "${CLASS:" ) ) )
     {
         wxString name = aSelector.Mid( 8, aSelector.Length() - 9 );
 
@@ -239,7 +243,7 @@ static bool testFootprintSelector( FOOTPRINT* aFp, const wxString& aSelector )
     {
         return true;
     }
-    else if( aSelector.Contains( ':' ) && aFp->GetFPIDAsString().Matches( aSelector ) )
+    else if( aSelector.Find( ':' ) != wxNOT_FOUND && aFp->GetFPIDAsString().Matches( aSelector ) )
     {
         return true;
     }
@@ -1235,6 +1239,7 @@ static void isCoupledDiffPairFunc( LIBEVAL::CONTEXT* aCtx, void* self )
 
                 if( context->GetConstraint() == DRC_CONSTRAINT_T::DIFF_PAIR_GAP_CONSTRAINT
                         || context->GetConstraint() == DRC_CONSTRAINT_T::LENGTH_CONSTRAINT
+                        || context->GetConstraint() == DRC_CONSTRAINT_T::NET_CHAIN_LENGTH_CONSTRAINT
                         || context->GetConstraint() == DRC_CONSTRAINT_T::SKEW_CONSTRAINT )
                 {
                     // DRC engine evaluates these only in the context of a diffpair, but doesn't
@@ -1300,6 +1305,139 @@ static void inDiffPairFunc( LIBEVAL::CONTEXT* aCtx, void* self )
 
                         if( baseName.EndsWith( "_" ) && baseName.BeforeLast( '_' ).Matches( arg ) )
                             return 1.0;
+                    }
+                }
+
+                return 0.0;
+            } );
+}
+
+
+static void inNetChainFunc( LIBEVAL::CONTEXT* aCtx, void* self )
+{
+    LIBEVAL::VALUE*  argv   = aCtx->Pop();
+    PCBEXPR_VAR_REF* vref   = static_cast<PCBEXPR_VAR_REF*>( self );
+    BOARD_ITEM*      item   = vref ? vref->GetObject( aCtx ) : nullptr;
+    LIBEVAL::VALUE*  result = aCtx->AllocValue();
+
+    result->Set( 0.0 );
+    aCtx->Push( result );
+
+    if( !argv || argv->AsString().IsEmpty() )
+    {
+        if( aCtx->HasErrorCallback() )
+            aCtx->ReportError( wxString::Format(
+                    _( "Missing argument to '%s'" ), wxT( "inNetChain()" ) ) );
+
+        return;
+    }
+
+    if( !item || !item->GetBoard() )
+        return;
+
+    result->SetDeferredEval(
+            [item, argv]() -> double
+            {
+                if( !item || !item->IsConnected() )
+                    return 0.0;
+
+                NETINFO_ITEM* netinfo =
+                        static_cast<BOARD_CONNECTED_ITEM*>( item )->GetNet();
+
+                if( !netinfo )
+                    return 0.0;
+
+                const wxString& chainName = netinfo->GetNetChain();
+
+                if( chainName.IsEmpty() )
+                    return 0.0;
+
+                wxString arg = argv->AsString();
+
+                return chainName.Matches( arg ) ? 1.0 : 0.0;
+            } );
+}
+
+
+static void hasNetChainFunc( LIBEVAL::CONTEXT* aCtx, void* self )
+{
+    PCBEXPR_VAR_REF* vref   = static_cast<PCBEXPR_VAR_REF*>( self );
+    BOARD_ITEM*      item   = vref ? vref->GetObject( aCtx ) : nullptr;
+    LIBEVAL::VALUE*  result = aCtx->AllocValue();
+
+    result->Set( 0.0 );
+    aCtx->Push( result );
+
+    if( !item || !item->GetBoard() )
+        return;
+
+    result->SetDeferredEval(
+            [item]() -> double
+            {
+                if( !item || !item->IsConnected() )
+                    return 0.0;
+
+                NETINFO_ITEM* netinfo =
+                        static_cast<BOARD_CONNECTED_ITEM*>( item )->GetNet();
+
+                return ( netinfo && !netinfo->GetNetChain().IsEmpty() ) ? 1.0 : 0.0;
+            } );
+}
+
+
+static void inNetChainClassFunc( LIBEVAL::CONTEXT* aCtx, void* self )
+{
+    LIBEVAL::VALUE*  argv   = aCtx->Pop();
+    PCBEXPR_VAR_REF* vref   = static_cast<PCBEXPR_VAR_REF*>( self );
+    BOARD_ITEM*      item   = vref ? vref->GetObject( aCtx ) : nullptr;
+    LIBEVAL::VALUE*  result = aCtx->AllocValue();
+
+    result->Set( 0.0 );
+    aCtx->Push( result );
+
+    if( !argv || argv->AsString().IsEmpty() )
+    {
+        if( aCtx->HasErrorCallback() )
+            aCtx->ReportError( wxString::Format(
+                    _( "Missing argument to '%s'" ), wxT( "inNetChainClass()" ) ) );
+
+        return;
+    }
+
+    if( !item || !item->GetBoard() )
+        return;
+
+    result->SetDeferredEval(
+            [item, argv]() -> double
+            {
+                if( !item || !item->IsConnected() )
+                    return 0.0;
+
+                NETINFO_ITEM* netinfo =
+                        static_cast<BOARD_CONNECTED_ITEM*>( item )->GetNet();
+
+                if( !netinfo )
+                    return 0.0;
+
+                const wxString& chainName = netinfo->GetNetChain();
+
+                if( chainName.IsEmpty() )
+                    return 0.0;
+
+                if( BOARD* board = item->GetBoard() )
+                {
+                    std::shared_ptr<NET_SETTINGS> ns = board->GetDesignSettings().m_NetSettings;
+
+                    if( ns )
+                    {
+                        const wxString& className = ns->GetNetChainClass( chainName );
+
+                        if( className.IsEmpty() )
+                            return 0.0;
+
+                        wxString arg = argv->AsString();
+
+                        return className.Matches( arg ) ? 1.0 : 0.0;
                     }
                 }
 
@@ -1536,6 +1674,9 @@ void PCBEXPR_BUILTIN_FUNCTIONS::RegisterAllFunctions()
     RegisterFunc( wxT( "fromTo('x','y')" ), fromToFunc );
     RegisterFunc( wxT( "isCoupledDiffPair()" ), isCoupledDiffPairFunc );
     RegisterFunc( wxT( "inDiffPair('x')" ), inDiffPairFunc );
+    RegisterFunc( wxT( "inNetChain('x')" ), inNetChainFunc );
+    RegisterFunc( wxT( "hasNetChain()" ), hasNetChainFunc );
+    RegisterFunc( wxT( "inNetChainClass('x')" ), inNetChainClassFunc );
 
     RegisterFunc( wxT( "getField('x')" ), getFieldFunc );
 

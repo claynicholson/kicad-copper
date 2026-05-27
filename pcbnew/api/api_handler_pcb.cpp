@@ -27,7 +27,9 @@
 #include <api/api_enums.h>
 #include <api/board_context.h>
 #include <api/api_utils.h>
+#include <base_screen.h>
 #include <board_commit.h>
+#include <board_connected_item.h>
 #include <board_design_settings.h>
 #include <footprint.h>
 #include <kicad_clipboard.h>
@@ -67,8 +69,14 @@
 #include <zone.h>
 
 #include <api/common/types/base_types.pb.h>
+#include <connectivity/connectivity_data.h>
+#include <drc/drc_rule_condition.h>
+#include <drc/drc_rule_parser.h>
 #include <widgets/appearance_controls.h>
 #include <widgets/report_severity.h>
+#include <drc/rule_editor/drc_re_rule_loader.h>
+#include <wx/ffile.h>
+#include <wx/filename.h>
 
 using namespace kiapi::common::commands;
 using types::CommandStatus;
@@ -112,14 +120,15 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<BOARD_CONTEXT> aContext,
         &API_HANDLER_PCB::handleSetBoardEnabledLayers );
     registerHandler<GetGraphicsDefaults, GraphicsDefaultsResponse>(
             &API_HANDLER_PCB::handleGetGraphicsDefaults );
-    registerHandler<GetBoundingBox, GetBoundingBoxResponse>(
-            &API_HANDLER_PCB::handleGetBoundingBox );
+    registerHandler<GetBoardDesignRules, BoardDesignRulesResponse>( &API_HANDLER_PCB::handleGetBoardDesignRules );
+    registerHandler<SetBoardDesignRules, BoardDesignRulesResponse>( &API_HANDLER_PCB::handleSetBoardDesignRules );
+    registerHandler<GetCustomDesignRules, CustomRulesResponse>( &API_HANDLER_PCB::handleGetCustomDesignRules );
+    registerHandler<SetCustomDesignRules, CustomRulesResponse>( &API_HANDLER_PCB::handleSetCustomDesignRules );
+    registerHandler<GetBoundingBox, GetBoundingBoxResponse>( &API_HANDLER_PCB::handleGetBoundingBox );
     registerHandler<GetPadShapeAsPolygon, PadShapeAsPolygonResponse>(
             &API_HANDLER_PCB::handleGetPadShapeAsPolygon );
     registerHandler<CheckPadstackPresenceOnLayers, PadstackPresenceResponse>(
             &API_HANDLER_PCB::handleCheckPadstackPresenceOnLayers );
-    registerHandler<GetTitleBlockInfo, types::TitleBlockInfo>(
-            &API_HANDLER_PCB::handleGetTitleBlockInfo );
     registerHandler<ExpandTextVariables, ExpandTextVariablesResponse>(
             &API_HANDLER_PCB::handleExpandTextVariables );
     registerHandler<GetBoardOrigin, types::Vector2>( &API_HANDLER_PCB::handleGetBoardOrigin );
@@ -128,6 +137,9 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<BOARD_CONTEXT> aContext,
 
     registerHandler<InteractiveMoveItems, Empty>( &API_HANDLER_PCB::handleInteractiveMoveItems );
     registerHandler<GetNets, NetsResponse>( &API_HANDLER_PCB::handleGetNets );
+    registerHandler<GetConnectedItems, GetItemsResponse>( &API_HANDLER_PCB::handleGetConnectedItems );
+    registerHandler<GetItemsByNet, GetItemsResponse>( &API_HANDLER_PCB::handleGetItemsByNet );
+    registerHandler<GetItemsByNetClass, GetItemsResponse>( &API_HANDLER_PCB::handleGetItemsByNetClass );
     registerHandler<GetNetClassForNets, NetClassForNetsResponse>(
             &API_HANDLER_PCB::handleGetNetClassForNets );
     registerHandler<RefillZones, Empty>( &API_HANDLER_PCB::handleRefillZones );
@@ -149,34 +161,37 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<BOARD_CONTEXT> aContext,
     registerHandler<InjectDrcError, InjectDrcErrorResponse>(
             &API_HANDLER_PCB::handleInjectDrcError );
 
-        registerHandler<RunBoardJobExport3D, types::RunJobResponse>(
+    registerHandler<RunBoardJobExport3D, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExport3D );
-        registerHandler<RunBoardJobExportRender, types::RunJobResponse>(
+    registerHandler<RunBoardJobExportRender, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportRender );
-        registerHandler<RunBoardJobExportSvg, types::RunJobResponse>(
+    registerHandler<RunBoardJobExportSvg, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportSvg );
-        registerHandler<RunBoardJobExportDxf, types::RunJobResponse>(
+    registerHandler<RunBoardJobExportDxf, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportDxf );
-        registerHandler<RunBoardJobExportPdf, types::RunJobResponse>(
+    registerHandler<RunBoardJobExportPdf, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportPdf );
-        registerHandler<RunBoardJobExportPs, types::RunJobResponse>(
+    registerHandler<RunBoardJobExportPs, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportPs );
-        registerHandler<RunBoardJobExportGerbers, types::RunJobResponse>(
+    registerHandler<RunBoardJobExportGerbers, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportGerbers );
-        registerHandler<RunBoardJobExportDrill, types::RunJobResponse>(
+    registerHandler<RunBoardJobExportDrill, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportDrill );
-        registerHandler<RunBoardJobExportPosition, types::RunJobResponse>(
+    registerHandler<RunBoardJobExportPosition, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportPosition );
-        registerHandler<RunBoardJobExportGencad, types::RunJobResponse>(
+    registerHandler<RunBoardJobExportGencad, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportGencad );
-        registerHandler<RunBoardJobExportIpc2581, types::RunJobResponse>(
+    registerHandler<RunBoardJobExportIpc2581, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportIpc2581 );
-        registerHandler<RunBoardJobExportIpcD356, types::RunJobResponse>(
+    registerHandler<RunBoardJobExportIpcD356, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportIpcD356 );
-        registerHandler<RunBoardJobExportODB, types::RunJobResponse>(
+    registerHandler<RunBoardJobExportODB, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportODB );
-        registerHandler<RunBoardJobExportStats, types::RunJobResponse>(
+    registerHandler<RunBoardJobExportStats, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportStats );
+
+    registerHandler<GetPageSettings, types::PageSettings>( &API_HANDLER_PCB::handleGetPageSettings );
+    registerHandler<SetPageSettings, types::PageSettings>( &API_HANDLER_PCB::handleSetPageSettings );
 }
 
 
@@ -374,13 +389,28 @@ std::optional<BOARD_ITEM*> API_HANDLER_PCB::getItemById( const KIID& aId ) const
 }
 
 
-bool API_HANDLER_PCB::validateDocumentInternal( const DocumentSpecifier& aDocument ) const
+tl::expected<bool, ApiResponseStatus> API_HANDLER_PCB::validateDocumentInternal( const DocumentSpecifier& aDocument ) const
 {
     if( aDocument.type() != DocumentType::DOCTYPE_PCB )
-        return false;
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "the requested document is not a board" );
+        return tl::unexpected( e );
+    }
 
     wxFileName fn( context()->GetCurrentFileName() );
-    return 0 == aDocument.board_filename().compare( fn.GetFullName() );
+
+    if( aDocument.board_filename().compare( fn.GetFullName() ) != 0 )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "the requested document {} is not open",
+                                          aDocument.board_filename() ) );
+        return tl::unexpected( e );
+    }
+
+    return true;
 }
 
 
@@ -573,7 +603,7 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_PCB::handleCreateUpdateItemsIntern
                 item->RunOnChildren(
                         []( BOARD_ITEM* aChild )
                         {
-                            const_cast<KIID&>( aChild->m_Uuid ) = KIID();
+                            aChild->ResetUuid();
                         },
                         RECURSE );
             }
@@ -648,14 +678,8 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_PCB::handleGetItems( const HANDLER_
     std::set<KICAD_T> typesRequested, typesInserted;
     bool handledAnything = false;
 
-    for( int typeRaw : aCtx.Request.types() )
+    for( KICAD_T type : parseRequestedItemTypes( aCtx.Request.types() ) )
     {
-        auto typeMessage = static_cast<common::types::KiCadObjectType>( typeRaw );
-        KICAD_T type = FromProtoEnum<KICAD_T>( typeMessage );
-
-        if( type == TYPE_NOT_INIT )
-            continue;
-
         typesRequested.emplace( type );
 
         if( typesInserted.count( type ) )
@@ -701,6 +725,7 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_PCB::handleGetItems( const HANDLER_
         case PCB_TEXT_T:
         case PCB_TEXTBOX_T:
         case PCB_BARCODE_T:
+        case PCB_REFERENCE_IMAGE_T:
         {
             handledAnything = true;
             bool inserted = false;
@@ -716,6 +741,35 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_PCB::handleGetItems( const HANDLER_
 
             if( inserted )
                 typesInserted.insert( type );
+
+            break;
+        }
+
+        case PCB_DIMENSION_T:
+        {
+            handledAnything = true;
+            bool inserted = false;
+
+            for( BOARD_ITEM* item : board->Drawings() )
+            {
+                switch (item->Type()) {
+                    case PCB_DIM_ALIGNED_T:
+                    case PCB_DIM_CENTER_T:
+                    case PCB_DIM_RADIAL_T:
+                    case PCB_DIM_ORTHOGONAL_T:
+                    case PCB_DIM_LEADER_T:
+                        items.emplace_back( item );
+                        inserted = true;
+                        break;
+                    default:
+                        break;
+                }
+            }
+            // we have to add the dimension subtypes to the requested to get them out
+            typesRequested.insert( {PCB_DIM_ALIGNED_T, PCB_DIM_CENTER_T, PCB_DIM_RADIAL_T, PCB_DIM_ORTHOGONAL_T, PCB_DIM_LEADER_T } );
+
+            if( inserted )
+                typesInserted.insert( {PCB_DIM_ALIGNED_T, PCB_DIM_CENTER_T, PCB_DIM_RADIAL_T, PCB_DIM_ORTHOGONAL_T, PCB_DIM_LEADER_T } );
 
             break;
         }
@@ -865,16 +919,8 @@ HANDLER_RESULT<SelectionResponse> API_HANDLER_PCB::handleGetSelection(
 
     std::set<KICAD_T> filter;
 
-    for( int typeRaw : aCtx.Request.types() )
-    {
-        auto typeMessage = static_cast<types::KiCadObjectType>( typeRaw );
-        KICAD_T type = FromProtoEnum<KICAD_T>( typeMessage );
-
-        if( type == TYPE_NOT_INIT )
-            continue;
-
+    for( KICAD_T type : parseRequestedItemTypes( aCtx.Request.types() ) )
         filter.insert( type );
-    }
 
     TOOL_MANAGER* mgr = toolManager();
     PCB_SELECTION_TOOL* selectionTool = mgr->GetTool<PCB_SELECTION_TOOL>();
@@ -1169,6 +1215,548 @@ HANDLER_RESULT<GraphicsDefaultsResponse> API_HANDLER_PCB::handleGetGraphicsDefau
 }
 
 
+HANDLER_RESULT<BoardDesignRulesResponse> API_HANDLER_PCB::handleGetBoardDesignRules(
+        const HANDLER_CONTEXT<GetBoardDesignRules>& aCtx )
+{
+    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+
+    if( !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    const BOARD_DESIGN_SETTINGS& bds = board()->GetDesignSettings();
+    BoardDesignRulesResponse     response;
+    kiapi::board::BoardDesignRules* rules = response.mutable_rules();
+
+    kiapi::board::MinimumConstraints* constraints = rules->mutable_constraints();
+
+    constraints->mutable_min_clearance()->set_value_nm( bds.m_MinClearance );
+    constraints->mutable_min_groove_width()->set_value_nm( bds.m_MinGrooveWidth );
+    constraints->mutable_min_connection_width()->set_value_nm( bds.m_MinConn );
+    constraints->mutable_min_track_width()->set_value_nm( bds.m_TrackMinWidth );
+    constraints->mutable_min_via_annular_width()->set_value_nm( bds.m_ViasMinAnnularWidth );
+    constraints->mutable_min_via_size()->set_value_nm( bds.m_ViasMinSize );
+    constraints->mutable_min_through_drill()->set_value_nm( bds.m_MinThroughDrill );
+    constraints->mutable_min_microvia_size()->set_value_nm( bds.m_MicroViasMinSize );
+    constraints->mutable_min_microvia_drill()->set_value_nm( bds.m_MicroViasMinDrill );
+    constraints->mutable_copper_edge_clearance()->set_value_nm( bds.m_CopperEdgeClearance );
+    constraints->mutable_hole_clearance()->set_value_nm( bds.m_HoleClearance );
+    constraints->mutable_hole_to_hole_min()->set_value_nm( bds.m_HoleToHoleMin );
+    constraints->mutable_silk_clearance()->set_value_nm( bds.m_SilkClearance );
+    constraints->set_min_resolved_spokes( bds.m_MinResolvedSpokes );
+    constraints->mutable_min_silk_text_height()->set_value_nm( bds.m_MinSilkTextHeight );
+    constraints->mutable_min_silk_text_thickness()->set_value_nm( bds.m_MinSilkTextThickness );
+
+    kiapi::board::PredefinedSizes* sizes = rules->mutable_predefined_sizes();
+
+    for( size_t ii = 1; ii < bds.m_TrackWidthList.size(); ++ii )
+        sizes->add_tracks()->mutable_width()->set_value_nm( bds.m_TrackWidthList[ii] );
+
+    for( size_t ii = 1; ii < bds.m_ViasDimensionsList.size(); ++ii )
+    {
+        kiapi::board::PresetViaDimension* via = sizes->add_vias();
+        via->mutable_diameter()->set_value_nm( bds.m_ViasDimensionsList[ii].m_Diameter );
+        via->mutable_drill()->set_value_nm( bds.m_ViasDimensionsList[ii].m_Drill );
+    }
+
+    for( size_t ii = 1; ii < bds.m_DiffPairDimensionsList.size(); ++ii )
+    {
+        kiapi::board::PresetDiffPairDimension* pair = sizes->add_diff_pairs();
+        pair->mutable_width()->set_value_nm( bds.m_DiffPairDimensionsList[ii].m_Width );
+        pair->mutable_gap()->set_value_nm( bds.m_DiffPairDimensionsList[ii].m_Gap );
+        pair->mutable_via_gap()->set_value_nm( bds.m_DiffPairDimensionsList[ii].m_ViaGap );
+    }
+
+    kiapi::board::SolderMaskPasteDefaults* maskPaste = rules->mutable_solder_mask_paste();
+
+    maskPaste->mutable_mask_expansion()->set_value_nm( bds.m_SolderMaskExpansion );
+    maskPaste->mutable_mask_min_width()->set_value_nm( bds.m_SolderMaskMinWidth );
+    maskPaste->mutable_mask_to_copper_clearance()->set_value_nm( bds.m_SolderMaskToCopperClearance );
+    maskPaste->mutable_paste_margin()->set_value_nm( bds.m_SolderPasteMargin );
+    maskPaste->set_paste_margin_ratio( bds.m_SolderPasteMarginRatio );
+    maskPaste->set_allow_soldermask_bridges_in_footprints( bds.m_AllowSoldermaskBridgesInFPs );
+
+    kiapi::board::TeardropDefaults* teardrops = rules->mutable_teardrops();
+
+    teardrops->set_target_vias( bds.m_TeardropParamsList.m_TargetVias );
+    teardrops->set_target_pth_pads( bds.m_TeardropParamsList.m_TargetPTHPads );
+    teardrops->set_target_smd_pads( bds.m_TeardropParamsList.m_TargetSMDPads );
+    teardrops->set_target_track_to_track( bds.m_TeardropParamsList.m_TargetTrack2Track );
+    teardrops->set_use_round_shapes_only( bds.m_TeardropParamsList.m_UseRoundShapesOnly );
+
+    TEARDROP_PARAMETERS_LIST& tdList = const_cast<TEARDROP_PARAMETERS_LIST&>( bds.m_TeardropParamsList );
+
+    for( int target = TARGET_ROUND; target <= TARGET_TRACK; ++target )
+    {
+        const TEARDROP_PARAMETERS* params = tdList.GetParameters( static_cast<TARGET_TD>( target ) );
+        kiapi::board::TeardropTargetEntry* entry = teardrops->add_target_params();
+
+        entry->set_target( ToProtoEnum<TARGET_TD, kiapi::board::TeardropTarget>(
+            static_cast<TARGET_TD>( target ) ) );
+        entry->mutable_params()->set_enabled( params->m_Enabled );
+        entry->mutable_params()->mutable_max_length()->set_value_nm( params->m_TdMaxLen );
+        entry->mutable_params()->mutable_max_width()->set_value_nm( params->m_TdMaxWidth );
+        entry->mutable_params()->set_best_length_ratio( params->m_BestLengthRatio );
+        entry->mutable_params()->set_best_width_ratio( params->m_BestWidthRatio );
+        entry->mutable_params()->set_width_to_size_filter_ratio( params->m_WidthtoSizeFilterRatio );
+        entry->mutable_params()->set_curved_edges( params->m_CurvedEdges );
+        entry->mutable_params()->set_allow_two_tracks( params->m_AllowUseTwoTracks );
+        entry->mutable_params()->set_on_pads_in_zones( params->m_TdOnPadsInZones );
+    }
+
+    kiapi::board::ViaProtectionDefaults* viaProtection = rules->mutable_via_protection();
+
+    viaProtection->set_tent_front( bds.m_TentViasFront );
+    viaProtection->set_tent_back( bds.m_TentViasBack );
+    viaProtection->set_cover_front( bds.m_CoverViasFront );
+    viaProtection->set_cover_back( bds.m_CoverViasBack );
+    viaProtection->set_plug_front( bds.m_PlugViasFront );
+    viaProtection->set_plug_back( bds.m_PlugViasBack );
+    viaProtection->set_cap( bds.m_CapVias );
+    viaProtection->set_fill( bds.m_FillVias );
+
+    for( const auto& [errorCode, severity] : bds.m_DRCSeverities )
+    {
+        board::DrcSeveritySetting* setting = rules->add_severities();
+        setting->set_rule_type(
+                ToProtoEnum<PCB_DRC_CODE, board::DrcErrorType>( static_cast<PCB_DRC_CODE>( errorCode ) ) );
+        setting->set_severity( ToProtoEnum<SEVERITY, types::RuleSeverity>( severity ) );
+    }
+
+    for( const wxString& serialized : bds.m_DrcExclusions )
+    {
+        kiapi::board::DrcExclusion* exclusion = rules->add_exclusions();
+        exclusion->mutable_marker()->mutable_id()->set_opaque_id( serialized.ToStdString() );
+
+        auto it = bds.m_DrcExclusionComments.find( serialized );
+
+        if( it != bds.m_DrcExclusionComments.end() )
+            exclusion->set_comment( it->second.ToStdString() );
+    }
+
+    response.set_custom_rules_status( CRS_NONE );
+
+    wxFileName fn = context()->GetBoard()->GetFileName();
+    fn.SetExt( FILEEXT::DesignRulesFileExtension );
+    wxString rulesPath = context()->Prj().AbsolutePath( fn.GetFullName() );
+
+    if( !rulesPath.IsEmpty() && wxFileName::IsFileReadable( rulesPath ) )
+    {
+        wxFFile file( rulesPath, "r" );
+        wxString content;
+        std::vector<std::shared_ptr<DRC_RULE>> parsedRules;
+
+        if( !file.IsOpened() )
+        {
+            response.set_custom_rules_status( CRS_INVALID );
+            return response;
+        }
+
+        file.ReadAll( &content );
+        file.Close();
+
+        try
+        {
+            DRC_RULES_PARSER parser( content, "File" );
+            parser.Parse( parsedRules, nullptr );
+            response.set_custom_rules_status( CRS_VALID );
+        }
+        catch( const IO_ERROR& )
+        {
+            response.set_custom_rules_status( CRS_INVALID );
+        }
+    }
+
+    return response;
+}
+
+
+HANDLER_RESULT<BoardDesignRulesResponse> API_HANDLER_PCB::handleSetBoardDesignRules(
+        const HANDLER_CONTEXT<SetBoardDesignRules>& aCtx )
+{
+    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+
+    if( !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    BOARD_DESIGN_SETTINGS newSettings( board()->GetDesignSettings() );
+    const kiapi::board::BoardDesignRules& rules = aCtx.Request.rules();
+
+    if( rules.has_constraints() )
+    {
+        const kiapi::board::MinimumConstraints& constraints = rules.constraints();
+
+        newSettings.m_MinClearance = constraints.min_clearance().value_nm();
+        newSettings.m_MinGrooveWidth = constraints.min_groove_width().value_nm();
+        newSettings.m_MinConn = constraints.min_connection_width().value_nm();
+        newSettings.m_TrackMinWidth = constraints.min_track_width().value_nm();
+        newSettings.m_ViasMinAnnularWidth = constraints.min_via_annular_width().value_nm();
+        newSettings.m_ViasMinSize = constraints.min_via_size().value_nm();
+        newSettings.m_MinThroughDrill = constraints.min_through_drill().value_nm();
+        newSettings.m_MicroViasMinSize = constraints.min_microvia_size().value_nm();
+        newSettings.m_MicroViasMinDrill = constraints.min_microvia_drill().value_nm();
+        newSettings.m_CopperEdgeClearance = constraints.copper_edge_clearance().value_nm();
+        newSettings.m_HoleClearance = constraints.hole_clearance().value_nm();
+        newSettings.m_HoleToHoleMin = constraints.hole_to_hole_min().value_nm();
+        newSettings.m_SilkClearance = constraints.silk_clearance().value_nm();
+        newSettings.m_MinResolvedSpokes = constraints.min_resolved_spokes();
+        newSettings.m_MinSilkTextHeight = constraints.min_silk_text_height().value_nm();
+        newSettings.m_MinSilkTextThickness = constraints.min_silk_text_thickness().value_nm();
+    }
+
+    if( rules.has_predefined_sizes() )
+    {
+        newSettings.m_TrackWidthList.clear();
+        newSettings.m_TrackWidthList.emplace_back( 0 );
+
+        for( const kiapi::board::PresetTrackWidth& track : rules.predefined_sizes().tracks() )
+            newSettings.m_TrackWidthList.emplace_back( track.width().value_nm() );
+
+        newSettings.m_ViasDimensionsList.clear();
+        newSettings.m_ViasDimensionsList.emplace_back( 0, 0 );
+
+        for( const kiapi::board::PresetViaDimension& via : rules.predefined_sizes().vias() )
+        {
+            newSettings.m_ViasDimensionsList.emplace_back( static_cast<int>( via.diameter().value_nm() ),
+                                                           static_cast<int>( via.drill().value_nm() ) );
+        }
+
+        newSettings.m_DiffPairDimensionsList.clear();
+        newSettings.m_DiffPairDimensionsList.emplace_back( 0, 0, 0 );
+
+        for( const kiapi::board::PresetDiffPairDimension& pair : rules.predefined_sizes().diff_pairs() )
+        {
+            newSettings.m_DiffPairDimensionsList.emplace_back(
+                    static_cast<int>( pair.width().value_nm() ),
+                    static_cast<int>( pair.gap().value_nm() ),
+                    static_cast<int>( pair.via_gap().value_nm() ) );
+        }
+    }
+
+    if( rules.has_solder_mask_paste() )
+    {
+        const kiapi::board::SolderMaskPasteDefaults& maskPaste = rules.solder_mask_paste();
+
+        newSettings.m_SolderMaskExpansion = maskPaste.mask_expansion().value_nm();
+        newSettings.m_SolderMaskMinWidth = maskPaste.mask_min_width().value_nm();
+        newSettings.m_SolderMaskToCopperClearance = maskPaste.mask_to_copper_clearance().value_nm();
+        newSettings.m_SolderPasteMargin = maskPaste.paste_margin().value_nm();
+        newSettings.m_SolderPasteMarginRatio = maskPaste.paste_margin_ratio();
+        newSettings.m_AllowSoldermaskBridgesInFPs =
+                maskPaste.allow_soldermask_bridges_in_footprints();
+    }
+
+    if( rules.has_teardrops() )
+    {
+        const kiapi::board::TeardropDefaults& teardrops = rules.teardrops();
+
+        newSettings.m_TeardropParamsList.m_TargetVias = teardrops.target_vias();
+        newSettings.m_TeardropParamsList.m_TargetPTHPads = teardrops.target_pth_pads();
+        newSettings.m_TeardropParamsList.m_TargetSMDPads = teardrops.target_smd_pads();
+        newSettings.m_TeardropParamsList.m_TargetTrack2Track = teardrops.target_track_to_track();
+        newSettings.m_TeardropParamsList.m_UseRoundShapesOnly = teardrops.use_round_shapes_only();
+
+        for( const kiapi::board::TeardropTargetEntry& entry : teardrops.target_params() )
+        {
+            if( entry.target() == kiapi::board::TeardropTarget::TDT_UNKNOWN )
+                continue;
+
+            TARGET_TD target = FromProtoEnum<TARGET_TD, kiapi::board::TeardropTarget>(
+                    entry.target() );
+
+            TEARDROP_PARAMETERS* params = newSettings.m_TeardropParamsList.GetParameters( target );
+
+            params->m_Enabled = entry.params().enabled();
+            params->m_TdMaxLen = entry.params().max_length().value_nm();
+            params->m_TdMaxWidth = entry.params().max_width().value_nm();
+            params->m_BestLengthRatio = entry.params().best_length_ratio();
+            params->m_BestWidthRatio = entry.params().best_width_ratio();
+            params->m_WidthtoSizeFilterRatio = entry.params().width_to_size_filter_ratio();
+            params->m_CurvedEdges = entry.params().curved_edges();
+            params->m_AllowUseTwoTracks = entry.params().allow_two_tracks();
+            params->m_TdOnPadsInZones = entry.params().on_pads_in_zones();
+        }
+    }
+
+    if( rules.has_via_protection() )
+    {
+        const kiapi::board::ViaProtectionDefaults& viaProtection = rules.via_protection();
+
+        newSettings.m_TentViasFront = viaProtection.tent_front();
+        newSettings.m_TentViasBack = viaProtection.tent_back();
+        newSettings.m_CoverViasFront = viaProtection.cover_front();
+        newSettings.m_CoverViasBack = viaProtection.cover_back();
+        newSettings.m_PlugViasFront = viaProtection.plug_front();
+        newSettings.m_PlugViasBack = viaProtection.plug_back();
+        newSettings.m_CapVias = viaProtection.cap();
+        newSettings.m_FillVias = viaProtection.fill();
+    }
+
+    if( rules.severities_size() > 0 )
+    {
+        newSettings.m_DRCSeverities.clear();
+
+        for( const kiapi::board::DrcSeveritySetting& severitySetting : rules.severities() )
+        {
+            PCB_DRC_CODE ruleType =
+                    FromProtoEnum<PCB_DRC_CODE, kiapi::board::DrcErrorType>( severitySetting.rule_type() );
+
+            const std::unordered_set<SEVERITY> permitted( { RPT_SEVERITY_ERROR, RPT_SEVERITY_WARNING, RPT_SEVERITY_IGNORE } );
+            SEVERITY setting = FromProtoEnum<SEVERITY, kiapi::common::types::RuleSeverity>( severitySetting.severity() );
+
+            if( !permitted.contains( setting ) )
+            {
+                ApiResponseStatus e;
+                e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                e.set_error_message( fmt::format( "DRC severity must be error, warning, or ignore" ) );
+                return tl::unexpected( e );
+            }
+
+            newSettings.m_DRCSeverities[ruleType] = setting;
+        }
+    }
+
+    if( rules.exclusions_size() > 0 )
+    {
+        newSettings.m_DrcExclusions.clear();
+        newSettings.m_DrcExclusionComments.clear();
+
+        for( const kiapi::board::DrcExclusion& exclusion : rules.exclusions() )
+        {
+            wxString serialized = wxString::FromUTF8( exclusion.marker().id().opaque_id() );
+
+            if( serialized.IsEmpty() )
+            {
+                ApiResponseStatus e;
+                e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                e.set_error_message( "DrcExclusion marker id must not be empty" );
+                return tl::unexpected( e );
+            }
+
+            newSettings.m_DrcExclusions.insert( serialized );
+            newSettings.m_DrcExclusionComments[serialized] = wxString::FromUTF8( exclusion.comment() );
+        }
+    }
+
+    std::vector<BOARD_DESIGN_SETTINGS::VALIDATION_ERROR> errors = newSettings.ValidateDesignRules();
+
+    if( !errors.empty() )
+    {
+        const BOARD_DESIGN_SETTINGS::VALIDATION_ERROR& error = errors.front();
+
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "Invalid board design rules: {}: {}",
+                                          error.setting_name.ToStdString(),
+                                          error.error_message.ToStdString() ) );
+        return tl::unexpected( e );
+    }
+
+    board()->SetDesignSettings( newSettings );
+
+    if( frame() )
+    {
+        frame()->OnModify();
+        frame()->UpdateUserInterface();
+    }
+
+    HANDLER_CONTEXT<GetBoardDesignRules> getCtx = { aCtx.ClientName, GetBoardDesignRules() };
+    *getCtx.Request.mutable_board() = aCtx.Request.board();
+
+    return handleGetBoardDesignRules( getCtx );
+}
+
+
+HANDLER_RESULT<CustomRulesResponse> API_HANDLER_PCB::handleGetCustomDesignRules(
+        const HANDLER_CONTEXT<GetCustomDesignRules>& aCtx )
+{
+    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+
+    if( !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    CustomRulesResponse response;
+    response.set_status( CRS_NONE );
+
+    wxFileName fn = context()->GetBoard()->GetFileName();
+    fn.SetExt( FILEEXT::DesignRulesFileExtension );
+    wxString rulesPath = context()->Prj().AbsolutePath( fn.GetFullName() );
+
+    if( rulesPath.IsEmpty() || !wxFileName::IsFileReadable( rulesPath ) )
+        return response;
+
+    wxFFile file( rulesPath, "r" );
+
+    if( !file.IsOpened() )
+    {
+        response.set_status( CRS_INVALID );
+        response.set_error_text( "Failed to open custom rules file" );
+        return response;
+    }
+
+    wxString content;
+    file.ReadAll( &content );
+    file.Close();
+
+    std::vector<std::shared_ptr<DRC_RULE>> parsedRules;
+
+    try
+    {
+        DRC_RULES_PARSER parser( content, "File" );
+        parser.Parse( parsedRules, nullptr );
+    }
+    catch( const IO_ERROR& ioe )
+    {
+        response.set_status( CRS_INVALID );
+        response.set_error_text( ioe.What().ToStdString() );
+        return response;
+    }
+
+    for( const std::shared_ptr<DRC_RULE>& rule : parsedRules )
+    {
+        // TODO(JE) since we now need this for both here and the rules editor, maybe it's time
+        // to just make comment parsing part of the parser?
+        wxString text = DRC_RULE_LOADER::ExtractRuleText( content, rule->m_Name );
+        wxString comment = DRC_RULE_LOADER::ExtractRuleComment( text );
+
+        kiapi::board::CustomRule* customRule = response.add_rules();
+
+        if( rule->m_Condition )
+            customRule->set_condition( rule->m_Condition->GetExpression().ToUTF8() );
+
+        for( const DRC_CONSTRAINT& constraint : rule->m_Constraints )
+        {
+            board::CustomRuleConstraint* constraintProto = customRule->add_constraints();
+            constraint.ToProto( *constraintProto );
+        }
+
+        customRule->set_severity( ToProtoEnum<SEVERITY, types::RuleSeverity>( rule->m_Severity ) );
+        customRule->set_name( rule->m_Name.ToUTF8() );
+
+        if( rule->m_LayerSource.CmpNoCase( wxS( "outer" ) ) == 0 )
+        {
+            customRule->set_layer_mode( kiapi::board::CRLM_OUTER );
+        }
+        else if( rule->m_LayerSource.CmpNoCase( wxS( "inner" ) ) == 0 )
+        {
+            customRule->set_layer_mode( kiapi::board::CRLM_INNER );
+        }
+        else if( !rule->m_LayerSource.IsEmpty() )
+        {
+            int layer = LSET::NameToLayer( rule->m_LayerSource );
+
+            if( layer != UNDEFINED_LAYER && layer != UNSELECTED_LAYER && layer < PCB_LAYER_ID_COUNT )
+            {
+                customRule->set_single_layer(
+                        ToProtoEnum<PCB_LAYER_ID, board::types::BoardLayer>( static_cast<PCB_LAYER_ID>( layer ) ) );
+            }
+        }
+
+        if( !comment.IsEmpty() )
+            customRule->set_comments( comment );
+    }
+
+    response.set_status( CRS_VALID );
+    return response;
+}
+
+
+HANDLER_RESULT<CustomRulesResponse> API_HANDLER_PCB::handleSetCustomDesignRules(
+        const HANDLER_CONTEXT<SetCustomDesignRules>& aCtx )
+{
+    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+
+    if( !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    wxFileName fn = context()->GetBoard()->GetFileName();
+    fn.SetExt( FILEEXT::DesignRulesFileExtension );
+    wxString rulesPath = context()->Prj().AbsolutePath( fn.GetFullName() );
+
+    if( aCtx.Request.rules_size() == 0 )
+    {
+        if( wxFileName::FileExists( rulesPath ) )
+        {
+            if( !wxRemoveFile( rulesPath ) )
+            {
+                CustomRulesResponse response;
+                response.set_status( CRS_INVALID );
+                response.set_error_text( "Failed to remove custom rules file" );
+                return response;
+            }
+        }
+
+        CustomRulesResponse response;
+        response.set_status( CRS_NONE );
+        return response;
+    }
+
+    wxString rulesText;
+    rulesText << "(version 1)\n";
+
+    for( const board::CustomRule& rule : aCtx.Request.rules() )
+    {
+        wxString serializationError;
+        wxString serializedRule = DRC_RULE::FormatRuleFromProto( rule, &serializationError );
+
+        if( serializedRule.IsEmpty() )
+        {
+            CustomRulesResponse response;
+            response.set_status( CRS_INVALID );
+
+            if( serializationError.IsEmpty() )
+                response.set_error_text( "Failed to serialize custom rule" );
+            else
+                response.set_error_text( serializationError.ToUTF8() );
+
+            return response;
+        }
+
+        rulesText << "\n" << serializedRule;
+    }
+
+    // Validate generated file text before writing so callers get parser errors in response.
+    try
+    {
+        std::vector<std::shared_ptr<DRC_RULE>> parsedRules;
+        DRC_RULES_PARSER parser( rulesText, "SetCustomDesignRules" );
+        parser.Parse( parsedRules, nullptr );
+    }
+    catch( const IO_ERROR& ioe )
+    {
+        CustomRulesResponse response;
+        response.set_status( CRS_INVALID );
+        response.set_error_text( ioe.What().ToStdString() );
+        return response;
+    }
+
+    wxFFile file( rulesPath, "w" );
+
+    if( !file.IsOpened() )
+    {
+        CustomRulesResponse response;
+        response.set_status( CRS_INVALID );
+        response.set_error_text( "Failed to open custom rules file for writing" );
+        return response;
+    }
+
+    if( !file.Write( rulesText ) )
+    {
+        file.Close();
+
+        CustomRulesResponse response;
+        response.set_status( CRS_INVALID );
+        response.set_error_text( "Failed to write custom rules file" );
+        return response;
+    }
+
+    file.Close();
+
+    HANDLER_CONTEXT<GetCustomDesignRules> getCtx = { aCtx.ClientName, GetCustomDesignRules() };
+    *getCtx.Request.mutable_board() = aCtx.Request.board();
+    return handleGetCustomDesignRules( getCtx );
+}
+
+
 HANDLER_RESULT<types::Vector2> API_HANDLER_PCB::handleGetBoardOrigin(
         const HANDLER_CONTEXT<GetBoardOrigin>& aCtx )
 {
@@ -1426,34 +2014,48 @@ HANDLER_RESULT<PadstackPresenceResponse> API_HANDLER_PCB::handleCheckPadstackPre
 }
 
 
-HANDLER_RESULT<types::TitleBlockInfo> API_HANDLER_PCB::handleGetTitleBlockInfo(
-        const HANDLER_CONTEXT<GetTitleBlockInfo>& aCtx )
+std::optional<TITLE_BLOCK*> API_HANDLER_PCB::getTitleBlock()
 {
-    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() );
+    return &context()->GetBoard()->GetTitleBlock();
+}
 
-    if( !documentValidation )
-        return tl::unexpected( documentValidation.error() );
 
-    BOARD* board = this->board();
-    const TITLE_BLOCK& block = board->GetTitleBlock();
+std::optional<PAGE_INFO> API_HANDLER_PCB::getPageSettings()
+{
+    return context()->GetBoard()->GetPageSettings();
+}
 
-    types::TitleBlockInfo response;
 
-    response.set_title( block.GetTitle().ToUTF8() );
-    response.set_date( block.GetDate().ToUTF8() );
-    response.set_revision( block.GetRevision().ToUTF8() );
-    response.set_company( block.GetCompany().ToUTF8() );
-    response.set_comment1( block.GetComment( 0 ).ToUTF8() );
-    response.set_comment2( block.GetComment( 1 ).ToUTF8() );
-    response.set_comment3( block.GetComment( 2 ).ToUTF8() );
-    response.set_comment4( block.GetComment( 3 ).ToUTF8() );
-    response.set_comment5( block.GetComment( 4 ).ToUTF8() );
-    response.set_comment6( block.GetComment( 5 ).ToUTF8() );
-    response.set_comment7( block.GetComment( 6 ).ToUTF8() );
-    response.set_comment8( block.GetComment( 7 ).ToUTF8() );
-    response.set_comment9( block.GetComment( 8 ).ToUTF8() );
+bool API_HANDLER_PCB::setPageSettings( const PAGE_INFO& aPageInfo )
+{
+    context()->GetBoard()->SetPageSettings( aPageInfo );
+    return true;
+}
 
-    return response;
+
+wxString API_HANDLER_PCB::getDrawingSheetFileName()
+{
+    return BASE_SCREEN::m_DrawingSheetFileName;
+}
+
+
+void API_HANDLER_PCB::setDrawingSheetFileName( const wxString& aFileName )
+{
+    BASE_SCREEN::m_DrawingSheetFileName = aFileName;
+
+    if( frame() )
+        frame()->LoadDrawingSheet();
+}
+
+
+void API_HANDLER_PCB::onModified()
+{
+    if( frame() )
+    {
+        frame()->Refresh();
+        frame()->OnModify();
+        frame()->UpdateUserInterface();
+    }
 }
 
 
@@ -1571,6 +2173,206 @@ HANDLER_RESULT<NetsResponse> API_HANDLER_PCB::handleGetNets( const HANDLER_CONTE
         netProto->mutable_code()->set_value( net->GetNetCode() );
     }
 
+    return response;
+}
+
+
+HANDLER_RESULT<GetItemsResponse> API_HANDLER_PCB::handleGetConnectedItems(
+        const HANDLER_CONTEXT<GetConnectedItems>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( !validateItemHeaderDocument( aCtx.Request.header() ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_UNHANDLED );
+        return tl::unexpected( e );
+    }
+
+    std::vector<KICAD_T> types = parseRequestedItemTypes( aCtx.Request.types() );
+    const bool filterByType = aCtx.Request.types_size() > 0;
+
+    if( filterByType && types.empty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "none of the requested types are valid for a Board object" );
+        return tl::unexpected( e );
+    }
+
+    std::set<KICAD_T> typeFilter( types.begin(), types.end() );
+    std::vector<BOARD_CONNECTED_ITEM*> sourceItems;
+
+    for( const types::KIID& id : aCtx.Request.items() )
+    {
+        if( std::optional<BOARD_ITEM*> item = getItemById( KIID( id.value() ) ) )
+        {
+            if( BOARD_CONNECTED_ITEM* connected = dynamic_cast<BOARD_CONNECTED_ITEM*>( *item ) )
+                sourceItems.emplace_back( connected );
+        }
+    }
+
+    if( sourceItems.empty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "none of the requested IDs were found or valid connected items" );
+        return tl::unexpected( e );
+    }
+
+    GetItemsResponse response;
+    std::shared_ptr<CONNECTIVITY_DATA> conn = board()->GetConnectivity();
+    std::set<KIID> insertedItems;
+
+    for( BOARD_CONNECTED_ITEM* source : sourceItems )
+    {
+        for( BOARD_CONNECTED_ITEM* connected : conn->GetConnectedItems( source ) )
+        {
+            if( filterByType && !typeFilter.contains( connected->Type() ) )
+                continue;
+
+            if( !insertedItems.insert( connected->m_Uuid ).second )
+                continue;
+
+            connected->Serialize( *response.add_items() );
+        }
+    }
+
+    response.set_status( ItemRequestStatus::IRS_OK );
+    return response;
+}
+
+
+HANDLER_RESULT<GetItemsResponse> API_HANDLER_PCB::handleGetItemsByNet(
+        const HANDLER_CONTEXT<GetItemsByNet>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( !validateItemHeaderDocument( aCtx.Request.header() ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_UNHANDLED );
+        return tl::unexpected( e );
+    }
+
+    std::vector<KICAD_T> types = parseRequestedItemTypes( aCtx.Request.types() );
+    const bool filterByType = aCtx.Request.types_size() > 0;
+
+    if( filterByType && types.empty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "none of the requested types are valid for a Board object" );
+        return tl::unexpected( e );
+    }
+
+    if( !filterByType )
+        types.assign( { PCB_PAD_T, PCB_VIA_T, PCB_TRACE_T, PCB_ARC_T, PCB_SHAPE_T, PCB_ZONE_T } );
+
+    GetItemsResponse response;
+    BOARD* board = this->board();
+    std::shared_ptr<CONNECTIVITY_DATA> conn = board->GetConnectivity();
+    std::set<KIID> insertedItems;
+
+    const NETINFO_LIST& nets = board->GetNetInfo();
+
+    for( const board::types::Net& net : aCtx.Request.nets() )
+    {
+        NETINFO_ITEM* netInfo = nets.GetNetItem( wxString::FromUTF8( net.name() ) );
+
+        if( !netInfo )
+            continue;
+
+        for( BOARD_CONNECTED_ITEM* item : conn->GetNetItems( netInfo->GetNetCode(), types ) )
+        {
+            if( !insertedItems.insert( item->m_Uuid ).second )
+                continue;
+
+            item->Serialize( *response.add_items() );
+        }
+    }
+
+    response.set_status( ItemRequestStatus::IRS_OK );
+    return response;
+}
+
+
+HANDLER_RESULT<GetItemsResponse> API_HANDLER_PCB::handleGetItemsByNetClass(
+        const HANDLER_CONTEXT<GetItemsByNetClass>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( !validateItemHeaderDocument( aCtx.Request.header() ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_UNHANDLED );
+        return tl::unexpected( e );
+    }
+
+    std::vector<KICAD_T> types = parseRequestedItemTypes( aCtx.Request.types() );
+    const bool filterByType = aCtx.Request.types_size() > 0;
+
+    if( filterByType && types.empty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "none of the requested types are valid for a Board object" );
+        return tl::unexpected( e );
+    }
+
+    if( !filterByType )
+        types.assign( { PCB_PAD_T, PCB_VIA_T, PCB_TRACE_T, PCB_ARC_T, PCB_SHAPE_T, PCB_ZONE_T } );
+
+    std::set<wxString> requestedClasses;
+
+    for( const std::string& netClass : aCtx.Request.net_classes() )
+        requestedClasses.insert( wxString( netClass.c_str(), wxConvUTF8 ) );
+
+    GetItemsResponse response;
+    BOARD* board = this->board();
+    std::shared_ptr<CONNECTIVITY_DATA> conn = board->GetConnectivity();
+    std::set<KIID> insertedItems;
+
+    for( NETINFO_ITEM* net : board->GetNetInfo() )
+    {
+        if( !net )
+            continue;
+
+        NETCLASS* nc = net->GetNetClass();
+
+        if( !requestedClasses.empty() )
+        {
+            if( !nc )
+                continue;
+
+            bool inClass = false;
+
+            for( const wxString& filter : requestedClasses )
+            {
+                if( nc->ContainsNetclassWithName( filter ) )
+                {
+                    inClass = true;
+                    break;
+                }
+            }
+
+            if( !inClass )
+                continue;
+        }
+
+        for( BOARD_CONNECTED_ITEM* item : conn->GetNetItems( net->GetNetCode(), types ) )
+        {
+            if( !insertedItems.insert( item->m_Uuid ).second )
+                continue;
+
+            item->Serialize( *response.add_items() );
+        }
+    }
+
+    response.set_status( ItemRequestStatus::IRS_OK );
     return response;
 }
 
@@ -2272,7 +3074,7 @@ HANDLER_RESULT<types::RunJobResponse> API_HANDLER_PCB::handleRunBoardJobExportPs
     if( std::optional<ApiResponseStatus> err = ApplyBoardPlotSettings( aCtx.Request.plot_settings(), job ) )
         return tl::unexpected( *err );
 
-        if( std::optional<ApiResponseStatus> paginationError =
+    if( std::optional<ApiResponseStatus> paginationError =
             ValidatePaginationModeForSingleOrPerFile( aCtx.Request.page_mode(),
                                                       "RunBoardJobExportPs" ) )
     {

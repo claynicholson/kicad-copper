@@ -38,14 +38,18 @@
 #include <wx/string.h>
 #include <wx/window.h>
 
+class PROGRESS_REPORTER;
+
 
 /**
- * Data produced by a registered saver on the UI thread, consumed by the background commit thread.
- * Each entry represents one file to write into the .history mirror.
+ * Data produced by a registered saver on the UI thread, consumed by either the background
+ * local-history commit thread or the foreground autosave-file writer.  Each entry represents
+ * one file to write.  The dispatcher joins @p relativePath to a destination root chosen by
+ * the active backup format and location preferences.
  */
 struct KICOMMON_API HISTORY_FILE_DATA
 {
-    wxString    path;           ///< Destination inside .history/
+    wxString    relativePath;   ///< Destination path relative to the project root
     std::string content;        ///< Serialized content (mutually exclusive with sourcePath)
     wxString    sourcePath;     ///< For file-copy savers (small files like .kicad_pro)
     bool        prettify = false;
@@ -101,8 +105,56 @@ public:
     /** Clear all registered savers. */
     void ClearAllSavers();
 
-    /** Run all registered savers and, if any staged changes differ from HEAD, create a commit. */
-    bool RunRegisteredSaversAndCommit( const wxString& aProjectPath, const wxString& aTitle );
+    /** Run all registered savers and, if any staged changes differ from HEAD, create a commit.
+     *  When @p aTagFileType is non-empty the new commit is tagged Save_<type>_N (manual save);
+     *  empty leaves the commit untagged (autosave). */
+    bool RunRegisteredSaversAndCommit( const wxString& aProjectPath, const wxString& aTitle,
+                                       const wxString& aTagFileType = wxEmptyString );
+
+    /**
+     * Run all registered savers and write their output to autosave files instead of
+     * committing to the local history repository.  Used when BACKUP_FORMAT::ZIP is
+     * selected so the user still has crash recovery without a git store.
+     *
+     * Output location follows BACKUP_LOCATION:
+     *   PROJECT_DIR  ->  "<projectpath>/<reldir>/_autosave-<basename>"
+     *   USER_DIR     ->  "<user_root>/<reldir>/<basename>" (mirroring the project tree)
+     *
+     * Files are written via KIPLATFORM::IO::AtomicWriteFile so a crash mid-write
+     * cannot leave a half-written autosave on disk.
+     */
+    bool RunRegisteredSaversAsAutosaveFiles( const wxString& aProjectPath );
+
+    /**
+     * Enumerate autosave files newer than their corresponding source files for the
+     * project at @p aProjectPath, restricted to sources whose extension is in
+     * @p aExtensions.  Used by editors at startup to detect crash-recovery
+     * candidates for files they own.
+     *
+     * Each entry in the returned vector has:
+     *   first  - autosave file path
+     *   second - corresponding source path under the project directory
+     */
+    std::vector<std::pair<wxString, wxString>> FindStaleAutosaveFiles( const wxString&              aProjectPath,
+                                                                       const std::vector<wxString>& aExtensions ) const;
+
+    /**
+     * Remove every autosave file under the project at @p aProjectPath regardless of
+     * which source it shadowed.  Used by the project manager to sweep autosaves on
+     * project close so nothing is left to prompt on next launch.  Manual-save callers
+     * should prefer the source-scoped overload below to avoid wiping autosaves for
+     * files this save did not actually persist.
+     */
+    void RemoveAutosaveFiles( const wxString& aProjectPath ) const;
+
+    /**
+     * Remove only the autosave files corresponding to @p aSourcePaths.  Called after a
+     * successful manual save so we drop autosaves the save just superseded without
+     * touching unsaved siblings (e.g. a PCB save must not erase a dirty schematic
+     * sheet's autosave when both editors are open).
+     */
+    void RemoveAutosaveFiles( const wxString& aProjectPath,
+                              const std::vector<wxString>& aSourcePaths ) const;
 
     /** Record that a file has been modified and should be included in the next snapshot. */
     void NoteFileChange( const wxString& aFile );
@@ -123,7 +175,7 @@ public:
 
     /** Enforce total size limit by rebuilding trimmed history keeping newest commits whose
      *  cumulative unique blob sizes fit within limit. */
-    bool EnforceSizeLimit( const wxString& aProjectPath, size_t aMaxBytes );
+    bool EnforceSizeLimit( const wxString& aProjectPath, size_t aMaxBytes, PROGRESS_REPORTER* aReporter = nullptr );
 
     /** Return true if the autosave data is newer than the last manual save. */
     bool HeadNewerThanLastSave( const wxString& aProjectPath );
@@ -137,15 +189,17 @@ public:
     /** Show a dialog allowing the user to choose a snapshot to restore. */
     void ShowRestoreDialog( const wxString& aProjectPath, wxWindow* aParent );
 
+    /** Block until any pending background save completes.  Call before reading repo
+     *  state (HeadNewerThanLastSave / GetHeadHash) at close time so an in-flight
+     *  autosave can't leave the close path with a stale view of HEAD. */
+    void WaitForPendingSave();
+
 private:
     std::vector<LOCAL_HISTORY_SNAPSHOT_INFO> LoadSnapshots( const wxString& aProjectPath );
 
     /** Execute file writes and git commit on a background thread. */
     bool commitInBackground( const wxString& aProjectPath, const wxString& aTitle,
-                             const std::vector<HISTORY_FILE_DATA>& aFileData );
-
-    /** Block until any pending background save completes. */
-    void WaitForPendingSave();
+                             const std::vector<HISTORY_FILE_DATA>& aFileData, bool aIsManualSave );
 
     std::set<wxString> m_pendingFiles;
     std::map<const void*,

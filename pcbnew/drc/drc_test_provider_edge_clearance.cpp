@@ -21,6 +21,7 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 
+#include <atomic>
 #include <common.h>
 #include <pcb_shape.h>
 #include <pcb_board_outline.h>
@@ -28,6 +29,7 @@
 #include <footprint.h>
 #include <pad.h>
 #include <pcb_track.h>
+#include <zone.h>
 #include <geometry/seg.h>
 #include <geometry/shape_segment.h>
 #include <drc/drc_engine.h>
@@ -35,6 +37,10 @@
 #include <drc/drc_rule.h>
 #include <drc/drc_test_provider.h>
 #include <drc/drc_rtree.h>
+#include <thread_pool.h>
+#include <mutex>
+#include <set>
+#include <tuple>
 
 /*
     Board edge clearance test. Checks all items for their mechanical clearances against the board
@@ -46,6 +52,7 @@
 
 enum SILK_DISPOSITION {
     UNKNOWN = 0,
+    RESOLVING,
     ON_BOARD,
     OFF_BOARD,
     CROSSES_EDGE
@@ -80,6 +87,14 @@ private:
     DRC_RTREE         m_edgesTree;
 
     std::map<BOARD_ITEM*, SILK_DISPOSITION> m_silkDisposition;
+    std::mutex                             m_silkMutex;
+
+    // Pads/vias with non-uniform padstacks generate one work unit per unique
+    // copper layer. For edge clearance, EvalRules is layer-agnostic
+    // (UNDEFINED_LAYER), so per-layer reports for the same (item, edge, pos)
+    // are redundant. Dedup at emission time.
+    std::set<std::tuple<KIID, KIID, VECTOR2I>> m_emittedEdgeReports;
+    std::mutex                                 m_emittedMutex;
 };
 
 
@@ -112,7 +127,10 @@ void DRC_TEST_PROVIDER_EDGE_CLEARANCE::resolveSilkDisposition( BOARD_ITEM* aItem
         disposition = aBoardOutline.Contains( aItemShape->Centre() ) ? ON_BOARD : OFF_BOARD;
     }
 
-    m_silkDisposition[aItem] = disposition;
+    {
+        std::lock_guard<std::mutex> lock( m_silkMutex );
+        m_silkDisposition[aItem] = disposition;
+    }
 
     if( disposition == CROSSES_EDGE )
     {
@@ -206,6 +224,19 @@ bool DRC_TEST_PROVIDER_EDGE_CLEARANCE::testAgainstEdge( BOARD_ITEM* item, SHAPE*
                 }
             }
 
+            {
+                std::lock_guard<std::mutex> lock( m_emittedMutex );
+
+                if( !m_emittedEdgeReports.insert( { item->m_Uuid, edge->m_Uuid, pos } ).second )
+                {
+                    // Same (item, edge, pos) already reported from another work unit.
+                    if( item->Type() == PCB_TRACE_T || item->Type() == PCB_ARC_T )
+                        return m_drcEngine->GetReportAllTrackErrors();
+                    else
+                        return false;
+                }
+            }
+
             std::shared_ptr<DRC_ITEM> drcItem = DRC_ITEM::Create( aErrorCode );
 
             // Only report clearance info if there is any; otherwise it's just a straight collision
@@ -222,7 +253,10 @@ bool DRC_TEST_PROVIDER_EDGE_CLEARANCE::testAgainstEdge( BOARD_ITEM* item, SHAPE*
             reportTwoItemGeometry( drcItem, pos, edge, item, shapeLayer, actual );
 
             if( aErrorCode == DRCE_SILK_EDGE_CLEARANCE )
+            {
+                std::lock_guard<std::mutex> lock( m_silkMutex );
                 m_silkDisposition[item] = CROSSES_EDGE;
+            }
 
             if( item->Type() == PCB_TRACE_T || item->Type() == PCB_ARC_T )
                 return m_drcEngine->GetReportAllTrackErrors();
@@ -258,6 +292,7 @@ bool DRC_TEST_PROVIDER_EDGE_CLEARANCE::Run()
     m_epsilon = m_board->GetDesignSettings().GetDRCEpsilon();
     m_edgesTree.clear();
     m_silkDisposition.clear();
+    m_emittedEdgeReports.clear();
 
     DRC_CONSTRAINT worstClearanceConstraint;
 
@@ -379,41 +414,45 @@ bool DRC_TEST_PROVIDER_EDGE_CLEARANCE::Run()
         }
     }
 
+    m_edgesTree.Build();
+
     /*
-     * Test copper and silk items against the set of edges.
+     * Collect all testable (item, layer, shape) tuples, then test against edges in parallel.
+     * Flattening to per-layer work units ensures even distribution across threads, since
+     * zones with many layers become many separate work units rather than one heavy item.
+     * Pre-fetching shapes avoids per-zone mutex contention during parallel testing.
      */
-    const int progressDelta = 200;
-    int       count = 0;
-    int       ii = 0;
+    struct WORK_UNIT
+    {
+        BOARD_ITEM*            item;
+        PCB_LAYER_ID           shapeLayer;
+        std::shared_ptr<SHAPE> shape;
+    };
+
+    std::vector<WORK_UNIT> workUnits;
 
     forEachGeometryItem( s_allBasicItems, LSET::AllLayersMask(),
             [&]( BOARD_ITEM *item ) -> bool
             {
-                count++;
-                return true;
-            } );
-
-    forEachGeometryItem( s_allBasicItems, LSET::AllLayersMask(),
-            [&]( BOARD_ITEM *item ) -> bool
-            {
-                bool testCopper = !m_drcEngine->IsErrorLimitExceeded( DRCE_EDGE_CLEARANCE );
-                bool testSilk = !m_drcEngine->IsErrorLimitExceeded( DRCE_SILK_EDGE_CLEARANCE );
-
-                if( !testCopper && !testSilk )
-                    return false;       // All limits exceeded; we're done
-
-                if( !reportProgress( ii++, count, progressDelta ) )
-                    return false;       // DRC cancelled; we're done
-
                 if( isInvisibleText( item ) )
-                    return true;        // Continue with other items
+                    return true;
+
+                if( item->Type() == PCB_ZONE_T )
+                {
+                    // Rule areas have no copper and are purely logical -- skip edge clearance.
+                    if( static_cast<ZONE*>( item )->GetIsRuleArea() )
+                        return true;
+                }
 
                 if( item->Type() == PCB_PAD_T )
                 {
                     PAD* pad = static_cast<PAD*>( item );
 
-                    if( pad->GetProperty() == PAD_PROP::CASTELLATED || pad->GetAttribute() == PAD_ATTRIB::CONN )
-                        return true;    // Continue with other items
+                    if( pad->GetProperty() == PAD_PROP::CASTELLATED
+                        || pad->GetAttribute() == PAD_ATTRIB::CONN )
+                    {
+                        return true;
+                    }
                 }
 
                 std::vector<PCB_LAYER_ID> layersToTest;
@@ -438,44 +477,115 @@ bool DRC_TEST_PROVIDER_EDGE_CLEARANCE::Run()
                     layersToTest = { UNDEFINED_LAYER };
                 }
 
-                for( PCB_LAYER_ID shapeLayer : layersToTest )
+                for( PCB_LAYER_ID layer : layersToTest )
                 {
-                    const std::shared_ptr<SHAPE>& itemShape = item->GetEffectiveShape( shapeLayer );
-
-                    for( PCB_LAYER_ID testLayer : { Edge_Cuts, Margin } )
-                    {
-                        if( testCopper && item->IsOnCopperLayer() )
-                        {
-                            m_edgesTree.QueryColliding( item, shapeLayer, testLayer, nullptr,
-                                    [&]( BOARD_ITEM* edge ) -> bool
-                                    {
-                                        return testAgainstEdge( item, itemShape.get(), shapeLayer, edge,
-                                                                EDGE_CLEARANCE_CONSTRAINT, DRCE_EDGE_CLEARANCE );
-                                    },
-                                    m_largestEdgeClearance );
-                        }
-
-                        if( testSilk && ( item->IsOnLayer( F_SilkS ) || item->IsOnLayer( B_SilkS ) ) )
-                        {
-                            m_edgesTree.QueryColliding( item, shapeLayer, testLayer, nullptr,
-                                    [&]( BOARD_ITEM* edge ) -> bool
-                                    {
-                                        return testAgainstEdge( item, itemShape.get(), shapeLayer, edge,
-                                                                SILK_CLEARANCE_CONSTRAINT, DRCE_SILK_EDGE_CLEARANCE );
-                                    },
-                                    m_largestEdgeClearance );
-                        }
-                    }
-
-                    if( testSilk && ( item->IsOnLayer( F_SilkS ) || item->IsOnLayer( B_SilkS ) ) )
-                    {
-                        if( m_silkDisposition[item] == UNKNOWN && m_board->BoardOutline()->HasOutline() )
-                            resolveSilkDisposition( item, itemShape.get(), m_board->BoardOutline()->GetOutline() );
-                    }
+                    workUnits.push_back(
+                            { item, layer, item->GetEffectiveShape( layer ) } );
                 }
 
                 return true;
             } );
+
+    std::atomic<size_t> done( 0 );
+    size_t              count = workUnits.size();
+
+    auto processWorkUnit =
+            [&]( const int idx ) -> size_t
+            {
+                if( m_drcEngine->IsCancelled() )
+                {
+                    done.fetch_add( 1 );
+                    return 0;
+                }
+
+                bool testCopper = !m_drcEngine->IsErrorLimitExceeded( DRCE_EDGE_CLEARANCE );
+                bool testSilk = !m_drcEngine->IsErrorLimitExceeded( DRCE_SILK_EDGE_CLEARANCE );
+
+                if( !testCopper && !testSilk )
+                {
+                    done.fetch_add( 1 );
+                    return 0;
+                }
+
+                WORK_UNIT&  wu = workUnits[idx];
+                BOARD_ITEM* item = wu.item;
+
+                for( PCB_LAYER_ID testLayer : { Edge_Cuts, Margin } )
+                {
+                    if( testCopper && item->IsOnCopperLayer() )
+                    {
+                        m_edgesTree.QueryColliding( item, wu.shapeLayer, testLayer, nullptr,
+                                [&]( BOARD_ITEM* edge ) -> bool
+                                {
+                                    return testAgainstEdge( item, wu.shape.get(),
+                                                           wu.shapeLayer, edge,
+                                                           EDGE_CLEARANCE_CONSTRAINT,
+                                                           DRCE_EDGE_CLEARANCE );
+                                },
+                                m_largestEdgeClearance );
+                    }
+
+                    if( testSilk
+                        && ( item->IsOnLayer( F_SilkS )
+                             || item->IsOnLayer( B_SilkS ) ) )
+                    {
+                        m_edgesTree.QueryColliding( item, wu.shapeLayer, testLayer, nullptr,
+                                [&]( BOARD_ITEM* edge ) -> bool
+                                {
+                                    return testAgainstEdge( item, wu.shape.get(),
+                                                           wu.shapeLayer, edge,
+                                                           SILK_CLEARANCE_CONSTRAINT,
+                                                           DRCE_SILK_EDGE_CLEARANCE );
+                                },
+                                m_largestEdgeClearance );
+                    }
+                }
+
+                if( testSilk
+                    && ( item->IsOnLayer( F_SilkS ) || item->IsOnLayer( B_SilkS ) ) )
+                {
+                    bool needsResolution = false;
+
+                    {
+                        std::lock_guard<std::mutex> lock( m_silkMutex );
+                        auto [it, inserted] = m_silkDisposition.try_emplace( item, RESOLVING );
+
+                        if( inserted || it->second == UNKNOWN )
+                        {
+                            it->second = RESOLVING;
+                            needsResolution = true;
+                        }
+                    }
+
+                    if( needsResolution && m_board->BoardOutline()->HasOutline() )
+                    {
+                        resolveSilkDisposition( item, wu.shape.get(),
+                                                m_board->BoardOutline()->GetOutline() );
+                    }
+                }
+
+                done.fetch_add( 1 );
+                return 1;
+            };
+
+    thread_pool& tp = GetKiCadThreadPool();
+    size_t       numBlocks = count;
+    auto         futures = tp.submit_loop( 0, count, processWorkUnit, numBlocks );
+
+    while( done < count )
+    {
+        reportProgress( done, count );
+
+        if( m_drcEngine->IsCancelled() )
+        {
+            for( auto& f : futures )
+                f.wait();
+
+            break;
+        }
+
+        futures.wait_for( std::chrono::milliseconds( 250 ) );
+    }
 
     return !m_drcEngine->IsCancelled();
 }

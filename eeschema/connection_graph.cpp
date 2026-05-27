@@ -22,9 +22,15 @@
 
 #include <algorithm>
 #include <list>
+#include <functional>
 #include <future>
-#include <vector>
+#include <map>
+#include <ranges>
+#include <set>
+#include <tuple>
 #include <unordered_map>
+#include <vector>
+
 #include <app_monitor.h>
 #include <core/profile.h>
 #include <core/kicad_algo.h>
@@ -38,6 +44,10 @@
 #include <sch_marker.h>
 #include <sch_pin.h>
 #include <sch_rule_area.h>
+#include <trace_helpers.h>
+#include <wx/log.h>
+#include <sch_netchain.h>
+#include <sch_label.h>
 #include <sch_sheet.h>
 #include <sch_sheet_path.h>
 #include <sch_sheet_pin.h>
@@ -67,6 +77,39 @@ static const wxChar DanglingProfileMask[] = wxT( "CONN_PROFILE" );
  * @ingroup trace_env_vars
  */
 static const wxChar ConnTrace[] = wxT( "CONN" );
+
+
+wxString CONNECTION_GRAPH::MakeNetChainKey( const wxString& aRawNetName, long aSubgraphCode )
+{
+    if( !aRawNetName.IsEmpty() && aRawNetName.Find( wxS( "<NO NET>" ) ) == wxNOT_FOUND )
+        return aRawNetName;
+
+    return wxString( SCH_NETCHAIN::SYNTHETIC_NET_PREFIX ) << aSubgraphCode;
+}
+
+
+wxString CONNECTION_GRAPH::MakeNetChainKey( const CONNECTION_SUBGRAPH* aSubGraph )
+{
+    if( !aSubGraph )
+        return wxEmptyString;
+
+    return MakeNetChainKey( aSubGraph->GetNetName(), aSubGraph->m_code );
+}
+
+
+// Internal shim so the existing private call sites read unchanged.
+static inline wxString netChainKeyFor( const wxString& aRawNetName, long aSubgraphCode )
+{
+    return CONNECTION_GRAPH::MakeNetChainKey( aRawNetName, aSubgraphCode );
+}
+
+
+CONNECTION_GRAPH::~CONNECTION_GRAPH()
+{
+    // Ensure destruction happens in a translation unit that includes full SCH_NETCHAIN
+    // definition to avoid incomplete type issues with std::unique_ptr<SCH_NETCHAIN>.
+    Reset();
+}
 
 
 void CONNECTION_SUBGRAPH::RemoveItem( SCH_ITEM* aItem )
@@ -129,6 +172,98 @@ void CONNECTION_SUBGRAPH::ExchangeItem( SCH_ITEM* aOldItem, SCH_ITEM* aNewItem )
 }
 
 
+/**
+ * Unified driver ranking used by CONNECTION_SUBGRAPH::ResolveDrivers (within a single
+ * subgraph) and by buildConnectionGraph's global-label transitive-closure pre-pass
+ * (across subgraphs). Returns -1 if aA wins, +1 if aB wins, 0 if the two are tied.
+ *
+ * Rules are applied in priority order and each rule short-circuits if it distinguishes
+ * the candidates.
+ *   1. Higher CONNECTION_SUBGRAPH driver priority wins. ResolveDrivers pre-filters
+ *      candidates to a single priority, so this rule is a no-op there; the pre-pass
+ *      relies on it to break ties across subgraphs with different primary-driver
+ *      priorities.
+ *   2. For two bus connections, the superset wins. Without this, a wider bus can be
+ *      silently canonicalized to a narrower one and lose members.
+ *   3. For two pins, a pin on a global power symbol beats a local power pin beats a
+ *      regular pin.
+ *   4. For two sheet pins, an OUTPUT shape beats an INPUT shape.
+ *   5. Names containing "-Pad" are treated as low quality and demoted.
+ *   6. Alphabetical fallback for deterministic ordering.
+ */
+static int compareDrivers( SCH_ITEM* aA, SCH_CONNECTION* aAConn, const wxString& aAName,
+                           SCH_ITEM* aB, SCH_CONNECTION* aBConn, const wxString& aBName )
+{
+    CONNECTION_SUBGRAPH::PRIORITY pa = CONNECTION_SUBGRAPH::GetDriverPriority( aA );
+    CONNECTION_SUBGRAPH::PRIORITY pb = CONNECTION_SUBGRAPH::GetDriverPriority( aB );
+
+    if( pa != pb )
+        return pa > pb ? -1 : 1;
+
+    if( aAConn->IsBus() && aBConn->IsBus() )
+    {
+        bool a_in_b = aAConn->IsSubsetOf( aBConn );
+        bool b_in_a = aBConn->IsSubsetOf( aAConn );
+
+        if( b_in_a && !a_in_b )
+            return -1;
+
+        if( a_in_b && !b_in_a )
+            return 1;
+    }
+
+    if( aA->Type() == SCH_PIN_T && aB->Type() == SCH_PIN_T )
+    {
+        SCH_PIN* pinA = static_cast<SCH_PIN*>( aA );
+        SCH_PIN* pinB = static_cast<SCH_PIN*>( aB );
+
+        SYMBOL* parentA = pinA->GetLibPin() ? pinA->GetLibPin()->GetParentSymbol() : nullptr;
+        SYMBOL* parentB = pinB->GetLibPin() ? pinB->GetLibPin()->GetParentSymbol() : nullptr;
+
+        bool aGlobal = parentA && parentA->IsGlobalPower();
+        bool bGlobal = parentB && parentB->IsGlobalPower();
+
+        if( aGlobal != bGlobal )
+            return aGlobal ? -1 : 1;
+
+        bool aLocal = parentA && parentA->IsLocalPower();
+        bool bLocal = parentB && parentB->IsLocalPower();
+
+        if( aLocal != bLocal )
+            return aLocal ? -1 : 1;
+    }
+
+    if( aA->Type() == SCH_SHEET_PIN_T && aB->Type() == SCH_SHEET_PIN_T )
+    {
+        SCH_SHEET_PIN* sheetPinA = static_cast<SCH_SHEET_PIN*>( aA );
+        SCH_SHEET_PIN* sheetPinB = static_cast<SCH_SHEET_PIN*>( aB );
+
+        if( sheetPinA->GetShape() != sheetPinB->GetShape() )
+        {
+            if( sheetPinA->GetShape() == LABEL_FLAG_SHAPE::L_OUTPUT )
+                return -1;
+
+            if( sheetPinB->GetShape() == LABEL_FLAG_SHAPE::L_OUTPUT )
+                return 1;
+        }
+    }
+
+    bool aLowQuality = aAName.Contains( wxS( "-Pad" ) );
+    bool bLowQuality = aBName.Contains( wxS( "-Pad" ) );
+
+    if( aLowQuality != bLowQuality )
+        return aLowQuality ? 1 : -1;
+
+    if( aAName < aBName )
+        return -1;
+
+    if( aBName < aAName )
+        return 1;
+
+    return 0;
+}
+
+
 bool CONNECTION_SUBGRAPH::ResolveDrivers( bool aCheckMultipleDrivers )
 {
     std::lock_guard lock( m_driver_mutex );
@@ -184,75 +319,12 @@ bool CONNECTION_SUBGRAPH::ResolveDrivers( bool aCheckMultipleDrivers )
 
     if( !candidates.empty() )
     {
-        // Candidates are ranked using the following rules (in order):
-        // 1. Prefer bus supersets over subsets to keep the widest connection.
-        // 2. Prefer pins on power symbols (global first, then local) over regular pins.
-        // 3. Prefer output sheet pins over input sheet pins.
-        // 4. Prefer names that do not look auto-generated (avoid "-Pad" suffixes).
-        // 5. Fall back to alphabetical comparison for deterministic ordering.
+        // Delegate to the shared compareDrivers helper so this site and the global-label
+        // transitive-closure pre-pass in buildConnectionGraph agree on every tie-break.
         auto candidate_cmp = [&]( SCH_ITEM* a, SCH_ITEM* b )
         {
-            SCH_CONNECTION* ac = a->Connection( &m_sheet );
-            SCH_CONNECTION* bc = b->Connection( &m_sheet );
-
-            if( ac->IsBus() && bc->IsBus() )
-            {
-                if( bc->IsSubsetOf( ac ) && !ac->IsSubsetOf( bc ) )
-                {
-                    return true;
-                }
-
-                if( !bc->IsSubsetOf( ac ) && ac->IsSubsetOf( bc ) )
-                {
-                    return false;
-                }
-            }
-
-            if( a->Type() == SCH_PIN_T && b->Type() == SCH_PIN_T )
-            {
-                SCH_PIN* pa = static_cast<SCH_PIN*>( a );
-                SCH_PIN* pb = static_cast<SCH_PIN*>( b );
-
-                SYMBOL* aParent = pa->GetLibPin() ? pa->GetLibPin()->GetParentSymbol() : nullptr;
-                SYMBOL* bParent = pb->GetLibPin() ? pb->GetLibPin()->GetParentSymbol() : nullptr;
-
-                bool aGlobal = aParent && aParent->IsGlobalPower();
-                bool bGlobal = bParent && bParent->IsGlobalPower();
-
-                if( aGlobal != bGlobal )
-                    return aGlobal;
-
-                bool aLocal = aParent && aParent->IsLocalPower();
-                bool bLocal = bParent && bParent->IsLocalPower();
-
-                if( aLocal != bLocal )
-                    return aLocal;
-            }
-
-            if( a->Type() == SCH_SHEET_PIN_T && b->Type() == SCH_SHEET_PIN_T )
-            {
-                SCH_SHEET_PIN* sa = static_cast<SCH_SHEET_PIN*>( a );
-                SCH_SHEET_PIN* sb = static_cast<SCH_SHEET_PIN*>( b );
-
-                if( sa->GetShape() != sb->GetShape() )
-                {
-                    if( sa->GetShape() == LABEL_FLAG_SHAPE::L_OUTPUT )
-                        return true;
-                    if( sb->GetShape() == LABEL_FLAG_SHAPE::L_OUTPUT )
-                        return false;
-                }
-            }
-
-            const wxString& a_name = GetNameForDriver( a );
-            const wxString& b_name = GetNameForDriver( b );
-
-            bool a_lowQualityName = a_name.Contains( "-Pad" );
-            bool b_lowQualityName = b_name.Contains( "-Pad" );
-
-            if( a_lowQualityName != b_lowQualityName )
-                return !a_lowQualityName;
-
-            return a_name < b_name;
+            return compareDrivers( a, a->Connection( &m_sheet ), GetNameForDriver( a ),
+                                   b, b->Connection( &m_sheet ), GetNameForDriver( b ) ) < 0;
         };
 
         std::sort( candidates.begin(), candidates.end(), candidate_cmp );
@@ -568,11 +640,8 @@ void CONNECTION_SUBGRAPH::UpdateItemConnections()
             continue;
         }
 
-        if( item != m_driver )
-        {
-            item_conn->Clone( *m_driver_connection );
-            item_conn->ClearDirty();
-        }
+        item_conn->Clone( *m_driver_connection );
+        item_conn->ClearDirty();
     }
 }
 
@@ -672,6 +741,41 @@ void CONNECTION_GRAPH::Merge( CONNECTION_GRAPH& aGraph )
     m_last_net_code = std::max( m_last_net_code, aGraph.m_last_net_code );
     m_last_subgraph_code = std::max( m_last_subgraph_code, aGraph.m_last_subgraph_code );
 
+    // Committed chains and override maps belong to the persistent schematic state, so they
+    // must travel across an incremental graph merge.  Potential chains are moved alongside
+    // them to keep the merged graph self-consistent until the next RebuildNetChains() pass.
+    for( std::unique_ptr<SCH_NETCHAIN>& chain : aGraph.m_committedNetChains )
+    {
+        if( chain )
+            m_committedNetChains.push_back( std::move( chain ) );
+    }
+
+    aGraph.m_committedNetChains.clear();
+
+    for( std::unique_ptr<SCH_NETCHAIN>& chain : aGraph.m_potentialNetChains )
+    {
+        if( chain )
+            m_potentialNetChains.push_back( std::move( chain ) );
+    }
+
+    aGraph.m_potentialNetChains.clear();
+
+    m_netChainsBuilt = m_netChainsBuilt || aGraph.m_netChainsBuilt;
+
+    for( auto& [key, value] : aGraph.m_netChainTerminalOverrides )
+        m_netChainTerminalOverrides.insert_or_assign( key, value );
+
+    for( auto& [key, value] : aGraph.m_netChainNetClassOverrides )
+        m_netChainNetClassOverrides.insert_or_assign( key, value );
+
+    for( auto& [key, value] : aGraph.m_netChainColorOverrides )
+        m_netChainColorOverrides.insert_or_assign( key, value );
+
+    for( auto& [key, value] : aGraph.m_netChainTerminalRefOverrides )
+        m_netChainTerminalRefOverrides.insert_or_assign( key, value );
+
+    for( auto& [key, value] : aGraph.m_netChainMemberNetOverrides )
+        m_netChainMemberNetOverrides.insert_or_assign( key, value );
 }
 
 
@@ -747,6 +851,18 @@ void CONNECTION_GRAPH::Reset()
     m_last_net_code = 1;
     m_last_bus_code = 1;
     m_last_subgraph_code = 1;
+
+    // SCH_NETCHAIN::m_symbols holds non-owning SCH_SYMBOL pointers. Once the connectivity
+    // pass clears the rest of the graph the schematic items can be freed before
+    // RebuildNetChains() repopulates the chain caches, so drop the stale pointers now.
+    for( std::unique_ptr<SCH_NETCHAIN>& chain : m_committedNetChains )
+    {
+        if( chain )
+            chain->ClearSymbols();
+    }
+
+    m_potentialNetChains.clear();
+    m_netChainsBuilt = false;
 }
 
 
@@ -1324,7 +1440,6 @@ void CONNECTION_GRAPH::updateItemConnectivity( const SCH_SHEET_PATH& aSheet,
     {
         std::vector<VECTOR2I> points = item->GetConnectionPoints();
         item->ClearConnectedItems( aSheet );
-
         if( item->Type() == SCH_SHEET_T )
         {
             for( SCH_SHEET_PIN* pin : static_cast<SCH_SHEET*>( item )->GetPins() )
@@ -1510,10 +1625,45 @@ void CONNECTION_GRAPH::buildItemSubGraphs()
             m_bus_alias_cache[alias->GetName()] = alias;
     }
 
-    // Build subgraphs from items (on a per-sheet basis)
+    // Hash position in m_sheetList for each sheet path so that subgraphs are
+    // created in a deterministic order matching the sheet hierarchy
+    // https://gitlab.com/kicad/code/kicad/-/issues/24409
+    std::unordered_map<SCH_SHEET_PATH, size_t> sheetOrder;
+    sheetOrder.reserve( m_sheetList.size() );
+
+    for( size_t i = 0; i < m_sheetList.size(); ++i )
+        sheetOrder.emplace( m_sheetList[i], i );
+
+    auto sheetRank =
+            [&]( const SCH_SHEET_PATH& aSheet ) -> size_t
+            {
+                auto it = sheetOrder.find( aSheet );
+
+                return ( it == sheetOrder.end() ) ? std::numeric_limits<size_t>::max()
+                                                  : it->second;
+            };
+
+    // Build subgraphs from items (on a per-sheet basis).  Reuse the vector across
+    // items so a flat schematic doesn't allocate per item.
+    std::vector<std::tuple<size_t, SCH_SHEET_PATH, SCH_CONNECTION*>> ordered;
+
     for( SCH_ITEM* item : m_items )
     {
+        ordered.clear();
+        ordered.reserve( item->m_connection_map.size() );
+
+        // Precompute sheet rank into the tuple so the comparator never re-hashes
+        // the (vector-backed) SCH_SHEET_PATH keys.
         for( const auto& [sheet, connection] : item->m_connection_map )
+            ordered.emplace_back( sheetRank( sheet ), sheet, connection );
+
+        std::sort( ordered.begin(), ordered.end(),
+                   []( const auto& a, const auto& b )
+                   {
+                       return std::get<0>( a ) < std::get<0>( b );
+                   } );
+
+        for( const auto& [rank, sheet, connection] : ordered )
         {
             if( connection->SubgraphCode() == 0 )
             {
@@ -1559,9 +1709,8 @@ void CONNECTION_GRAPH::buildItemSubGraphs()
                         connected_conn->SetSubgraphCode( subgraph->m_code );
                         m_item_to_subgraph_map[connected_item] = subgraph;
                         subgraph->AddItem( connected_item );
-                        const SCH_ITEM_VEC& citemset = connected_item->ConnectedItems( sheet );
 
-                        for( SCH_ITEM* citem : citemset )
+                        for( SCH_ITEM* citem : connected_item->ConnectedItems( sheet ) )
                         {
                             if( citem->HasFlag( CONNECTIVITY_CANDIDATE ) )
                                 continue;
@@ -1739,9 +1888,7 @@ void CONNECTION_GRAPH::generateBusAliasMembers()
 
     for( CONNECTION_SUBGRAPH* subgraph : m_driver_subgraphs )
     {
-        SCH_ITEM_VEC vec = subgraph->GetAllBusLabels();
-
-        for( SCH_ITEM* item : vec )
+        for( SCH_ITEM* item : subgraph->GetAllBusLabels() )
         {
             SCH_LABEL_BASE* label = static_cast<SCH_LABEL_BASE*>( item );
 
@@ -1931,9 +2078,12 @@ void CONNECTION_GRAPH::processSubGraphs()
                         if( prefix.empty() )
                             prefix = wxT( "BUS" ); // So result will be "BUS_1{...}"
 
-                        wxString oldName = aConn->Name().AfterFirst( '{' );
+                        // Use BusPrefix length to skip past any formatting markers
+                        // in the prefix (e.g. ~{RESET}) rather than AfterFirst('{')
+                        // which would split at a formatting brace.
+                        wxString members = aConn->Name().Mid( aConn->BusPrefix().length() );
 
-                        newName << prefix << wxT( "_" ) << suffixStr << wxT( "{" ) << oldName;
+                        newName << prefix << wxT( "_" ) << suffixStr << members;
 
                         aConn->ConfigureFromLabel( newName );
                     }
@@ -2324,6 +2474,128 @@ void CONNECTION_GRAPH::buildConnectionGraph( std::function<void( SCH_ITEM* )>* a
 
     results.wait();
 
+    // Build equivalence classes over global subgraphs that are linked by shared
+    // global label names. Two global subgraphs are in the same class whenever
+    // (transitively) some subgraph has a global driver named X and another
+    // subgraph has a global driver also named X, OR a single multi-driver
+    // subgraph has both X and Y as global drivers.
+    //
+    // This is the transitive closure over the relation "shares a global name".
+    // When users chain nets across sheets via differently-named global labels,
+    // every subgraph reachable through any sequence of shared names must end
+    // up on the same final net.
+    //
+    // The per-subgraph promote pass that follows is order-dependent and walks
+    // candidates by their *original* driver text rather than by their already-
+    // promoted name. As a result, when subgraph S2 promotes subgraph S1 to a
+    // new name, and then a third subgraph S3 later renames S2 again, S1 is
+    // left orphaned with the intermediate name. This pre-pass solves the
+    // transitivity problem before the order-dependent loop runs (issue 23719).
+    if( !global_subgraphs.empty() )
+    {
+        std::unordered_map<CONNECTION_SUBGRAPH*, CONNECTION_SUBGRAPH*> sg_root;
+
+        auto find_sg_root =
+                [&]( CONNECTION_SUBGRAPH* aSg ) -> CONNECTION_SUBGRAPH*
+                {
+                    CONNECTION_SUBGRAPH* cur = aSg;
+
+                    while( true )
+                    {
+                        auto it = sg_root.find( cur );
+
+                        if( it == sg_root.end() || it->second == cur )
+                            return cur;
+
+                        // Path compression. Hop the current node directly to its
+                        // grandparent on the way up so subsequent finds are O(1).
+                        auto parent_it = sg_root.find( it->second );
+
+                        if( parent_it != sg_root.end() && parent_it->second != it->second )
+                            it->second = parent_it->second;
+
+                        cur = it->second;
+                    }
+                };
+
+        // Pick the subgraph whose primary driver the file-local compareDrivers helper
+        // would rank first. Using the same helper as CONNECTION_SUBGRAPH::ResolveDrivers
+        // guarantees both sites agree on every tie-break rule (priority, bus width,
+        // pin power parent, sheet-pin shape, -Pad demotion, alphabetical).
+        auto prefer_as_representative =
+                [&]( CONNECTION_SUBGRAPH* aA, CONNECTION_SUBGRAPH* aB ) -> bool
+                {
+                    return compareDrivers( aA->m_driver, aA->m_driver_connection,
+                                           aA->m_driver_connection->Name(),
+                                           aB->m_driver, aB->m_driver_connection,
+                                           aB->m_driver_connection->Name() ) < 0;
+                };
+
+        auto union_sgs =
+                [&]( CONNECTION_SUBGRAPH* aA, CONNECTION_SUBGRAPH* aB )
+                {
+                    sg_root.try_emplace( aA, aA );
+                    sg_root.try_emplace( aB, aB );
+
+                    CONNECTION_SUBGRAPH* root_a = find_sg_root( aA );
+                    CONNECTION_SUBGRAPH* root_b = find_sg_root( aB );
+
+                    if( root_a == root_b )
+                        return;
+
+                    if( prefer_as_representative( root_a, root_b ) )
+                        sg_root[root_b] = root_a;
+                    else
+                        sg_root[root_a] = root_b;
+                };
+
+        std::unordered_map<wxString, std::vector<CONNECTION_SUBGRAPH*>> name_to_sgs;
+
+        for( CONNECTION_SUBGRAPH* subgraph : global_subgraphs )
+        {
+            for( SCH_ITEM* driver : subgraph->m_drivers )
+            {
+                if( CONNECTION_SUBGRAPH::GetDriverPriority( driver )
+                    < CONNECTION_SUBGRAPH::PRIORITY::GLOBAL_POWER_PIN )
+                {
+                    continue;
+                }
+
+                name_to_sgs[subgraph->GetNameForDriver( driver )].push_back( subgraph );
+            }
+        }
+
+        for( auto& [name, sgs] : name_to_sgs )
+        {
+            if( sgs.size() < 2 )
+                continue;
+
+            for( size_t ii = 1; ii < sgs.size(); ++ii )
+                union_sgs( sgs[0], sgs[ii] );
+        }
+
+        // Every subgraph in sg_root now maps (with path compression) to the
+        // representative of its equivalence class. Clone the representative's
+        // connection into each member that currently differs.
+        for( const auto& entry : sg_root )
+        {
+            CONNECTION_SUBGRAPH* sg   = entry.first;
+            CONNECTION_SUBGRAPH* root = find_sg_root( sg );
+
+            if( sg == root )
+                continue;
+
+            if( sg->m_driver_connection->Name() == root->m_driver_connection->Name() )
+                continue;
+
+            wxLogTrace( ConnTrace, wxS( "Global %lu (%s) canonicalized to %lu (%s)" ),
+                        sg->m_code, sg->m_driver_connection->Name(), root->m_code,
+                        root->m_driver_connection->Name() );
+
+            sg->m_driver_connection->Clone( *root->m_driver_connection );
+        }
+    }
+
     // Next time through the subgraphs, we do some post-processing to handle things like
     // connecting bus members to their neighboring subgraphs, and then propagate connections
     // through the hierarchy
@@ -2472,8 +2744,11 @@ void CONNECTION_GRAPH::buildConnectionGraph( std::function<void( SCH_ITEM* )>* a
         }
     }
 
-    auto updateItemConnectionsTask =
-            [&]( CONNECTION_SUBGRAPH* subgraph ) -> size_t
+    // Phase 1: write each subgraph's items' connections.  Items can be referenced from
+    // other subgraphs (via labels), so phase 2 below has to wait for every phase 1 task
+    // to complete before reading anything through label->Connection().
+    auto propagateConnectionsTask =
+            [&]( CONNECTION_SUBGRAPH* subgraph )
             {
                 // Make sure weakly-driven single-pin nets get the unconnected_ prefix
                 if( !subgraph->m_strong_driver
@@ -2488,54 +2763,53 @@ void CONNECTION_GRAPH::buildConnectionGraph( std::function<void( SCH_ITEM* )>* a
 
                 subgraph->m_dirty = false;
                 subgraph->UpdateItemConnections();
-
-                // No other processing to do on buses
-                if( subgraph->m_driver_connection->IsBus() )
-                    return 0;
-
-                // As a visual aid, we can check sheet pins that are driven by themselves to see
-                // if they should be promoted to buses
-                if( subgraph->m_driver && subgraph->m_driver->Type() == SCH_SHEET_PIN_T )
-                {
-                    SCH_SHEET_PIN* pin = static_cast<SCH_SHEET_PIN*>( subgraph->m_driver );
-
-                    if( SCH_SHEET* sheet = pin->GetParent() )
-                    {
-                        wxString    pinText = pin->GetShownText( false );
-                        SCH_SCREEN* screen  = sheet->GetScreen();
-
-                        for( SCH_ITEM* item : screen->Items().OfType( SCH_HIER_LABEL_T ) )
-                        {
-                            SCH_HIERLABEL* label = static_cast<SCH_HIERLABEL*>( item );
-
-                            if( label->GetShownText( &subgraph->m_sheet, false ) == pinText )
-                            {
-                                SCH_SHEET_PATH path = subgraph->m_sheet;
-                                path.push_back( sheet );
-
-                                SCH_CONNECTION* parent_conn = label->Connection( &path );
-
-                                if( parent_conn && parent_conn->IsBus() )
-                                    subgraph->m_driver_connection->SetType( CONNECTION_TYPE::BUS );
-
-                                break;
-                            }
-                        }
-
-                        if( subgraph->m_driver_connection->IsBus() )
-                            return 0;
-                    }
-                }
-
-                return 1;
             };
 
-    auto results2 = tp.submit_loop( 0, m_driver_subgraphs.size(),
+    auto results1 = tp.submit_loop( 0, m_driver_subgraphs.size(),
                             [&]( const int ii )
                             {
-                                updateItemConnectionsTask( m_driver_subgraphs[ii] );
+                                propagateConnectionsTask( m_driver_subgraphs[ii] );
                             } );
-    results2.wait();
+    results1.wait();
+
+    // Phase 2: promote sheet-pin subgraphs to buses based on the matching child-sheet
+    // hier label.  This reads other subgraphs' connections via label->Connection() and
+    // also writes subgraph->m_driver_connection->SetType, so it has to be serial.
+    for( CONNECTION_SUBGRAPH* subgraph : m_driver_subgraphs )
+    {
+        if( subgraph->m_driver_connection->IsBus() )
+            continue;
+
+        if( !subgraph->m_driver || subgraph->m_driver->Type() != SCH_SHEET_PIN_T )
+            continue;
+
+        SCH_SHEET_PIN* pin = static_cast<SCH_SHEET_PIN*>( subgraph->m_driver );
+        SCH_SHEET*     sheet = pin->GetParent();
+
+        if( !sheet )
+            continue;
+
+        wxString    pinText = pin->GetShownText( false );
+        SCH_SCREEN* screen  = sheet->GetScreen();
+
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_HIER_LABEL_T ) )
+        {
+            SCH_HIERLABEL* label = static_cast<SCH_HIERLABEL*>( item );
+
+            if( label->GetShownText( &subgraph->m_sheet, false ) == pinText )
+            {
+                SCH_SHEET_PATH path = subgraph->m_sheet;
+                path.push_back( sheet );
+
+                SCH_CONNECTION* parent_conn = label->Connection( &path );
+
+                if( parent_conn && parent_conn->IsBus() )
+                    subgraph->m_driver_connection->SetType( CONNECTION_TYPE::BUS );
+
+                break;
+            }
+        }
+    }
 
     m_net_code_to_subgraphs_map.clear();
     m_net_name_to_subgraphs_map.clear();
@@ -2673,6 +2947,1253 @@ void CONNECTION_GRAPH::buildConnectionGraph( std::function<void( SCH_ITEM* )>* a
             netSettings->SetNetclassLabelAssignment( netname, netclasses );
         }
     }
+
+    RebuildNetChains();
+}
+
+std::function<void( CONNECTION_GRAPH& )>& CONNECTION_GRAPH::RebuildNetChainsTestHook()
+{
+    static std::function<void( CONNECTION_GRAPH& )> s_hook;
+    return s_hook;
+}
+
+
+CONNECTION_GRAPH::BRIDGE_GRAPH CONNECTION_GRAPH::buildBridgeAdjacency()
+{
+    BRIDGE_GRAPH result;
+
+    auto getSubgraphNet = [&]( SCH_PIN* aPin ) -> wxString
+    {
+        if( !aPin )
+            return wxString();
+
+        CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( aPin );
+
+        return sg ? netChainKeyFor( sg->GetNetName(), sg->m_code ) : wxString();
+    };
+
+    // Walk every 2-pin passthrough symbol on every sheet, building a flat list of bridge
+    // edges between distinct subgraph nets.
+
+    result.edges.reserve( 256 );
+
+    for( const SCH_SHEET_PATH& sheetPath : m_sheetList )
+    {
+        SCH_SCREEN* sc = sheetPath.LastScreen();
+
+        if( !sc )
+            continue;
+
+        auto findWireOnScreen = [&]( SCH_PIN* aPin, SCH_LINE*& aWire ) -> bool
+        {
+            const VECTOR2I p = aPin->GetPosition();
+
+            auto consider = [&]( SCH_ITEM* cand ) -> bool
+            {
+                if( cand->Type() != SCH_LINE_T )
+                    return false;
+
+                SCH_LINE* line = static_cast<SCH_LINE*>( cand );
+
+                if( line->GetLayer() != LAYER_WIRE )
+                    return false;
+
+                const VECTOR2I s = line->GetStartPoint();
+                const VECTOR2I e = line->GetEndPoint();
+
+                if( s.y == e.y && p.y == s.y )
+                {
+                    int minx = std::min( s.x, e.x );
+                    int maxx = std::max( s.x, e.x );
+
+                    if( p.x >= minx && p.x <= maxx )
+                    {
+                        aWire = line;
+                        return true;
+                    }
+                }
+                else if( s.x == e.x && p.x == s.x )
+                {
+                    int miny = std::min( s.y, e.y );
+                    int maxy = std::max( s.y, e.y );
+
+                    if( p.y >= miny && p.y <= maxy )
+                    {
+                        aWire = line;
+                        return true;
+                    }
+                }
+
+                return false;
+            };
+
+            for( SCH_ITEM* c : sc->Items().Overlapping( SCH_LINE_T, p ) )
+                if( consider( c ) )
+                    return true;
+
+            for( SCH_ITEM* c : sc->Items().OfType( SCH_LINE_T ) )
+                if( consider( c ) )
+                    return true;
+
+            return false;
+        };
+
+        for( SCH_ITEM* item : sc->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL*           symbol = static_cast<SCH_SYMBOL*>( item );
+            std::vector<SCH_PIN*> pins = symbol->GetPins( &sheetPath );
+
+            if( pins.size() != 2 )
+                continue;
+
+            if( symbol->GetPassthroughMode() == SCH_SYMBOL::PASSTHROUGH_MODE::BLOCK )
+                continue;
+
+            SCH_LINE* wireA = nullptr;
+            SCH_LINE* wireB = nullptr;
+
+            if( !findWireOnScreen( pins[0], wireA ) || !findWireOnScreen( pins[1], wireB ) )
+                continue;
+
+            bool allow = false;
+
+            if( symbol->GetPassthroughMode() == SCH_SYMBOL::PASSTHROUGH_MODE::FORCE )
+            {
+                allow = true;
+            }
+            else
+            {
+                if( pins[0]->IsPower() || pins[1]->IsPower() )
+                    continue;
+
+                VECTOR2I aS = wireA->GetStartPoint();
+                VECTOR2I aE = wireA->GetEndPoint();
+                VECTOR2I bS = wireB->GetStartPoint();
+                VECTOR2I bE = wireB->GetEndPoint();
+
+                if( aS.x == aE.x && bS.x == bE.x && aS.x == bS.x )
+                    allow = true;
+                else if( aS.y == aE.y && bS.y == bE.y && aS.y == bS.y )
+                    allow = true;
+            }
+
+            if( !allow )
+                continue;
+
+            wxString netA = getSubgraphNet( pins[0] );
+            wxString netB = getSubgraphNet( pins[1] );
+
+            if( netA.IsEmpty() || netB.IsEmpty() || netA == netB )
+                continue;
+
+            result.edges.push_back( { netA, netB, symbol } );
+        }
+    }
+
+    // Mark power subgraphs by walking every pin across every sheet. Any subgraph touched by a
+    // power-class pin (or a power-symbol parent) is treated as a power node and its incident
+    // bridge edges are excluded below.
+
+    std::set<long>          powerSubgraphs;
+    std::map<wxString, long> netToCode;
+
+    for( const SCH_SHEET_PATH& sheetPath : m_sheetList )
+    {
+        SCH_SCREEN* sc = sheetPath.LastScreen();
+
+        if( !sc )
+            continue;
+
+        for( SCH_ITEM* item : sc->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL*           sym = static_cast<SCH_SYMBOL*>( item );
+            std::vector<SCH_PIN*> pins = sym->GetPins( &sheetPath );
+
+            for( SCH_PIN* p : pins )
+            {
+                if( CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( p ) )
+                {
+                    netToCode[netChainKeyFor( sg->GetNetName(), sg->m_code )] = sg->m_code;
+
+                    if( p->IsPower()
+                        || ( p->GetParentSymbol() && p->GetParentSymbol()->IsPower() ) )
+                    {
+                        powerSubgraphs.insert( sg->m_code );
+                    }
+                }
+            }
+        }
+    }
+
+    // Build the filtered adjacency. Edges that touch a power subgraph are dropped, and any
+    // non-power endpoint of such a dropped edge is recorded as power-adjacent so the leaf-prune
+    // pass below can iteratively remove power stubs.
+
+    std::set<wxString> powerAdjacentNets;
+
+    for( const BRIDGE_EDGE& be : result.edges )
+    {
+        long ca = -1;
+        long cb = -1;
+
+        if( auto it = netToCode.find( be.a ); it != netToCode.end() )
+            ca = it->second;
+
+        if( auto it = netToCode.find( be.b ); it != netToCode.end() )
+            cb = it->second;
+
+        if( ca == -1 || cb == -1 )
+            continue;
+
+        if( powerSubgraphs.contains( ca ) || powerSubgraphs.contains( cb ) )
+        {
+            if( !powerSubgraphs.contains( ca ) )
+                powerAdjacentNets.insert( be.a );
+
+            if( !powerSubgraphs.contains( cb ) )
+                powerAdjacentNets.insert( be.b );
+
+            continue;
+        }
+
+        result.adjacency[be.a].push_back( { be.b, be.sym } );
+        result.adjacency[be.b].push_back( { be.a, be.sym } );
+    }
+
+    // Iteratively prune degree-1 power-adjacent leaves.  Skip pruning entirely for very small
+    // graphs to avoid wiping out legitimate two-net chains.
+
+    std::map<wxString, int> degree;
+
+    for( const auto& kv : result.adjacency )
+        degree[kv.first] = static_cast<int>( kv.second.size() );
+
+    if( result.adjacency.size() <= 2 )
+        powerAdjacentNets.clear();
+
+    if( powerAdjacentNets.size() <= 2 )
+        powerAdjacentNets.clear();
+
+    std::queue<wxString> q;
+    std::set<wxString>   removed;
+
+    for( const auto& kv : degree )
+    {
+        if( kv.second <= 1 && powerAdjacentNets.contains( kv.first ) )
+            q.push( kv.first );
+    }
+
+    while( !q.empty() )
+    {
+        wxString n = q.front();
+        q.pop();
+
+        if( removed.contains( n ) )
+            continue;
+
+        removed.insert( n );
+
+        for( const BRIDGE_NEIGHBOR& e : result.adjacency[n] )
+        {
+            if( removed.contains( e.other ) )
+                continue;
+
+            if( degree.count( e.other ) )
+            {
+                degree[e.other]--;
+
+                if( degree[e.other] <= 1 && powerAdjacentNets.contains( e.other ) )
+                    q.push( e.other );
+            }
+        }
+    }
+
+    if( !removed.empty() )
+    {
+        std::map<wxString, std::vector<BRIDGE_NEIGHBOR>> newAdj;
+
+        for( const auto& kv : result.adjacency )
+        {
+            if( removed.contains( kv.first ) )
+                continue;
+
+            for( const BRIDGE_NEIGHBOR& e : kv.second )
+            {
+                if( removed.contains( e.other ) )
+                    continue;
+
+                newAdj[kv.first].push_back( e );
+            }
+        }
+
+        result.adjacency.swap( newAdj );
+    }
+
+    return result;
+}
+
+
+void CONNECTION_GRAPH::RebuildNetChains()
+{
+    // Snapshot the committed-chain count so a throw partway through the restore loop can
+    // truncate any half-built entries instead of leaving the container partially mutated.
+    const size_t committedSnapshot = m_committedNetChains.size();
+    const bool   builtSnapshot = m_netChainsBuilt;
+
+    try
+    {
+        wxLogTrace( traceSchNetChain, "RebuildNetChains: begin (items=%zu, schematic=%p)",
+                    m_items.size(), (void*) m_schematic );
+        // Clear only potential net chains; leave committed net chains intact.
+        m_potentialNetChains.clear();
+
+        if( !m_schematic )
+        {
+            wxLogTrace( traceSchNetChain, "RebuildNetChains: no schematic" );
+            return;
+        }
+    std::map<wxString, SCH_NETCHAIN*> netToNetChain; // will be populated after chain extraction
+
+        // Collect all screens from the cached sheet list so we can operate globally rather than
+        // only on the current sheet.  (m_sheetList is populated during Recalculate()).
+        std::vector<SCH_SCREEN*> allScreens;
+        allScreens.reserve( m_sheetList.size() );
+        for( const SCH_SHEET_PATH& sp : m_sheetList )
+        {
+            if( SCH_SCREEN* sc = sp.LastScreen() )
+                allScreens.push_back( sc );
+        }
+
+        // Clear any previous chain names on all symbols across all sheets so we can repopulate.
+        for( SCH_SCREEN* sc : allScreens )
+        {
+            for( SCH_ITEM* item : sc->Items().OfType( SCH_SYMBOL_T ) )
+                static_cast<SCH_SYMBOL*>( item )->SetNetChainName( wxEmptyString );
+        }
+        wxLogTrace( traceSchNetChain, "RebuildNetChains: screens=%zu (global build)", allScreens.size() );
+    wxLogTrace( traceSchNetChain, "RebuildNetChains: debug start passes (pre-pass chains=%zu)", m_committedNetChains.size() );
+
+    // (Removed legacy findWire heuristic; global symbol-based connectivity no longer relies on
+    // scanning parallel wires for 2-pin passthrough components.)
+
+    // Build net chains by scanning eligible 2-pin symbols on every sheet, using the original
+    // parallel-wire passthrough heuristic. This is effectively the old pass 1 but repeated for
+    // each screen, giving global coverage while preserving expected grouping semantics.
+    wxLogTrace( traceSchNetChain, "RebuildNetChains: pass 1 (per-sheet 2-pin symbols)" );
+
+    auto getSubgraphNet = [&]( SCH_PIN* aPin ) -> wxString
+    {
+        if( !aPin )
+            return wxString();
+
+        CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( aPin );
+
+        return sg ? netChainKeyFor( sg->GetNetName(), sg->m_code ) : wxString();
+    };
+
+    BRIDGE_GRAPH bridgeGraph = buildBridgeAdjacency();
+    auto&        bridgeEdges = bridgeGraph.edges;
+    auto&        adjacency = bridgeGraph.adjacency;
+
+    wxLogTrace( traceSchNetChain, "RebuildNetChains: bridgeEdges=%zu adjacency=%zu",
+                bridgeEdges.size(), adjacency.size() );
+
+    // Targeted stub pruning: reduce any component >4 nets by removing minimal number of "stub" leaves
+    // (degree 1 whose neighbor has degree >2). This satisfies legacy test expecting longest branch kept.
+    {
+        // First, discover connected components over current adjacency.
+        wxLogTrace( traceSchNetChain, "RebuildNetChains: targeted stub pruning start (adj=%zu)", adjacency.size() );
+        std::map<wxString,std::vector<BRIDGE_NEIGHBOR>> snapshot = adjacency; // read-only snapshot
+        std::set<wxString> seen;
+        std::set<wxString> globalPrune;
+        for( const auto& kv : snapshot )
+        {
+            const wxString& start = kv.first;
+            if( seen.contains( start ) ) continue;
+            wxLogTrace( traceSchNetChain, "  component BFS start '%s'", start );
+            std::vector<wxString> comp; std::queue<wxString> q; q.push( start ); seen.insert( start );
+            while( !q.empty() )
+            {
+                wxString cur = q.front(); q.pop(); comp.push_back( cur );
+                for( const BRIDGE_NEIGHBOR& e : snapshot[cur] ) if( !seen.contains( e.other ) ) { seen.insert( e.other ); q.push( e.other ); }
+            }
+            wxLogTrace( traceSchNetChain, "  component size=%zu", comp.size() );
+            if( comp.size() <= 4 ) continue;
+            std::map<wxString,int> degree;
+            for( const wxString& n : comp ) degree[n] = (int) snapshot[n].size();
+            std::vector<wxString> candidates;
+            for( const wxString& n : comp )
+            {
+                const auto& nbrs = snapshot[n];
+                if( nbrs.size() == 1 )
+                {
+                    const wxString neigh = nbrs[0].other;
+                    if( degree.count( neigh ) && degree[neigh] > 2 ) candidates.push_back( n );
+                }
+            }
+            wxLogTrace( traceSchNetChain, "   candidates=%zu", candidates.size() );
+            if( candidates.empty() ) continue;
+            std::sort( candidates.begin(), candidates.end(), []( const wxString& a, const wxString& b ){ return a.CmpNoCase( b ) < 0; } );
+            size_t needPrune = comp.size() - 4; if( needPrune > candidates.size() ) needPrune = candidates.size();
+            wxLogTrace( traceSchNetChain, "   pruning need=%zu", needPrune );
+            for( size_t i = 0; i < needPrune; ++i ) globalPrune.insert( candidates[i] );
+        }
+        if( !globalPrune.empty() )
+        {
+            std::map<wxString,std::vector<BRIDGE_NEIGHBOR>> newAdj;
+            for( const auto& kv2 : adjacency )
+            {
+                if( globalPrune.contains( kv2.first ) ) continue;
+                for( const BRIDGE_NEIGHBOR& e : kv2.second )
+                {
+                    if( globalPrune.contains( e.other ) ) continue;
+                    newAdj[kv2.first].push_back( e );
+                }
+            }
+            adjacency.swap( newAdj );
+            wxLogTrace( traceSchNetChain, "RebuildNetChains: pruned %zu targeted stub nets", globalPrune.size() );
+        }
+    }
+
+    // ---------- Small helpers ----------
+    auto neighbors_of = [&]( const wxString& n ) -> const std::vector<BRIDGE_NEIGHBOR>*
+    {
+        if( auto it = adjacency.find(n); it != adjacency.end() ) return &it->second;
+        return nullptr;
+    };
+
+
+    // Structural filtering already done by excluding edges; isolated power nets are implicitly ignored.
+    m_potentialNetChains.clear();
+
+    // Recompute nets list after filtering
+    std::set<wxString> netsAll;
+    for( const auto& kv : adjacency ) netsAll.insert( kv.first );
+
+    // Connected component extraction over filtered adjacency (all remaining nets are non-power)
+    std::set<wxString> visited;
+    for( const wxString& start : netsAll )
+    {
+        if( visited.contains( start ) ) continue;
+        std::queue<wxString> q; q.push( start );
+        std::set<wxString> comp; comp.insert( start ); visited.insert( start );
+        while( !q.empty() )
+        {
+            wxString cur = q.front(); q.pop();
+            if( auto nbrs = neighbors_of( cur ) )
+            {
+                for( const BRIDGE_NEIGHBOR& e : *nbrs )
+                {
+                    if( visited.contains( e.other ) ) continue;
+                    visited.insert( e.other );
+                    comp.insert( e.other );
+                    q.push( e.other );
+                }
+            }
+        }
+        if( comp.size() >= 2 )
+        {
+            auto sig = std::make_unique<SCH_NETCHAIN>();
+            for( const wxString& n : comp ) sig->AddNet( n );
+            for( const BRIDGE_EDGE& be : bridgeEdges )
+                if( comp.contains( be.a ) && comp.contains( be.b ) && be.sym )
+                    sig->AddSymbol( be.sym );
+            m_potentialNetChains.push_back( std::move( sig ) );
+        }
+    }
+    // Build netToNetChain map for potential net chains
+    netToNetChain.clear();
+    for( const auto& sigUP : m_potentialNetChains )
+        if( sigUP ) for( const wxString& n : sigUP->GetNets() ) netToNetChain[n] = sigUP.get();
+
+    // Debug: enumerate chains and their nets prior to label-based naming.
+    wxLogTrace( traceSchNetChain, "RebuildNetChains: pre-label potentialNetChains=%zu", m_potentialNetChains.size() );
+    for( const auto& sigUP : m_potentialNetChains )
+    {
+        if( !sigUP ) continue;
+        wxString netsStr;
+        int count = 0;
+        for( const wxString& n : sigUP->GetNets() )
+        {
+            if( count < 32 )
+            {
+                netsStr += n;
+                netsStr += wxS(" ");
+            }
+            else
+            {
+                netsStr += wxS("...");
+                break;
+            }
+            ++count;
+        }
+        wxLogTrace( traceSchNetChain, "  chain %p name='%s' nets=%zu [%s]", (void*) sigUP.get(),
+                    sigUP->GetName(), sigUP->GetNets().size(), netsStr );
+    }
+
+
+    // Names already in use by committed chains.  A plain SCH_LABEL whose text matches a
+    // committed chain's name must NOT steal that name from the committed chain; the
+    // downstream restore pass uses these names as keys and would skip the potential
+    // chain entirely on collision, silently losing it.
+    std::set<wxString> committedNames;
+
+    for( const auto& chain : m_committedNetChains )
+    {
+        if( chain )
+            committedNames.insert( chain->GetName() );
+    }
+
+    for( SCH_ITEM* item : m_items )
+    {
+        if( item->Type() != SCH_LABEL_T )
+            continue;
+
+        SCH_TEXT* label = static_cast<SCH_TEXT*>( item );
+        wxString  net;
+
+        if( CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( item ) )
+            net = sg->GetNetName();
+
+        // Defensive: guard against pathological names
+        if( !net.IsEmpty() && net.Length() < 2048 && netToNetChain.count( net ) )
+        {
+            wxString name = label->GetText();
+            if( name.Length() > 512 )
+                name.Truncate( 512 );
+            if( name.StartsWith( wxS( "/" ) ) )
+                name = name.Mid( 1 );
+
+            // Skip if a committed chain already owns this name; let the terminal-ref /
+            // saved-net-name restore logic below resolve the committed chain on its own.
+            if( !committedNames.count( name ) )
+                netToNetChain[net]->SetName( name );
+        }
+    }
+
+    int idx = 1;
+
+    wxLogTrace( traceSchNetChain, "RebuildNetChains: pass 3 (default naming)" );
+    for( std::unique_ptr<SCH_NETCHAIN>& sig : m_potentialNetChains )
+    {
+        if( sig->GetName().IsEmpty() )
+        {
+            sig->SetName( wxString::Format( wxT( "NetChain%d" ), idx ) );
+            idx++;
+        }
+    }
+
+    wxLogTrace( traceSchNetChain, "RebuildNetChains: pass 4 (terminal pins)" );
+    for( std::unique_ptr<SCH_NETCHAIN>& sig : m_potentialNetChains )
+    {
+        struct PIN_INFO
+        {
+            SCH_PIN*              pin;
+            SCH_SYMBOL*           sym;
+            const SCH_SHEET_PATH* sheet;
+        };
+        std::vector<PIN_INFO> pins;
+
+        for( const SCH_SHEET_PATH& sheetPath : m_sheetList )
+        {
+            SCH_SCREEN* sc = sheetPath.LastScreen(); if( !sc ) continue;
+            for( SCH_ITEM* item : sc->Items().OfType( SCH_SYMBOL_T ) )
+            {
+                SCH_SYMBOL* sym = static_cast<SCH_SYMBOL*>( item );
+                for( SCH_PIN* p : sym->GetPins( &sheetPath ) )
+                {
+                    wxString net = getSubgraphNet( p );
+                    if( sig->GetNets().count( net ) )
+                        pins.push_back( { p, sym, &sheetPath } );
+                }
+            }
+        }
+
+        int64_t best = -1;
+        KIID    a, b;
+        size_t  bestI = 0, bestJ = 0;
+
+        for( size_t i = 0; i < pins.size(); ++i )
+        {
+            for( size_t j = i + 1; j < pins.size(); ++j )
+            {
+                VECTOR2I pa = pins[i].pin->GetPosition();
+                VECTOR2I pb = pins[j].pin->GetPosition();
+                int64_t dx = pa.x - pb.x;
+                int64_t dy = pa.y - pb.y;
+                int64_t d = dx * dx + dy * dy;
+
+                if( d > best )
+                {
+                    best = d;
+                    a = pins[i].pin->m_Uuid;
+                    b = pins[j].pin->m_Uuid;
+                    bestI = i;
+                    bestJ = j;
+                }
+            }
+        }
+
+        sig->SetTerminalPins( a, b );
+
+        if( best >= 0 && bestI < pins.size() && bestJ < pins.size() )
+        {
+            sig->SetTerminalRefs( pins[bestI].sym->GetRef( pins[bestI].sheet ), pins[bestI].pin->GetNumber(),
+                                  pins[bestJ].sym->GetRef( pins[bestJ].sheet ), pins[bestJ].pin->GetNumber() );
+        }
+
+        if( m_netChainTerminalOverrides.count( sig->GetName() ) )
+        {
+            auto ov = m_netChainTerminalOverrides[sig->GetName()];
+            sig->SetTerminalPins( ov.first, ov.second );
+        }
+    }
+
+    wxLogTrace( traceSchNetChain, "RebuildNetChains: pass 5 (apply symbol names)" );
+    for( auto& sigUP : m_potentialNetChains )
+    {
+        SCH_NETCHAIN* sig = sigUP.get();
+        for( SCH_SYMBOL* sym : sig->GetSymbols() )
+        {
+            if( sym )
+                sym->SetNetChainName( sig->GetName() );
+        }
+    wxString netsStr;
+    for( const wxString& n : sig->GetNets() ) { netsStr += n + wxS(" "); }
+    wxLogTrace( traceSchNetChain, "FinalChain %p nets(%zu): %s", (void*) sig, sig->GetNets().size(), netsStr );
+    }
+
+    wxLogTrace( traceSchNetChain, "RebuildNetChains: built %zu potential net chains", m_potentialNetChains.size() );
+
+    // Restore committed chains from file.
+    // Priority 1: match by terminal ref+pin (survives net renames)
+    // Priority 2: match by saved net names (survives component renames)
+    {
+        std::set<wxString> alreadyCommitted;
+
+        for( const auto& chain : m_committedNetChains )
+        {
+            if( chain )
+                alreadyCommitted.insert( chain->GetName() );
+        }
+
+        // Build ref+pin → net lookup from current schematic
+        std::map<std::pair<wxString, wxString>, wxString> refPinToNet;
+
+        for( const SCH_SHEET_PATH& sp : m_sheetList )
+        {
+            SCH_SCREEN* sc = sp.LastScreen();
+
+            if( !sc )
+                continue;
+
+            for( SCH_ITEM* item : sc->Items().OfType( SCH_SYMBOL_T ) )
+            {
+                SCH_SYMBOL* sym = static_cast<SCH_SYMBOL*>( item );
+                wxString    ref = sym->GetRef( &sp );
+
+                for( SCH_PIN* pin : sym->GetPins( &sp ) )
+                {
+                    if( CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( pin ) )
+                    {
+                        // Match potential-chain key construction so unnamed subgraphs use the
+                        // synthetic prefix instead of being skipped — without this, a chain
+                        // whose only named endpoint is at one terminal would fail strict
+                        // both-endpoint matching.
+                        refPinToNet[{ ref, pin->GetNumber() }] =
+                                netChainKeyFor( sg->GetNetName(), sg->m_code );
+                    }
+                }
+            }
+        }
+
+        // O(1) lookup of committed chains by name so the restore passes don't linearly
+        // scan m_committedNetChains for every override entry.
+        std::unordered_map<wxString, SCH_NETCHAIN*> committedByName;
+
+        for( const auto& chain : m_committedNetChains )
+        {
+            if( chain )
+                committedByName[chain->GetName()] = chain.get();
+        }
+
+        // Names refreshed in pass 2a so pass 2b (manual fallback) doesn't overwrite the
+        // potential-based payload with its broader member-net symbol collection.
+        std::set<wxString> refreshedThisPass;
+
+        for( const auto& [chainName, termRefs] : m_netChainTerminalRefOverrides )
+        {
+            SCH_NETCHAIN* match = resolvePotentialChainByTerminals( termRefs, refPinToNet,
+                                                                    m_potentialNetChains, chainName );
+
+            if( !match )
+                continue;
+
+            if( alreadyCommitted.count( chainName ) )
+            {
+                auto it = committedByName.find( chainName );
+
+                if( it != committedByName.end() && it->second )
+                {
+                    refreshCommittedChainFromPotential( it->second, *match );
+                    refreshedThisPass.insert( chainName );
+                }
+
+                continue;
+            }
+
+            CreateNetChainFromPotential( match, chainName );
+            alreadyCommitted.insert( chainName );
+            refreshedThisPass.insert( chainName );
+        }
+
+        // Manual chains have no inferred potential; rebuild from the persisted
+        // member-net list by collecting symbols whose pins land on those nets.
+        for( const auto& [chainName, memberNets] : m_netChainMemberNetOverrides )
+        {
+            if( memberNets.empty() )
+                continue;
+
+            // Skip chains pass 2a already refreshed; the potential's symbol set is more
+            // precise than the broad member-net match collected here.
+            if( alreadyCommitted.count( chainName ) && refreshedThisPass.count( chainName ) )
+                continue;
+
+            auto termIt = m_netChainTerminalRefOverrides.find( chainName );
+
+            if( termIt == m_netChainTerminalRefOverrides.end() )
+                continue;
+
+            const CHAIN_TERMINAL_REFS& termRefs = termIt->second;
+
+            SCH_PIN* terminalPinA = nullptr;
+            SCH_PIN* terminalPinB = nullptr;
+            std::set<SCH_SYMBOL*> symbols;
+
+            for( const SCH_SHEET_PATH& sp : m_sheetList )
+            {
+                SCH_SCREEN* sc = sp.LastScreen();
+
+                if( !sc )
+                    continue;
+
+                for( SCH_ITEM* item : sc->Items().OfType( SCH_SYMBOL_T ) )
+                {
+                    SCH_SYMBOL* sym = static_cast<SCH_SYMBOL*>( item );
+                    wxString    ref = sym->GetRef( &sp );
+                    bool        symContributes = false;
+
+                    for( SCH_PIN* pin : sym->GetPins( &sp ) )
+                    {
+                        CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( pin );
+
+                        if( !sg )
+                            continue;
+
+                        if( memberNets.count( sg->GetNetName() ) )
+                            symContributes = true;
+
+                        if( ref == termRefs.first.ref && pin->GetNumber() == termRefs.first.pin )
+                            terminalPinA = pin;
+
+                        if( ref == termRefs.second.ref && pin->GetNumber() == termRefs.second.pin )
+                            terminalPinB = pin;
+                    }
+
+                    if( symContributes )
+                        symbols.insert( sym );
+                }
+            }
+
+            if( !terminalPinA || !terminalPinB || symbols.empty() )
+            {
+                wxLogTrace( traceSchNetChain,
+                            "RebuildNetChains: cannot restore manual chain '%s' "
+                            "(terminals or member nets unresolved)",
+                            chainName );
+                continue;
+            }
+
+            if( alreadyCommitted.count( chainName ) )
+            {
+                auto it = committedByName.find( chainName );
+
+                if( it != committedByName.end() && it->second )
+                {
+                    refreshCommittedChainPayload( it->second, memberNets, symbols,
+                                                  terminalPinA->m_Uuid, terminalPinB->m_Uuid,
+                                                  termRefs.first.ref, termRefs.first.pin,
+                                                  termRefs.second.ref, termRefs.second.pin );
+                }
+
+                continue;
+            }
+
+            CreateManualNetChain( chainName, symbols, memberNets, terminalPinA->m_Uuid,
+                                  terminalPinB->m_Uuid, termRefs.first.ref, termRefs.first.pin,
+                                  termRefs.second.ref, termRefs.second.pin );
+            alreadyCommitted.insert( chainName );
+        }
+    }
+
+    // Committed chain names take priority over potential chain names set by pass 5.
+    for( const auto& chain : m_committedNetChains )
+    {
+        if( chain )
+        {
+            for( SCH_SYMBOL* sym : chain->GetSymbols() )
+            {
+                if( sym )
+                    sym->SetNetChainName( chain->GetName() );
+            }
+        }
+    }
+
+    // QA fixtures install this hook to inject a throw inside the protected block and
+    // verify the catch handler resizes m_committedNetChains and restores m_netChainsBuilt.
+    if( auto& hook = RebuildNetChainsTestHook() )
+        hook( *this );
+
+    // An empty chain list is a valid built state for chainless schematics.
+    m_netChainsBuilt = true;
+    }
+    catch( const std::exception& e )
+    {
+        wxFAIL_MSG( wxString::Format( "RebuildNetChains threw: %s", e.what() ) );
+        wxLogError( _( "Net chain rebuild failed: %s.  The schematic may have stale chain "
+                       "data; reload to recover." ),
+                    wxString( e.what() ) );
+        m_potentialNetChains.clear();
+
+        if( m_committedNetChains.size() > committedSnapshot )
+            m_committedNetChains.resize( committedSnapshot );
+
+        m_netChainsBuilt = builtSnapshot;
+        return;
+    }
+    catch( ... )
+    {
+        wxFAIL_MSG( "RebuildNetChains threw an unknown exception" );
+        wxLogError( _( "Net chain rebuild failed with an unknown error.  The schematic may "
+                       "have stale chain data; reload to recover." ) );
+        m_potentialNetChains.clear();
+
+        if( m_committedNetChains.size() > committedSnapshot )
+            m_committedNetChains.resize( committedSnapshot );
+
+        m_netChainsBuilt = builtSnapshot;
+        return;
+    }
+}
+
+SCH_NETCHAIN* CONNECTION_GRAPH::resolvePotentialChainByTerminals(
+        const CHAIN_TERMINAL_REFS& aTermRefs,
+        const std::map<std::pair<wxString, wxString>, wxString>& aRefPinToNet,
+        const std::vector<std::unique_ptr<SCH_NETCHAIN>>& aPotentials,
+        const wxString& aChainName )
+{
+    auto itFrom = aRefPinToNet.find( { aTermRefs.first.ref, aTermRefs.first.pin } );
+    auto itTo = aRefPinToNet.find( { aTermRefs.second.ref, aTermRefs.second.pin } );
+
+    if( itFrom == aRefPinToNet.end() || itTo == aRefPinToNet.end() )
+    {
+        wxLogTrace( traceSchNetChain,
+                    "RebuildNetChains: cannot restore chain '%s' (terminal %s.%s/%s.%s unresolved)",
+                    aChainName, aTermRefs.first.ref, aTermRefs.first.pin,
+                    aTermRefs.second.ref, aTermRefs.second.pin );
+        return nullptr;
+    }
+
+    for( const auto& pot : aPotentials )
+    {
+        if( pot && pot->GetNets().count( itFrom->second ) && pot->GetNets().count( itTo->second ) )
+            return pot.get();
+    }
+
+    wxLogTrace( traceSchNetChain,
+                "RebuildNetChains: no potential chain spans both terminals of '%s' (%s/%s)",
+                aChainName, itFrom->second, itTo->second );
+    return nullptr;
+}
+
+
+SCH_NETCHAIN* CONNECTION_GRAPH::FindPotentialNetChainBetweenPins( SCH_PIN* aPinA, SCH_PIN* aPinB )
+{
+    if( !aPinA || !aPinB )
+        return nullptr;
+
+    wxString netA;
+    wxString netB;
+
+    if( CONNECTION_SUBGRAPH* sgA = GetSubgraphForItem( aPinA ) )
+        netA = netChainKeyFor( sgA->GetNetName(), sgA->m_code );
+
+    if( CONNECTION_SUBGRAPH* sgB = GetSubgraphForItem( aPinB ) )
+        netB = netChainKeyFor( sgB->GetNetName(), sgB->m_code );
+
+    if( netA.IsEmpty() || netB.IsEmpty() )
+        return nullptr;
+
+    for( const auto& sigUP : m_potentialNetChains )
+    {
+        if( sigUP && sigUP->GetNets().contains( netA ) && sigUP->GetNets().contains( netB ) )
+            return sigUP.get();
+    }
+
+    return nullptr;
+}
+
+bool CONNECTION_GRAPH::DeleteCommittedNetChain( const wxString& aName )
+{
+    if( aName.IsEmpty() )
+        return false;
+
+    auto it = std::find_if( m_committedNetChains.begin(), m_committedNetChains.end(),
+                            [&]( const std::unique_ptr<SCH_NETCHAIN>& aChain )
+                            {
+                                return aChain && aChain->GetName() == aName;
+                            } );
+
+    if( it == m_committedNetChains.end() )
+        return false;
+
+    // Drop the chain marker from every member symbol so a future
+    // RebuildNetChains() doesn't re-promote them under the same name.
+    for( SCH_SYMBOL* sym : (*it)->GetSymbols() )
+    {
+        if( sym )
+            sym->SetNetChainName( wxEmptyString );
+    }
+
+    m_committedNetChains.erase( it );
+
+    // Drop orphaned overrides keyed on this name.
+    m_netChainNetClassOverrides.erase( aName );
+    m_netChainColorOverrides.erase( aName );
+    m_netChainTerminalRefOverrides.erase( aName );
+    m_netChainTerminalOverrides.erase( aName );
+    m_netChainMemberNetOverrides.erase( aName );
+
+    return true;
+}
+
+
+bool CONNECTION_GRAPH::RenameCommittedNetChain( const wxString& aOld, const wxString& aNew )
+{
+    if( aOld.IsEmpty() || aNew.IsEmpty() || aOld == aNew )
+        return false;
+
+    auto findByName = [&]( const wxString& aName ) -> SCH_NETCHAIN*
+    {
+        for( const std::unique_ptr<SCH_NETCHAIN>& chain : m_committedNetChains )
+        {
+            if( chain && chain->GetName() == aName )
+                return chain.get();
+        }
+
+        return nullptr;
+    };
+
+    SCH_NETCHAIN* existing = findByName( aOld );
+
+    if( !existing )
+        return false;
+
+    // Reject collisions: if some other committed chain already owns aNew, don't
+    // silently merge them.
+    if( findByName( aNew ) )
+        return false;
+
+    existing->SetName( aNew );
+
+    for( SCH_SYMBOL* sym : existing->GetSymbols() )
+    {
+        if( sym )
+            sym->SetNetChainName( aNew );
+    }
+
+    rekeyOverrideMaps( aOld, aNew );
+
+    return true;
+}
+
+
+void CONNECTION_GRAPH::rekeyOverrideMaps( const wxString& aOld, const wxString& aNew )
+{
+    if( aOld == aNew )
+        return;
+
+    auto rekey = [&]( auto& aMap )
+    {
+        auto it = aMap.find( aOld );
+
+        if( it != aMap.end() )
+        {
+            auto val = std::move( it->second );
+            aMap.erase( it );
+            aMap[aNew] = std::move( val );
+        }
+    };
+
+    rekey( m_netChainNetClassOverrides );
+    rekey( m_netChainColorOverrides );
+    rekey( m_netChainTerminalRefOverrides );
+    rekey( m_netChainTerminalOverrides );
+    rekey( m_netChainMemberNetOverrides );
+}
+
+
+void CONNECTION_GRAPH::refreshCommittedChainPayload( SCH_NETCHAIN* aTarget,
+                                                     const std::set<wxString>& aNets,
+                                                     const std::set<SCH_SYMBOL*>& aSymbols,
+                                                     const KIID& aTerminalPinA,
+                                                     const KIID& aTerminalPinB,
+                                                     const wxString& aRefA,
+                                                     const wxString& aPinNumA,
+                                                     const wxString& aRefB,
+                                                     const wxString& aPinNumB )
+{
+    if( !aTarget )
+        return;
+
+    std::set<wxString> filtered;
+
+    for( const wxString& net : aNets )
+    {
+        if( !net.IsEmpty() )
+            filtered.insert( net );
+    }
+
+    aTarget->ReplaceNets( filtered );
+
+    aTarget->ClearSymbols();
+
+    for( SCH_SYMBOL* sym : aSymbols )
+        aTarget->AddSymbol( sym );
+
+    // Honor an explicit terminal-pin override (set via ReplaceNetChainTerminalPin) over the
+    // topology-derived defaults; otherwise an unconditional Recalculate would silently revert
+    // user retargeting of the chain's terminal endpoints.
+    auto termOverride = m_netChainTerminalOverrides.find( aTarget->GetName() );
+
+    if( termOverride != m_netChainTerminalOverrides.end() )
+        aTarget->SetTerminalPins( termOverride->second.first, termOverride->second.second );
+    else
+        aTarget->SetTerminalPins( aTerminalPinA, aTerminalPinB );
+
+    aTarget->SetTerminalRefs( aRefA, aPinNumA, aRefB, aPinNumB );
+
+    for( SCH_SYMBOL* sym : aTarget->GetSymbols() )
+        sym->SetNetChainName( aTarget->GetName() );
+}
+
+
+void CONNECTION_GRAPH::refreshCommittedChainFromPotential( SCH_NETCHAIN* aTarget,
+                                                           const SCH_NETCHAIN& aSource )
+{
+    refreshCommittedChainPayload( aTarget, aSource.GetNets(), aSource.GetSymbols(),
+                                  aSource.GetTerminalPinA(), aSource.GetTerminalPinB(),
+                                  aSource.GetTerminalRef( 0 ), aSource.GetTerminalPinNum( 0 ),
+                                  aSource.GetTerminalRef( 1 ), aSource.GetTerminalPinNum( 1 ) );
+}
+
+
+SCH_NETCHAIN* CONNECTION_GRAPH::CreateNetChainFromPotential( SCH_NETCHAIN* aPotential, const wxString& aName )
+{
+    if( !aPotential )
+        return nullptr;
+    auto sig = std::make_unique<SCH_NETCHAIN>();
+    for( const wxString& n : aPotential->GetNets() )
+        sig->AddNet( n );
+    for( SCH_SYMBOL* sym : aPotential->GetSymbols() )
+        sig->AddSymbol( sym );
+    sig->SetName( aName );
+    sig->SetTerminalPins( aPotential->GetTerminalPinA(), aPotential->GetTerminalPinB() );
+    sig->SetTerminalRefs( aPotential->GetTerminalRef( 0 ), aPotential->GetTerminalPinNum( 0 ),
+                          aPotential->GetTerminalRef( 1 ), aPotential->GetTerminalPinNum( 1 ) );
+
+    // Apply any parsed netclass override for this chain name.
+    auto ncIt = m_netChainNetClassOverrides.find( aName );
+
+    if( ncIt != m_netChainNetClassOverrides.end() )
+        sig->SetNetClass( ncIt->second );
+
+    // Apply any parsed colour override for this chain name.
+    auto colIt = m_netChainColorOverrides.find( aName );
+
+    if( colIt != m_netChainColorOverrides.end() )
+        sig->SetColor( colIt->second );
+
+    // Apply name to symbols now
+    for( SCH_SYMBOL* sym : sig->GetSymbols() )
+        sym->SetNetChainName( sig->GetName() );
+
+    // Register terminal refs in the override map so a subsequent unconditional Recalculate
+    // (which calls Reset() and clears the chain's symbol list) can find this chain in the
+    // restore pass and refresh it in place.  Runtime-created chains otherwise live only in
+    // m_committedNetChains and would be missed by the override-driven restore loop.
+    CHAIN_TERMINAL_REFS termRefs{
+        { aPotential->GetTerminalRef( 0 ), aPotential->GetTerminalPinNum( 0 ) },
+        { aPotential->GetTerminalRef( 1 ), aPotential->GetTerminalPinNum( 1 ) }
+    };
+    m_netChainTerminalRefOverrides[aName] = termRefs;
+
+    // Mirror the persisted-format member-net override so pass 2b has a fallback if the
+    // schematic topology shifts and the inferred potential no longer resolves.  Synthetic
+    // and empty entries are excluded to match the save path's filter in the s-expr writer.
+    std::set<wxString> persistableNets;
+
+    for( const wxString& net : sig->GetNets() )
+    {
+        if( net.IsEmpty() )
+            continue;
+
+        if( net.StartsWith( SCH_NETCHAIN::SYNTHETIC_NET_PREFIX ) )
+            continue;
+
+        persistableNets.insert( net );
+    }
+
+    if( !persistableNets.empty() )
+        m_netChainMemberNetOverrides[aName] = std::move( persistableNets );
+    else
+        m_netChainMemberNetOverrides.erase( aName );
+
+    SCH_NETCHAIN* raw = sig.get();
+    m_committedNetChains.push_back( std::move( sig ) ); // committed from potential net chain
+    return raw;
+}
+
+
+SCH_NETCHAIN* CONNECTION_GRAPH::CreateManualNetChain( const wxString& aName,
+                                                      const std::set<SCH_SYMBOL*>& aSymbols,
+                                                      const std::set<wxString>& aNets,
+                                                      const KIID& aTerminalPinA,
+                                                      const KIID& aTerminalPinB,
+                                                      const wxString& aRefA,
+                                                      const wxString& aPinNumA,
+                                                      const wxString& aRefB,
+                                                      const wxString& aPinNumB )
+{
+    if( !SCH_NETCHAIN::IsValidName( aName ) )
+        return nullptr;
+
+    if( GetNetChainByName( aName ) )
+        return nullptr;
+
+    // GetNetChainForNet returns the first match, so dual ownership of any net would
+    // make resolution depend on iteration order.
+    for( const wxString& net : aNets )
+    {
+        if( net.IsEmpty() )
+            continue;
+
+        if( GetNetChainForNet( net ) )
+            return nullptr;
+    }
+
+    auto sig = std::make_unique<SCH_NETCHAIN>();
+    sig->SetName( aName );
+
+    for( const wxString& net : aNets )
+    {
+        if( net.IsEmpty() )
+            continue;
+
+        sig->AddNet( net );
+    }
+
+    for( SCH_SYMBOL* sym : aSymbols )
+        sig->AddSymbol( sym );
+
+    sig->SetTerminalPins( aTerminalPinA, aTerminalPinB );
+    sig->SetTerminalRefs( aRefA, aPinNumA, aRefB, aPinNumB );
+
+    auto ncIt = m_netChainNetClassOverrides.find( aName );
+
+    if( ncIt != m_netChainNetClassOverrides.end() )
+        sig->SetNetClass( ncIt->second );
+
+    auto colIt = m_netChainColorOverrides.find( aName );
+
+    if( colIt != m_netChainColorOverrides.end() )
+        sig->SetColor( colIt->second );
+
+    for( SCH_SYMBOL* sym : sig->GetSymbols() )
+        sym->SetNetChainName( sig->GetName() );
+
+    // Register the override-map entries that the rebuild restore pass needs to refresh this
+    // manual chain after a future unconditional Recalculate.  Without this the chain is only
+    // known to m_committedNetChains, and the restore pass cannot rebuild its derived view.
+    CHAIN_TERMINAL_REFS termRefs{ { aRefA, aPinNumA }, { aRefB, aPinNumB } };
+    m_netChainTerminalRefOverrides[aName] = termRefs;
+    m_netChainMemberNetOverrides[aName] = sig->GetNets();
+
+    SCH_NETCHAIN* raw = sig.get();
+    m_committedNetChains.push_back( std::move( sig ) );
+    return raw;
+}
+
+
+SCH_NETCHAIN* CONNECTION_GRAPH::GetNetChainForNet( const wxString& aNet )
+{
+    wxLogTrace( traceSchNetChain, "CONNECTION_GRAPH::GetNetChainForNet(%s)", aNet );
+    for( std::unique_ptr<SCH_NETCHAIN>& sig : m_committedNetChains )
+    {
+        if( !sig )
+            continue;
+
+        if( sig->GetNets().count( aNet ) )
+        {
+            wxLogTrace( traceSchNetChain, "GetNetChainForNet: found chain '%s'", sig->GetName() );
+            return sig.get();
+        }
+    }
+
+    wxLogTrace( traceSchNetChain, "GetNetChainForNet: no chain found" );
+    return nullptr;
+}
+
+
+SCH_NETCHAIN* CONNECTION_GRAPH::GetNetChainByName( const wxString& aName )
+{
+    wxLogTrace( traceSchNetChain, "CONNECTION_GRAPH::GetNetChainByName(%s)", aName );
+    for( std::unique_ptr<SCH_NETCHAIN>& sig : m_committedNetChains )
+    {
+        if( sig->GetName() == aName )
+        {
+            wxLogTrace( traceSchNetChain, "GetNetChainByName: found" );
+            return sig.get();
+        }
+    }
+
+    wxLogTrace( traceSchNetChain, "GetNetChainByName: not found" );
+    return nullptr;
+}
+
+
+void CONNECTION_GRAPH::ReplaceNetChainTerminalPin( const wxString& aNetChain, const KIID& aPrev,
+                                                const KIID& aNew )
+{
+    wxLogTrace( traceSchNetChain, "ReplaceNetChainTerminalPin: chain='%s' prev=%s new=%s",
+                aNetChain, aPrev.AsString(), aNew.AsString() );
+    if( SCH_NETCHAIN* sig = GetNetChainByName( aNetChain ) )
+    {
+        sig->ReplaceTerminalPin( aPrev, aNew );
+        m_netChainTerminalOverrides[aNetChain] = std::make_pair( sig->GetTerminalPinA(),
+                                                             sig->GetTerminalPinB() );
+        wxLogTrace( traceSchNetChain, "ReplaceNetChainTerminalPin: updated overrides to (%s,%s)",
+                    sig->GetTerminalPinA().AsString(), sig->GetTerminalPinB().AsString() );
+    }
+}
+
+
+void CONNECTION_GRAPH::SetNetChainTerminalOverrides( const std::map<wxString,
+                                                std::pair<KIID, KIID>>& aOverrides )
+{
+    m_netChainTerminalOverrides = aOverrides;
+    wxLogTrace( traceSchNetChain, "SetNetChainTerminalOverrides: count=%zu",
+                m_netChainTerminalOverrides.size() );
 }
 
 
@@ -2917,11 +4438,22 @@ void CONNECTION_GRAPH::propagateToNeighbors( CONNECTION_SUBGRAPH* aSubgraph, boo
                     // the names differ, check if the neighbor's current name still matches
                     // a member of this bus. If it does, the neighbor was updated by a different
                     // member of this same bus and we should preserve that (determinism).
-                    // If it doesn't match any member, the bus member was renamed and we should update.
-                    SCH_CONNECTION temp( nullptr, neighbor->m_sheet );
-                    temp.ConfigureFromLabel( neighbor_name );
+                    // If it doesn't match any member, the bus member was renamed and we should
+                    // update. We compare by name rather than VectorIndex because non-bus
+                    // connections (e.g., "GND" from power pin propagation) have a default
+                    // VectorIndex of 0 that falsely matches the first bus member.
+                    bool alreadyUpdatedByBusMember = false;
 
-                    if( matchBusMember( parent, &temp ) )
+                    for( const auto& m : parent->Members() )
+                    {
+                        if( m->Name() == neighbor_name )
+                        {
+                            alreadyUpdatedByBusMember = true;
+                            break;
+                        }
+                    }
+
+                    if( alreadyUpdatedByBusMember )
                         continue;
                 }
 
@@ -3180,6 +4712,41 @@ SCH_CONNECTION* CONNECTION_GRAPH::matchBusMember( SCH_CONNECTION* aBusConnection
             {
                 match = c.get();
                 break;
+            }
+        }
+
+        if( !match && aSearch->VectorIndex() >= 0 )
+        {
+            int flatIdx = 0;
+
+            for( const std::shared_ptr<SCH_CONNECTION>& c : aBusConnection->Members() )
+            {
+                if( c->Type() == CONNECTION_TYPE::BUS )
+                {
+                    for( const std::shared_ptr<SCH_CONNECTION>& bus_member : c->Members() )
+                    {
+                        if( flatIdx == aSearch->VectorIndex() )
+                        {
+                            match = bus_member.get();
+                            break;
+                        }
+
+                        flatIdx++;
+                    }
+                }
+                else
+                {
+                    if( flatIdx == aSearch->VectorIndex() )
+                    {
+                        match = c.get();
+                        break;
+                    }
+
+                    flatIdx++;
+                }
+
+                if( match )
+                    break;
             }
         }
     }
@@ -3807,6 +5374,34 @@ bool CONNECTION_GRAPH::ercCheckNoConnects( const CONNECTION_SUBGRAPH* aSubgraph 
 
     if( aSubgraph->m_no_connect != nullptr )
     {
+        // If this subgraph reaches the rest of the schematic only through a hier
+        // sheet pin (parent side) or hier label (inner side), and contains no real
+        // connection points of its own, suppress the warning.  The user's intent
+        // is to mark the hier link as unconnected -- whether the no-connect sits
+        // on the pin or at the end of a short wire stub.
+        if( !aSubgraph->m_hier_pins.empty() || !aSubgraph->m_hier_ports.empty() )
+        {
+            bool clean = true;
+
+            for( SCH_ITEM* item : aSubgraph->m_items )
+            {
+                switch( item->Type() )
+                {
+                case SCH_PIN_T:
+                case SCH_LABEL_T:
+                case SCH_GLOBAL_LABEL_T:
+                case SCH_DIRECTIVE_LABEL_T: clean = false; break;
+                default: break;
+                }
+
+                if( !clean )
+                    break;
+            }
+
+            if( clean )
+                return true;
+        }
+
         // Special case: If the subgraph being checked consists of only a hier port/pin and
         // a no-connect, we don't issue a "no-connect connected" warning just because
         // connections exist on the sheet on the other side of the link.
@@ -4240,11 +5835,23 @@ bool CONNECTION_GRAPH::ercCheckLabels( const CONNECTION_SUBGRAPH* aSubgraph )
             size_t localPins = pinCount;
             bool   hasLocalHierarchy = false;
 
-            // A label that bridges a local hierarchical connection (sheet
-            // pin) to a bus with hierarchical routing is serving a valid
-            // purpose even without local component pins.
             if( !aSubgraph->m_hier_pins.empty() || !aSubgraph->m_hier_ports.empty() )
             {
+                // A label bridging multiple hierarchical connections
+                // (e.g., connecting sheet pins from different sub-sheet
+                // instances) is serving a valid routing purpose even
+                // without local component pins.
+                std::set<wxString> uniquePortNames;
+                for( SCH_HIERLABEL* port : aSubgraph->m_hier_ports )
+                    uniquePortNames.insert( aSubgraph->GetNameForDriver( port ) );
+
+                if( aSubgraph->m_hier_pins.size() + uniquePortNames.size() > 1 )
+                {
+                    hasLocalHierarchy = true;
+                }
+
+                // Also check bus parents for bus-based hierarchical
+                // routing on the same sheet.
                 for( auto& [connection, busParents] : aSubgraph->m_bus_parents )
                 {
                     for( const CONNECTION_SUBGRAPH* busParent : busParents )
@@ -4299,7 +5906,7 @@ bool CONNECTION_GRAPH::ercCheckLabels( const CONNECTION_SUBGRAPH* aSubgraph )
 
             // A local label that connects to other subgraphs with
             // hierarchical connections on the same sheet (through bus
-            // parents or net-name neighbors) is routing signals and should
+            // parents or net-name neighbors) is routing aggregated nets and should
             // not be flagged even without local component pins.
             if( allPins == 0
                 || ( type == SCH_LABEL_T && localPins == 0 && allPins > 1

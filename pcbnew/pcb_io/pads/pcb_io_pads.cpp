@@ -502,26 +502,16 @@ void PCB_IO_PADS::loadFootprints()
 
         auto decal_it = decals.find( decal_name );
 
+        double decalScale = ( decal_it != decals.end() )
+                                    ? decalUnitScale( decal_it->second.units )
+                                    : 0.0;
+
+        auto decalScaler = [&, decalScale]( double val ) {
+            return decalScale > 0.0 ? KiROUND( val * decalScale ) : scaleSize( val );
+        };
+
         if( decal_it != decals.end() )
-        {
-            auto decalScaler = [&]( double val ) {
-                if( m_parser->IsBasicUnits() )
-                    return scaleSize( val );
-
-                const std::string& units = decal_it->second.units;
-
-                if( units == "M" || units == "D" || units == "MILS" || units == "MIL" )
-                    return KiROUND( val * PADS_UNIT_CONVERTER::MILS_TO_NM );
-                else if( units == "MM" || units == "METRIC" )
-                    return KiROUND( val * PADS_UNIT_CONVERTER::MM_TO_NM );
-                else if( units == "I" || units == "INCHES" || units == "INCH" )
-                    return KiROUND( val * PADS_UNIT_CONVERTER::INCHES_TO_NM );
-                else
-                    return scaleSize( val );
-            };
-
             applyAttributes( decal_it->second.attributes, decalScaler );
-        }
         else
         {
              if( m_reporter )
@@ -572,21 +562,6 @@ void PCB_IO_PADS::loadFootprints()
         // Add Pads and Graphics from Decal
         {
             const PADS_IO::PART_DECAL& decal = decal_it->second;
-
-            auto decalScaler = [&]( double val ) {
-                if( m_parser->IsBasicUnits() )
-                    return scaleSize( val );
-
-                if( decal.units == "M" || decal.units == "D" || decal.units == "MILS"
-                    || decal.units == "MIL" )
-                    return KiROUND( val * PADS_UNIT_CONVERTER::MILS_TO_NM );
-                else if( decal.units == "MM" || decal.units == "METRIC" )
-                    return KiROUND( val * PADS_UNIT_CONVERTER::MM_TO_NM );
-                else if( decal.units == "I" || decal.units == "INCHES" || decal.units == "INCH" )
-                    return KiROUND( val * PADS_UNIT_CONVERTER::INCHES_TO_NM );
-                else
-                    return scaleSize( val );
-            };
 
             auto convertPadShape = [&]( const PADS_IO::PAD_STACK_LAYER& layer_def,
                                         PAD* pad, PCB_LAYER_ID kicad_layer,
@@ -1703,6 +1678,8 @@ void PCB_IO_PADS::loadCopperShapes()
             appendArcPoints( outline, copper.outline );
             outline.SetClosed( true );
             zone->Outline()->AddOutline( outline );
+            zone->SetBorderDisplayStyle( ZONE_BORDER_DISPLAY_STYLE::DIAGONAL_EDGE, ZONE::GetDefaultHatchPitch(), true );
+
             m_loadBoard->Add( zone );
         }
         else
@@ -1876,6 +1853,7 @@ void PCB_IO_PADS::loadZones()
 
         zone->Outline()->NewOutline();
         appendArcPoints( zone->Outline()->Outline( 0 ), pour_def.points );
+        zone->SetBorderDisplayStyle( ZONE_BORDER_DISPLAY_STYLE::DIAGONAL_EDGE, ZONE::GetDefaultHatchPitch(), true );
 
         if( pour_def.is_cutout )
         {
@@ -1940,6 +1918,8 @@ void PCB_IO_PADS::loadZones()
             fillPoly.Simplify();
         }
 
+        fillPoly.Inflate( scaleSize( pour_def.width ) / 2, CORNER_STRATEGY::ROUND_ALL_CORNERS, ARC_HIGH_DEF );
+
         // Collect all matching VOIDOUT regions into a single poly set and
         // subtract in one operation. PADS VOIDOUT shapes can extend beyond
         // the HATOUT outline boundary (PADS clips at render time), so
@@ -1966,8 +1946,12 @@ void PCB_IO_PADS::loadZones()
             if( parentIt->second != pour_def.owner_pour )
                 continue;
 
-            allVoids.NewOutline();
-            appendArcPoints( allVoids.Outline( allVoids.OutlineCount() - 1 ), void_def.points );
+            SHAPE_POLY_SET voidPoly;
+            voidPoly.NewOutline();
+            appendArcPoints( voidPoly.Outline( 0 ), void_def.points );
+            voidPoly.Inflate( scaleSize( void_def.width ) / 2, CORNER_STRATEGY::ROUND_ALL_CORNERS, ARC_HIGH_DEF );
+
+            allVoids.Append( voidPoly );
         }
 
         if( allVoids.OutlineCount() > 0 )
@@ -2226,6 +2210,7 @@ void PCB_IO_PADS::loadKeepouts()
 
         koChain.SetClosed( true );
         zone->Outline()->AddOutline( koChain );
+        zone->SetBorderDisplayStyle( ZONE_BORDER_DISPLAY_STYLE::DIAGONAL_EDGE, ZONE::GetDefaultHatchPitch(), true );
 
         m_loadBoard->Add( zone );
     }
@@ -2412,6 +2397,24 @@ int PCB_IO_PADS::scaleSize( double aVal ) const
 }
 
 
+double PCB_IO_PADS::decalUnitScale( const std::string& aUnits ) const
+{
+    if( m_parser->IsBasicUnits() )
+        return 0.0;
+
+    if( aUnits == "I" || aUnits == "MIL" || aUnits == "MILS" )
+        return PADS_UNIT_CONVERTER::MILS_TO_NM;
+
+    if( aUnits == "M" || aUnits == "MM" || aUnits == "METRIC" )
+        return PADS_UNIT_CONVERTER::MM_TO_NM;
+
+    if( aUnits == "INCH" || aUnits == "INCHES" )
+        return PADS_UNIT_CONVERTER::INCHES_TO_NM;
+
+    return 0.0;
+}
+
+
 int PCB_IO_PADS::scaleCoord( double aVal, bool aIsX ) const
 {
     double origin = aIsX ? m_originX : m_originY;
@@ -2548,13 +2551,41 @@ SHAPE_ARC PCB_IO_PADS::makeMidpointArc( const PADS_IO::ARC_POINT& aPrev,
     VECTOR2I start( scaleCoord( aPrev.x, true ), scaleCoord( aPrev.y, false ) );
     VECTOR2I end( scaleCoord( aCurr.x, true ), scaleCoord( aCurr.y, false ) );
 
-    // Compute the arc midpoint in PADS coordinate space (before the Y-axis
-    // flip in scaleCoord) so the 3-point constructor gets the correct winding.
-    double startAngleRad = atan2( aPrev.y - aCurr.arc.cy, aPrev.x - aCurr.arc.cx );
-    double midAngleRad = startAngleRad + ( aCurr.arc.delta_angle * M_PI / 180.0 ) / 2.0;
+    double midX, midY;
 
-    double midX = aCurr.arc.cx + aCurr.arc.radius * cos( midAngleRad );
-    double midY = aCurr.arc.cy + aCurr.arc.radius * sin( midAngleRad );
+    if( aCurr.arc.radius == 0.0 )
+    {
+        // Route arcs specify only CW/CCW direction without explicit geometry.
+        // They are semicircles between the two endpoints. Compute the midpoint
+        // on the perpendicular bisector of the chord, at distance radius from
+        // the chord center (where radius = half the chord length).
+        double dx = aCurr.x - aPrev.x;
+        double dy = aCurr.y - aPrev.y;
+
+        if( aCurr.arc.delta_angle < 0 )
+        {
+            // CW: arc bulges to the left of the start-to-end direction
+            midX = ( aPrev.x + aCurr.x ) / 2.0 - dy / 2.0;
+            midY = ( aPrev.y + aCurr.y ) / 2.0 + dx / 2.0;
+        }
+        else
+        {
+            // CCW: arc bulges to the right of the start-to-end direction
+            midX = ( aPrev.x + aCurr.x ) / 2.0 + dy / 2.0;
+            midY = ( aPrev.y + aCurr.y ) / 2.0 - dx / 2.0;
+        }
+    }
+    else
+    {
+        // Full arc with explicit center and radius (pours, decals, board outlines).
+        // Compute the arc midpoint in PADS coordinate space (before the Y-axis
+        // flip in scaleCoord) so the 3-point constructor gets the correct winding.
+        double startAngleRad = atan2( aPrev.y - aCurr.arc.cy, aPrev.x - aCurr.arc.cx );
+        double midAngleRad = startAngleRad + ( aCurr.arc.delta_angle * M_PI / 180.0 ) / 2.0;
+
+        midX = aCurr.arc.cx + aCurr.arc.radius * cos( midAngleRad );
+        midY = aCurr.arc.cy + aCurr.arc.radius * sin( midAngleRad );
+    }
 
     VECTOR2I mid( scaleCoord( midX, true ), scaleCoord( midY, false ) );
 

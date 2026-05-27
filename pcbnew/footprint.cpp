@@ -161,6 +161,10 @@ FOOTPRINT::FOOTPRINT( const FOOTPRINT& aFootprint ) :
     m_privateLayers    = aFootprint.m_privateLayers;
 
     m_3D_Drawings      = aFootprint.m_3D_Drawings;
+
+    if( aFootprint.m_extrudedBody )
+        m_extrudedBody = std::make_unique<EXTRUDED_3D_BODY>( *aFootprint.m_extrudedBody );
+
     m_initial_comments = aFootprint.m_initial_comments ? new wxArrayString( *aFootprint.m_initial_comments )
                                                        : nullptr;
 
@@ -343,7 +347,7 @@ void FOOTPRINT::Serialize( google::protobuf::Any &aContainer ) const
 
     types::Footprint* def = footprint.mutable_definition();
 
-    def->mutable_id()->CopyFrom( kiapi::common::LibIdToProto( GetFPID() ) );
+    kiapi::common::PackLibId( def->mutable_id(), GetFPID() );
     // anchor?
     def->mutable_attributes()->set_description( GetLibDescription().ToUTF8() );
     def->mutable_attributes()->set_keywords( GetKeywords().ToUTF8() );
@@ -378,6 +382,17 @@ void FOOTPRINT::Serialize( google::protobuf::Any &aContainer ) const
 
     for( PCB_LAYER_ID layer : GetPrivateLayers().Seq() )
         def->add_private_layers( ToProtoEnum<PCB_LAYER_ID, types::BoardLayer>( layer ) );
+
+    types::JumperSettings* jumpers = def->mutable_jumpers();
+    jumpers->set_duplicate_names_are_jumpered( GetDuplicatePadNumbersAreJumpers() );
+
+    for( const std::set<wxString>& group : JumperPadGroups() )
+    {
+        types::JumperGroup* jumperGroup = jumpers->add_groups();
+
+        for( const wxString& padName : group )
+            jumperGroup->add_pad_names( padName.ToUTF8() );
+    }
 
     for( const PCB_FIELD* item : m_fields )
     {
@@ -437,7 +452,7 @@ bool FOOTPRINT::Deserialize( const google::protobuf::Any &aContainer )
     if( !aContainer.UnpackTo( &footprint ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( footprint.id().value() );
+    SetUuidDirect( KIID( footprint.id().value() ) );
     SetPosition( VECTOR2I( footprint.position().x_nm(), footprint.position().y_nm() ) );
     SetOrientationDegrees( footprint.orientation().value_degrees() );
     SetLayer( FromProtoEnum<PCB_LAYER_ID, types::BoardLayer>( footprint.layer() ) );
@@ -502,7 +517,7 @@ bool FOOTPRINT::Deserialize( const google::protobuf::Any &aContainer )
     SetAllowSolderMaskBridges( footprint.attributes().allow_soldermask_bridges() );
 
     // Definition
-    SetFPID( kiapi::common::LibIdFromProto( footprint.definition().id() ) );
+    SetFPID( kiapi::common::UnpackLibId( footprint.definition().id() ) );
     // TODO: how should anchor be handled?
     SetLibDescription( footprint.definition().attributes().description() );
     SetKeywords( footprint.definition().attributes().keywords() );
@@ -536,15 +551,31 @@ bool FOOTPRINT::Deserialize( const google::protobuf::Any &aContainer )
 
     SetLocalZoneConnection( FromProtoEnum<ZONE_CONNECTION>( overrides.zone_connection() ) );
 
+    m_netTiePadGroups.clear();
+
     for( const types::NetTieDefinition& netTieMsg : footprint.definition().net_ties() )
     {
         wxString group;
 
         for( const std::string& pad : netTieMsg.pad_number() )
-            group.Append( wxString::Format( wxT( "%s " ), pad ) );
+            group.Append( wxString::Format( wxT( "%s, " ), pad ) );
 
         group.Trim();
-        AddNetTiePadGroup( group );
+        AddNetTiePadGroup( group.BeforeLast( ',' ) );
+    }
+
+    SetDuplicatePadNumbersAreJumpers( footprint.definition().jumpers().duplicate_names_are_jumpered() );
+    JumperPadGroups().clear();
+
+    for( const types::JumperGroup& groupMsg : footprint.definition().jumpers().groups() )
+    {
+        std::set<wxString> group;
+
+        for( const std::string& padName : groupMsg.pad_names() )
+            group.insert( wxString::FromUTF8( padName ) );
+
+        if( !group.empty() )
+            JumperPadGroups().push_back( std::move( group ) );
     }
 
     LSET privateLayers;
@@ -573,22 +604,7 @@ bool FOOTPRINT::Deserialize( const google::protobuf::Any &aContainer )
 
     // If this footprint is on a board, uncache all items before clearing
     if( BOARD* board = GetBoard() )
-    {
-        for( PAD* pad : m_pads )
-            board->UncacheItemById( pad->m_Uuid );
-
-        for( BOARD_ITEM* item : m_drawings )
-            board->UncacheItemById( item->m_Uuid );
-
-        for( ZONE* zone : m_zones )
-            board->UncacheItemById( zone->m_Uuid );
-
-        for( PCB_GROUP* group : m_groups )
-            board->UncacheItemById( group->m_Uuid );
-
-        for( PCB_POINT* point : m_points )
-            board->UncacheItemById( point->m_Uuid );
-    }
+        board->UncacheChildrenById( this );
 
     Pads().clear();
     GraphicalItems().clear();
@@ -803,7 +819,7 @@ bool FOOTPRINT::FixUuids()
     {
         if( item->m_Uuid == niluuid )
         {
-            const_cast<KIID&>( item->m_Uuid ) = KIID();
+            item->ResetUuidDirect();
             changed = true;
         }
     }
@@ -840,25 +856,7 @@ FOOTPRINT& FOOTPRINT::operator=( FOOTPRINT&& aOther )
 
     // If this footprint is on a board, uncache all items before deleting them
     if( BOARD* board = GetBoard() )
-    {
-        for( PCB_FIELD* field : m_fields )
-            board->UncacheItemById( field->m_Uuid );
-
-        for( PAD* pad : m_pads )
-            board->UncacheItemById( pad->m_Uuid );
-
-        for( ZONE* zone : m_zones )
-            board->UncacheItemById( zone->m_Uuid );
-
-        for( BOARD_ITEM* item : m_drawings )
-            board->UncacheItemById( item->m_Uuid );
-
-        for( PCB_GROUP* group : m_groups )
-            board->UncacheItemById( group->m_Uuid );
-
-        for( PCB_POINT* point : m_points )
-            board->UncacheItemById( point->m_Uuid );
-    }
+        board->UncacheChildrenById( this );
 
     // Move the fields
     for( PCB_FIELD* field : m_fields )
@@ -938,6 +936,7 @@ FOOTPRINT& FOOTPRINT::operator=( FOOTPRINT&& aOther )
 
     // Copy auxiliary data
     m_3D_Drawings      = aOther.m_3D_Drawings;
+    m_extrudedBody = std::move( aOther.m_extrudedBody );
     m_libDescription   = aOther.m_libDescription;
     m_keywords         = aOther.m_keywords;
     m_privateLayers    = aOther.m_privateLayers;
@@ -986,25 +985,7 @@ FOOTPRINT& FOOTPRINT::operator=( const FOOTPRINT& aOther )
 
     // If this footprint is on a board, uncache all items before deleting them
     if( BOARD* board = GetBoard() )
-    {
-        for( PCB_FIELD* field : m_fields )
-            board->UncacheItemById( field->m_Uuid );
-
-        for( PAD* pad : m_pads )
-            board->UncacheItemById( pad->m_Uuid );
-
-        for( ZONE* zone : m_zones )
-            board->UncacheItemById( zone->m_Uuid );
-
-        for( BOARD_ITEM* item : m_drawings )
-            board->UncacheItemById( item->m_Uuid );
-
-        for( PCB_GROUP* group : m_groups )
-            board->UncacheItemById( group->m_Uuid );
-
-        for( PCB_POINT* point : m_points )
-            board->UncacheItemById( point->m_Uuid );
-    }
+        board->UncacheChildrenById( this );
 
     std::map<EDA_ITEM*, EDA_ITEM*> ptrMap;
 
@@ -1098,6 +1079,12 @@ FOOTPRINT& FOOTPRINT::operator=( const FOOTPRINT& aOther )
 
     // Copy auxiliary data
     m_3D_Drawings   = aOther.m_3D_Drawings;
+
+    if( aOther.m_extrudedBody )
+        m_extrudedBody = std::make_unique<EXTRUDED_3D_BODY>( *aOther.m_extrudedBody );
+    else
+        m_extrudedBody.reset();
+
     m_libDescription = aOther.m_libDescription;
     m_keywords      = aOther.m_keywords;
     m_privateLayers = aOther.m_privateLayers;
@@ -1399,10 +1386,17 @@ wxString FOOTPRINT::GetFieldValueForVariant( const wxString& aVariantName, const
 
 void FOOTPRINT::ClearAllNets()
 {
-    // Force the ORPHANED dummy net info for all pads.
-    // ORPHANED dummy net does not depend on a board
-    for( PAD* pad : m_pads )
-        pad->SetNetCode( NETINFO_LIST::ORPHANED );
+    // Force the ORPHANED dummy net info on every BOARD_CONNECTED_ITEM descendant so that
+    // operations which read through m_netinfo (e.g. library serialization) cannot chase a
+    // dangling pointer when this footprint has been detached from its original parent board.
+    // ORPHANED dummy net does not depend on a board.
+    RunOnChildren(
+            []( BOARD_ITEM* aItem )
+            {
+                if( BOARD_CONNECTED_ITEM* bci = dynamic_cast<BOARD_CONNECTED_ITEM*>( aItem ) )
+                    bci->SetNetCode( NETINFO_LIST::ORPHANED, /* aNoAssert */ true );
+            },
+            RECURSE_MODE::RECURSE );
 }
 
 
@@ -1483,8 +1477,9 @@ void FOOTPRINT::Add( BOARD_ITEM* aBoardItem, ADD_MODE aMode, bool aSkipConnectiv
     aBoardItem->SetParent( this );
 
     // If this footprint is on a board, update the board's item-by-id cache
-    if( BOARD* board = GetBoard() )
-        board->CacheItemById( aBoardItem );
+    // Skip caching for copy-constructed footprints (inherited board ptr but not a real member).
+    if( BOARD* board = GetBoard(); board && board->IsItemIndexedById( this ) )
+        board->CacheItemSubtreeById( aBoardItem );
 
     InvalidateGeometryCaches();
 }
@@ -1586,8 +1581,8 @@ void FOOTPRINT::Remove( BOARD_ITEM* aBoardItem, REMOVE_MODE aMode )
     }
 
     // If this footprint is on a board, update the board's item-by-id cache
-    if( BOARD* board = GetBoard() )
-        board->UncacheItemById( aBoardItem->m_Uuid );
+    if( BOARD* board = GetBoard(); board && board->IsItemIndexedById( this ) )
+        board->UncacheItemSubtreeById( aBoardItem );
 
     aBoardItem->SetFlags( STRUCT_DELETED );
 
@@ -2446,6 +2441,18 @@ PAD* FOOTPRINT::FindPadByNumber( const wxString& aPadNumber, PAD* aSearchAfterMe
 }
 
 
+PAD* FOOTPRINT::FindPadByUuid( const KIID& aUuid ) const
+{
+    for( PAD* pad : m_pads )
+    {
+        if( pad->m_Uuid == aUuid )
+            return pad;
+    }
+
+    return nullptr;
+}
+
+
 PAD* FOOTPRINT::GetPad( const VECTOR2I& aPosition, const LSET& aLayerMask )
 {
     for( PAD* pad : m_pads )
@@ -2534,6 +2541,63 @@ unsigned FOOTPRINT::GetUniquePadCount( INCLUDE_NPTH_T aIncludeNPTH ) const
 }
 
 
+unsigned FOOTPRINT::GetNumberedPadCount() const
+{
+    // A pad number is "electrical" (i.e. maps to a schematic pin) when it is either:
+    //   - purely numeric:           "1", "42"
+    //   - BGA / alphanumeric style: up to two leading letters followed by digits, e.g.
+    //                               "A1", "B12", "AA3", "AB10"
+    // Mounting-pad designators such as "MP" do not end in a digit typically
+    // and are intentionally excluded.
+    auto isElectricalPadNumber = []( const wxString& num ) -> bool
+    {
+        if( num.IsEmpty() )
+            return false;
+
+        // Walk past an optional alphabetic prefix of at most two characters.
+        size_t i = 0;
+        while( i < num.size() && wxIsalpha( num[i] ) )
+            ++i;
+
+        // Prefix must be 0–2 letters; anything longer is not a pin number.
+        if( i > 2 )
+            return false;
+
+        // The remainder must be non-empty and consist entirely of digits.
+        if( i == num.size() )
+            return false;   // no digits at all (e.g. "MP", "GND")
+
+        for( size_t j = i; j < num.size(); ++j )
+        {
+            if( !wxIsdigit( num[j] ) )
+                return false;
+        }
+
+        return true;
+    };
+
+    std::set<wxString> counted;
+
+    for( const PAD* pad : m_pads )
+    {
+        // Must be on at least one copper layer.
+        if( ( pad->GetLayerSet() & LSET::AllCuMask() ).none() )
+            continue;
+
+        // Skip NPTH (mechanical holes).
+        if( pad->GetAttribute() == PAD_ATTRIB::NPTH )
+            continue;
+
+        const wxString& num = pad->GetNumber();
+
+        if( isElectricalPadNumber( num ) )
+            counted.insert( num );
+    }
+
+    return static_cast<unsigned>( counted.size() );
+}
+
+
 void FOOTPRINT::Add3DModel( FP_3DMODEL* a3DModel )
 {
     if( nullptr == a3DModel )
@@ -2541,6 +2605,21 @@ void FOOTPRINT::Add3DModel( FP_3DMODEL* a3DModel )
 
     if( !a3DModel->m_Filename.empty() )
         m_3D_Drawings.push_back( *a3DModel );
+}
+
+
+EXTRUDED_3D_BODY& FOOTPRINT::EnsureExtrudedBody()
+{
+    if( !m_extrudedBody )
+        m_extrudedBody = std::make_unique<EXTRUDED_3D_BODY>();
+
+    return *m_extrudedBody;
+}
+
+
+void FOOTPRINT::SetExtrudedBody( std::unique_ptr<EXTRUDED_3D_BODY> aBody )
+{
+    m_extrudedBody = std::move( aBody );
 }
 
 
@@ -2748,8 +2827,7 @@ std::vector<int> FOOTPRINT::ViewGetLayers() const
         break;
     }
 
-    if( IsConflicting() )
-        layers.push_back( LAYER_CONFLICTS_SHADOW );
+    layers.push_back( LAYER_CONFLICTS_SHADOW );
 
     // If there are no pads, and only drawings on a silkscreen layer, then report the silkscreen
     // layer as well so that the component can be edited with the silkscreen layer
@@ -2956,6 +3034,10 @@ void FOOTPRINT::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
         m_courtyard_cache->front_hash = m_courtyard_cache->front.GetHash();
     }
 
+    // Flip the extrusion source layer to match the new side.
+    if( m_extrudedBody && m_extrudedBody->m_layer != UNDEFINED_LAYER )
+        m_extrudedBody->m_layer = GetBoard()->FlipLayer( m_extrudedBody->m_layer );
+
     if( m_geometry_cache )
         m_geometry_cache->hull.Mirror( m_pos, FLIP_DIRECTION::TOP_BOTTOM );
 
@@ -3112,7 +3194,7 @@ BOARD_ITEM* FOOTPRINT::Duplicate( bool addToParentGroup, BOARD_COMMIT* aCommit )
 
     dupe->RunOnChildren( [&]( BOARD_ITEM* child )
                             {
-                                const_cast<KIID&>( child->m_Uuid ) = KIID();
+                                child->ResetUuidDirect();
                             },
                             RECURSE_MODE::RECURSE );
 
@@ -3130,7 +3212,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_PAD_T:
     {
         PAD* new_pad = new PAD( *static_cast<const PAD*>( aItem ) );
-        const_cast<KIID&>( new_pad->m_Uuid ) = KIID();
+        new_pad->ResetUuidDirect();
 
         if( addToFootprint )
             m_pads.push_back( new_pad );
@@ -3142,7 +3224,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_ZONE_T:
     {
         ZONE* new_zone = new ZONE( *static_cast<const ZONE*>( aItem ) );
-        const_cast<KIID&>( new_zone->m_Uuid ) = KIID();
+        new_zone->ResetUuidDirect();
 
         if( addToFootprint )
             m_zones.push_back( new_zone );
@@ -3154,7 +3236,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_POINT_T:
     {
         PCB_POINT* new_point = new PCB_POINT( *static_cast<const PCB_POINT*>( aItem ) );
-        const_cast<KIID&>( new_point->m_Uuid ) = KIID();
+        new_point->ResetUuidDirect();
 
         if( addToFootprint )
             m_points.push_back( new_point );
@@ -3167,7 +3249,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_TEXT_T:
     {
         PCB_TEXT* new_text = new PCB_TEXT( *static_cast<const PCB_TEXT*>( aItem ) );
-        const_cast<KIID&>( new_text->m_Uuid ) = KIID();
+        new_text->ResetUuidDirect();
 
         if( aItem->Type() == PCB_FIELD_T )
         {
@@ -3190,7 +3272,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_SHAPE_T:
     {
         PCB_SHAPE* new_shape = new PCB_SHAPE( *static_cast<const PCB_SHAPE*>( aItem ) );
-        const_cast<KIID&>( new_shape->m_Uuid ) = KIID();
+        new_shape->ResetUuidDirect();
 
         if( addToFootprint )
             Add( new_shape );
@@ -3202,7 +3284,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_BARCODE_T:
     {
         PCB_BARCODE* new_barcode = new PCB_BARCODE( *static_cast<const PCB_BARCODE*>( aItem ) );
-        const_cast<KIID&>( new_barcode->m_Uuid ) = KIID();
+        new_barcode->ResetUuidDirect();
 
         if( addToFootprint )
             Add( new_barcode );
@@ -3214,7 +3296,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_REFERENCE_IMAGE_T:
     {
         PCB_REFERENCE_IMAGE* new_image = new PCB_REFERENCE_IMAGE( *static_cast<const PCB_REFERENCE_IMAGE*>( aItem ) );
-        const_cast<KIID&>( new_image->m_Uuid ) = KIID();
+        new_image->ResetUuidDirect();
 
         if( addToFootprint )
             Add( new_image );
@@ -3226,7 +3308,7 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
     case PCB_TEXTBOX_T:
     {
         PCB_TEXTBOX* new_textbox = new PCB_TEXTBOX( *static_cast<const PCB_TEXTBOX*>( aItem ) );
-        const_cast<KIID&>( new_textbox->m_Uuid ) = KIID();
+        new_textbox->ResetUuidDirect();
 
         if( addToFootprint )
             Add( new_textbox );
@@ -4335,6 +4417,32 @@ bool FOOTPRINT::cmp_drawings::operator()( const BOARD_ITEM* itemA, const BOARD_I
                 {
                     return *cmp;
                 }
+            }
+        }
+        else if( dwgA->GetShape() == SHAPE_T::ELLIPSE || dwgA->GetShape() == SHAPE_T::ELLIPSE_ARC )
+        {
+            if( std::optional<bool> cmp = cmp_points_opt( dwgA->GetEllipseCenter(), dwgB->GetEllipseCenter() ) )
+                return *cmp;
+
+            if( dwgA->GetEllipseMajorRadius() != dwgB->GetEllipseMajorRadius() )
+                return dwgA->GetEllipseMajorRadius() < dwgB->GetEllipseMajorRadius();
+
+            if( dwgA->GetEllipseMinorRadius() != dwgB->GetEllipseMinorRadius() )
+                return dwgA->GetEllipseMinorRadius() < dwgB->GetEllipseMinorRadius();
+
+            if( dwgA->GetEllipseRotation().AsTenthsOfADegree() != dwgB->GetEllipseRotation().AsTenthsOfADegree() )
+                return dwgA->GetEllipseRotation().AsTenthsOfADegree() < dwgB->GetEllipseRotation().AsTenthsOfADegree();
+
+            if( dwgA->GetShape() == SHAPE_T::ELLIPSE_ARC )
+            {
+                if( dwgA->GetEllipseStartAngle().AsTenthsOfADegree()
+                    != dwgB->GetEllipseStartAngle().AsTenthsOfADegree() )
+                    return dwgA->GetEllipseStartAngle().AsTenthsOfADegree()
+                           < dwgB->GetEllipseStartAngle().AsTenthsOfADegree();
+
+                if( dwgA->GetEllipseEndAngle().AsTenthsOfADegree() != dwgB->GetEllipseEndAngle().AsTenthsOfADegree() )
+                    return dwgA->GetEllipseEndAngle().AsTenthsOfADegree()
+                           < dwgB->GetEllipseEndAngle().AsTenthsOfADegree();
             }
         }
 

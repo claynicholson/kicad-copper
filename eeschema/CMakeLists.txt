@@ -140,6 +140,8 @@ set( EESCHEMA_DLGS
     dialogs/dialog_lib_symbol_properties_base.cpp
     dialogs/dialog_line_properties.cpp
     dialogs/dialog_line_properties_base.cpp
+    dialogs/dialog_create_net_chain.cpp
+    dialogs/dialog_create_net_chain_base.cpp
     dialogs/dialog_migrate_buses.cpp
     dialogs/dialog_migrate_buses_base.cpp
     dialogs/dialog_pin_properties.cpp
@@ -150,6 +152,8 @@ set( EESCHEMA_DLGS
     dialogs/dialog_erc_job_config.cpp
     dialogs/dialog_rescue_each.cpp
     dialogs/dialog_rescue_each_base.cpp
+    dialogs/dialog_resolve_field_case_conflicts.cpp
+    dialogs/dialog_resolve_field_case_conflicts_base.cpp
     dialogs/dialog_sch_import_settings.cpp
     dialogs/dialog_sch_import_settings_base.cpp
     dialogs/dialog_sch_find.cpp
@@ -194,6 +198,8 @@ set( EESCHEMA_DLGS
     dialogs/panel_eeschema_editing_options_base.cpp
     dialogs/panel_setup_buses.cpp
     dialogs/panel_setup_buses_base.cpp
+    dialogs/panel_setup_net_chains.cpp
+    dialogs/panel_setup_net_chains_base.cpp
     dialogs/panel_setup_formatting.cpp
     dialogs/panel_setup_formatting_base.cpp
     dialogs/panel_setup_pinmap.cpp
@@ -409,6 +415,7 @@ set( EESCHEMA_SRCS
     sch_label.cpp
     sch_line.cpp
     sch_marker.cpp
+    sch_netchain.cpp
     sch_no_connect.cpp
     sch_painter.cpp
     sch_pin.cpp
@@ -430,6 +437,7 @@ set( EESCHEMA_SRCS
     sch_validators.cpp
     sch_view.cpp
     schematic.cpp
+    schematic_text_var_adapter.cpp
     schematic_settings.cpp
     schematic_undo_redo.cpp
     sheet.cpp
@@ -446,6 +454,7 @@ set( EESCHEMA_SRCS
     toolbars_sch_editor.cpp
     toolbars_symbol_viewer.cpp
 
+    api/api_sch_enums.cpp
     api/api_sch_utils.cpp
 
     libraries/legacy_symbol_library.cpp
@@ -657,7 +666,6 @@ target_link_libraries( eeschema_kiface
         pads_common
         pcm
         markdown_lib
-        scripting
         core
         Boost::headers
         ${wxWidgets_LIBRARIES}
@@ -711,10 +719,10 @@ if( APPLE )
         )
 
     set_target_properties( eeschema PROPERTIES INSTALL_RPATH
-            "@executable_path/../Frameworks;@executable_path/../Frameworks/Python.framework" )
+            "@executable_path/../Frameworks" )
 
     set_target_properties( eeschema_kiface PROPERTIES INSTALL_RPATH
-            "@executable_path/../Frameworks;@executable_path/../Frameworks/Python.framework" )
+            "@executable_path/../Frameworks" )
     set_target_properties( eeschema_kiface PROPERTIES BUILD_WITH_INSTALL_RPATH 1 )
 
     # put individual bundle outside of main bundle as a first step

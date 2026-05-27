@@ -245,6 +245,11 @@ void EDA_3D_VIEWER_FRAME::setupUIConditions()
             {
                 return m_boardAdapter.m_Cfg->m_Render.engine != RENDER_ENGINE::OPENGL;
             };
+    auto showMissingModels =
+            [this]( const SELECTION& aSel )
+            {
+                return m_boardAdapter.m_Cfg->m_Render.show_missing_models;
+            };
     auto showTH =
             [this]( const SELECTION& aSel )
             {
@@ -293,6 +298,7 @@ void EDA_3D_VIEWER_FRAME::setupUIConditions()
             };
 
     mgr->SetConditions( EDA_3D_ACTIONS::toggleRaytacing, ACTION_CONDITIONS().Check( raytracing ) );
+    mgr->SetConditions( EDA_3D_ACTIONS::toggleShowMissingModels, ACTION_CONDITIONS().Check( showMissingModels ) );
 
     mgr->SetConditions( EDA_3D_ACTIONS::showTHT, ACTION_CONDITIONS().Check( showTH ) );
     mgr->SetConditions( EDA_3D_ACTIONS::showSMD, ACTION_CONDITIONS().Check( showSMD ) );
@@ -596,10 +602,7 @@ void EDA_3D_VIEWER_FRAME::SaveSettings( APP_SETTINGS_BASE *aCfg )
 
         cfg->m_Camera.animation_enabled       = m_canvas->GetAnimationEnabled();
         cfg->m_Camera.moving_speed_multiplier = m_canvas->GetMovingSpeedMultiplier();
-        cfg->m_Camera.projection_mode         = m_canvas->GetProjectionMode();
-
-        if( EDA_3D_CONTROLLER* ctrlTool = GetToolManager()->GetTool<EDA_3D_CONTROLLER>() )
-            cfg->m_Camera.rotation_increment = ctrlTool->GetRotationIncrement();
+        cfg->m_Camera.projection_mode = m_canvas->GetProjectionMode();
     }
 }
 
@@ -612,7 +615,14 @@ void EDA_3D_VIEWER_FRAME::CommonSettingsChanged( int aFlags )
     EDA_BASE_FRAME::CommonSettingsChanged( aFlags );
 
     loadCommonSettings();
-    applySettings( GetAppSettings<EDA_3D_VIEWER_SETTINGS>( "3d_viewer" ) );
+
+    EDA_3D_VIEWER_SETTINGS* cfg = GetAppSettings<EDA_3D_VIEWER_SETTINGS>( "3d_viewer" );
+
+    if( cfg )
+        applySettings( cfg );
+
+    if( EDA_3D_CONTROLLER* ctrlTool = GetToolManager()->GetTool<EDA_3D_CONTROLLER>() )
+        ctrlTool->SetRotationIncrement( cfg ? cfg->m_Camera.rotation_increment : 10.0 );
 
     m_appearancePanel->CommonSettingsChanged();
 

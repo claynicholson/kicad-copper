@@ -248,6 +248,8 @@ void SCH_CONNECTION::Clone( const SCH_CONNECTION& aOther )
 
     // Note: m_local_sheet is not cloned
     m_name   = aOther.m_name;
+
+    CONNECTION_TYPE origType = m_type;
     m_type   = aOther.m_type;
 
     // Note: m_local_name is not cloned if not set yet
@@ -274,11 +276,26 @@ void SCH_CONNECTION::Clone( const SCH_CONNECTION& aOther )
     // Handle vector bus members: make sure local names are preserved where possible
     const std::vector<std::shared_ptr<SCH_CONNECTION>>& otherMembers = aOther.Members();
 
-    if( m_type == CONNECTION_TYPE::BUS && aOther.Type() == CONNECTION_TYPE::BUS )
+    auto cloneMember =
+        [&]( const SCH_CONNECTION& aSrc ) -> std::shared_ptr<SCH_CONNECTION>
+        {
+            auto copy = std::make_shared<SCH_CONNECTION>( m_parent, m_sheet );
+            copy->SetGraph( m_graph );
+            copy->Clone( aSrc );
+
+            copy->m_vector_index = aSrc.m_vector_index;
+
+            return copy;
+        };
+
+    if( origType == CONNECTION_TYPE::BUS && aOther.Type() == CONNECTION_TYPE::BUS )
     {
         if( m_members.empty() )
         {
-            m_members = otherMembers;
+            m_members.reserve( otherMembers.size() );
+
+            for( const std::shared_ptr<SCH_CONNECTION>& src : otherMembers )
+                m_members.push_back( cloneMember( *src ) );
         }
         else
         {
@@ -288,11 +305,14 @@ void SCH_CONNECTION::Clone( const SCH_CONNECTION& aOther )
                 m_members[i]->Clone( *otherMembers[i] );
         }
     }
-    else if( m_type == CONNECTION_TYPE::BUS_GROUP && aOther.Type() == CONNECTION_TYPE::BUS_GROUP )
+    else if( origType == CONNECTION_TYPE::BUS_GROUP && aOther.Type() == CONNECTION_TYPE::BUS_GROUP )
     {
         if( m_members.empty() )
         {
-            m_members = otherMembers;
+            m_members.reserve( otherMembers.size() );
+
+            for( const std::shared_ptr<SCH_CONNECTION>& src : otherMembers )
+                m_members.push_back( cloneMember( *src ) );
         }
         else
         {
@@ -309,6 +329,14 @@ void SCH_CONNECTION::Clone( const SCH_CONNECTION& aOther )
                     member->Clone( **it );
             }
         }
+    }
+    else if( aOther.IsBus() )
+    {
+        m_members.clear();
+        m_members.reserve( otherMembers.size() );
+
+        for( const std::shared_ptr<SCH_CONNECTION>& src : otherMembers )
+            m_members.push_back( cloneMember( *src ) );
     }
 
     m_type = aOther.Type();
@@ -535,7 +563,14 @@ static bool isSuperSubOverbar( wxChar c )
 
 wxString SCH_CONNECTION::PrintBusForUI( const wxString& aGroup )
 {
-    size_t   groupLen = aGroup.length();
+    // Net names are stored escaped (e.g. '/' is encoded as "{slash}") so that they round-trip
+    // through the s-expression parser.  The unfold-from-bus menu and similar UI surfaces want
+    // the human-readable form, so unescape before walking the formatting markup.  Otherwise
+    // the "{slash}" sequence is mis-parsed as an opening overbar/sub/super group and the
+    // trailing '}' is silently dropped.
+    wxString unescaped = UnescapeString( aGroup );
+
+    size_t   groupLen = unescaped.length();
     size_t   i = 0;
     wxString ret;
 
@@ -543,27 +578,28 @@ wxString SCH_CONNECTION::PrintBusForUI( const wxString& aGroup )
     //
     for( ; i < groupLen; ++i )
     {
-        if( isSuperSubOverbar( aGroup[i] ) && i + 1 < groupLen && aGroup[i+1] == '{' )
+        if( isSuperSubOverbar( unescaped[i] ) && i + 1 < groupLen && unescaped[i+1] == '{' )
         {
+            ret += unescaped[i];
             i++;
             continue;
         }
-        else if( aGroup[i] == '}' )
+        else if( unescaped[i] == '}' )
         {
             continue;
         }
 
         // Handle backslash-escaped spaces (display without the backslash)
-        if( aGroup[i] == '\\' && i + 1 < groupLen && aGroup[i + 1] == ' ' )
+        if( unescaped[i] == '\\' && i + 1 < groupLen && unescaped[i + 1] == ' ' )
         {
             ret += ' ';
             i++;
             continue;
         }
 
-        ret += aGroup[i];
+        ret += unescaped[i];
 
-        if( aGroup[i] == '{' )
+        if( unescaped[i] == '{' )
             break;
     }
 
@@ -573,27 +609,28 @@ wxString SCH_CONNECTION::PrintBusForUI( const wxString& aGroup )
 
     for( ; i < groupLen; ++i )
     {
-        if( isSuperSubOverbar( aGroup[i] ) && i + 1 < groupLen && aGroup[i+1] == '{' )
+        if( isSuperSubOverbar( unescaped[i] ) && i + 1 < groupLen && unescaped[i+1] == '{' )
         {
+            ret += unescaped[i];
             i++;
             continue;
         }
-        else if( aGroup[i] == '}' )
+        else if( unescaped[i] == '}' )
         {
             continue;
         }
 
         // Handle backslash-escaped spaces (display without the backslash)
-        if( aGroup[i] == '\\' && i + 1 < groupLen && aGroup[i + 1] == ' ' )
+        if( unescaped[i] == '\\' && i + 1 < groupLen && unescaped[i + 1] == ' ' )
         {
             ret += ' ';
             i++;
             continue;
         }
 
-        ret += aGroup[i];
+        ret += unescaped[i];
 
-        if( aGroup[i] == '}' )
+        if( unescaped[i] == '}' )
             break;
     }
 

@@ -43,9 +43,13 @@ MEANDER_SETTINGS::MEANDER_SETTINGS()
     m_maxAmplitude = 1000000;
     m_step = 50000;
     m_lenPadToDie = 0;
+    m_signalExtraLength = 0;
+    m_signalExtraDelay = 0;
     m_spacing = 600000;
     SetTargetLength( LENGTH_UNCONSTRAINED );
     SetTargetLengthDelay( DELAY_UNCONSTRAINED );
+    SetTargetSignalLength( LENGTH_UNCONSTRAINED );
+    SetTargetSignalLengthDelay( DELAY_UNCONSTRAINED );
     SetTargetSkew( 0 );
     SetTargetSkewDelay( 0 );
     m_overrideCustomRules = false;
@@ -115,6 +119,63 @@ void MEANDER_SETTINGS::SetTargetLengthDelay( const MINOPTMAX<int>& aConstraint )
 
     if( aConstraint.HasMax() )
         m_targetLengthDelay.SetMax( aConstraint.Max() );
+}
+
+void MEANDER_SETTINGS::SetTargetSignalLengthDelay( long long int aOpt )
+{
+    m_targetSignalLengthDelay.SetOpt( aOpt );
+
+    if( aOpt == PNS::MEANDER_SETTINGS::DELAY_UNCONSTRAINED )
+    {
+        m_targetSignalLengthDelay.SetMin( 0 );
+        m_targetSignalLengthDelay.SetMax( aOpt );
+    }
+    else
+    {
+        m_targetSignalLengthDelay.SetMin( aOpt - DEFAULT_DELAY_TOLERANCE );
+        m_targetSignalLengthDelay.SetMax( aOpt + DEFAULT_DELAY_TOLERANCE );
+    }
+}
+
+
+void MEANDER_SETTINGS::SetTargetSignalLength( long long int aOpt )
+{
+    m_targetSignalLength.SetOpt( aOpt );
+
+    if( aOpt == PNS::MEANDER_SETTINGS::LENGTH_UNCONSTRAINED )
+    {
+        m_targetSignalLength.SetMin( 0 );
+        m_targetSignalLength.SetMax( aOpt );
+    }
+    else
+    {
+        m_targetSignalLength.SetMin( aOpt - DEFAULT_LENGTH_TOLERANCE );
+        m_targetSignalLength.SetMax( aOpt + DEFAULT_LENGTH_TOLERANCE );
+    }
+}
+
+
+void MEANDER_SETTINGS::SetTargetSignalLength( const MINOPTMAX<int>& aConstraint )
+{
+    SetTargetSignalLength( aConstraint.Opt() );
+
+    if( aConstraint.HasMin() )
+        m_targetSignalLength.SetMin( aConstraint.Min() );
+
+    if( aConstraint.HasMax() )
+        m_targetSignalLength.SetMax( aConstraint.Max() );
+}
+
+
+void MEANDER_SETTINGS::SetTargetSignalLengthDelay( const MINOPTMAX<int>& aConstraint )
+{
+    SetTargetSignalLengthDelay( aConstraint.Opt() );
+
+    if( aConstraint.HasMin() )
+        m_targetSignalLengthDelay.SetMin( aConstraint.Min() );
+
+    if( aConstraint.HasMax() )
+        m_targetSignalLengthDelay.SetMax( aConstraint.Max() );
 }
 
 
@@ -722,7 +783,7 @@ bool MEANDER_SHAPE::Fit( MEANDER_TYPE aType, const SEG& aSeg, const VECTOR2I& aP
     // Calculate minimum acceptable corner radius for visible rounding.
     // Use at least half the track width to ensure curves are noticeably rounded.
     // Smaller values lead to corners that appear nearly square, which is problematic
-    // for high-speed signals (e.g., DDR4) where 90-degree corners cause reflections.
+    // for high-speed nets (e.g., DDR4) where 90-degree corners cause reflections.
     int minCornerRadius = m_width / 2;
 
     for( int ampl = maxAmpl; ampl >= minAmpl; ampl -= st.m_step )

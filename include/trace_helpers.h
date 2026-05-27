@@ -38,6 +38,10 @@
 #include <stdarg.h>
 #include <map>
 
+#ifdef KICAD_GAL_PROFILE
+#include <core/profile.h>
+#endif
+
 /**
  * @defgroup trace_env_vars Trace Environment Variables
  *
@@ -345,6 +349,13 @@ extern KICOMMON_API const wxChar* const traceSchMove;
  */
 extern KICOMMON_API const wxChar* const traceSymbolInheritance;
 
+/**
+ * Flag to enable tracing of schematic net chain rebuild and ERC cross-chain checks.
+ *
+ * Use "KICAD_SCH_NETCHAIN" to enable.
+ */
+extern KICOMMON_API const wxChar* const traceSchNetChain;
+
 ///@}
 
 /**
@@ -363,56 +374,10 @@ extern KICOMMON_API wxString dump( const wxKeyEvent& aEvent );
  */
 extern KICOMMON_API wxString dump( const wxArrayString& aArray );
 
-class KICOMMON_API TRACE_MANAGER
-{
-public:
-    TRACE_MANAGER() :
-        m_globalTraceEnabled( false ),
-        m_printAllTraces (false )
-    {};
-    ~TRACE_MANAGER(){};
 
-    static TRACE_MANAGER& Instance();
-
-    WX_DEFINE_VARARG_FUNC_VOID( Trace, 2, (const wxString, const wxFormatString&), DoTrace,
-                                DoTraceUtf8 )
-
-    void DoTrace( const wxString aWhat, const wxChar* aFmt, ... )
-    {
-        va_list argptr;
-        va_start( argptr, aFmt );
-        traceV( aWhat, aFmt, argptr );
-        va_end( argptr );
-    }
-
-#if wxUSE_UNICODE_UTF8
-    void DoTraceUtf8( const wxString aWhat, const wxChar* aFmt, ... )
-    {
-        va_list argptr;
-        va_start( argptr, aFmt );
-        traceV( aWhat, aFmt, argptr );
-        va_end( argptr );
-    }
+#ifdef KICAD_GAL_PROFILE
+extern KICOMMON_API LATENCY_PROBE latencyProbeZoomToRender;
+extern KICOMMON_API LATENCY_PROBE latencyProbeRepaintToMotion;
 #endif
-
-    bool IsTraceEnabled( const wxString& aWhat );
-
-private:
-    void traceV( const wxString& aWhat, const wxString& aFmt, va_list vargs );
-    void init();
-
-    std::map<wxString, bool> m_enabledTraces;
-    bool                     m_globalTraceEnabled;
-    bool                     m_printAllTraces;
-};
-
-#define KI_TRACE( aWhat, ... )                                                                     \
-    if( TRACE_MANAGER::Instance().IsTraceEnabled( aWhat ) )                                        \
-    {                                                                                              \
-        TRACE_MANAGER::Instance().Trace( aWhat, __VA_ARGS__ );                                     \
-    }                                                                                              \
-    else                                                                                           \
-    {                                                                                              \
-    }
 
 #endif    // _TRACE_HELPERS_H_

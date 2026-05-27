@@ -53,6 +53,4 @@
 /pcbnew/router/ @twlostow @craftyjon @sethhillbrand
 /pcbnew/zone_filler* @jeffyoung
 
-/scripting/ @craftyjon @sethhillbrand
-
 /thirdparty/nanodbc/ @craftyjon

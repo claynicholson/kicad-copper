@@ -118,6 +118,14 @@ public:
 
     wxString GetRemotename() const;
 
+    /// Returns GetRemotename() when non-empty, otherwise "origin".  Centralizes the
+    /// fallback policy used by push/pull/fetch paths.
+    wxString GetRemoteNameOrDefault() const;
+
+    /// Returns the upstream shorthand for the current branch (e.g. "origin/master"),
+    /// or an empty string when there is no current branch.
+    wxString GetUpstreamShorthand() const;
+
     /**
      * Set the project directory path, preserving any symlinks in the path.
      * This is used to ensure git status paths match the paths used in the project tree.
@@ -148,6 +156,8 @@ public:
         updateConnectionType();
     }
 
+    const wxString& GetRemote() const { return m_remote; }
+
     int HandleSSHKeyAuthentication( git_cred** aOut, const wxString& aUsername );
 
     int HandlePlaintextAuthentication( git_cred** aOut, const wxString& aUsername );
@@ -174,6 +184,10 @@ public:
         m_cancel.store( aCancel );
     }
 
+    bool WasAuthFailure() const { return m_authFailed; }
+    void ClearAuthFailure() { m_authFailed = false; }
+    void SetAuthFailure() { m_authFailed = true; }
+
 protected:
     git_repository* m_repo;
 
@@ -186,6 +200,8 @@ protected:
     wxString m_password;
 
     unsigned m_testedTypes;
+
+    bool m_authFailed = false;
 
     std::mutex m_gitActionMutex;
 

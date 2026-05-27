@@ -29,6 +29,7 @@
 #include <gal/graphics_abstraction_layer.h>
 #include <geometry/shape_rect.h>
 #include <geometry/shape_simple.h>
+#include <geometry/shape_ellipse.h>
 #include <pcb_painter.h>
 #include <trigo.h>
 
@@ -37,6 +38,10 @@
 #include "pns_segment.h"
 #include "pns_via.h"
 #include "pns_kicad_iface.h"
+
+#include <pcb_painter.h>
+#include <netinfo.h>
+#include <layer_ids.h>
 
 using namespace KIGFX;
 
@@ -138,7 +143,7 @@ void ROUTER_PREVIEW_ITEM::Update( const PNS::ITEM* aItem )
         m_originLayer = 0;
 
     m_layer = m_originLayer;
-    m_color = getLayerColor( m_originLayer );
+    m_color = getLayerColor( m_originLayer, aItem );
     m_color.a = 0.8;
     m_depth = m_originDepth - ( ( aItem->Layers().Start() + 1 ) * LayerDepthFactor );
 
@@ -467,6 +472,42 @@ void ROUTER_PREVIEW_ITEM::drawShape( const SHAPE* aShape, KIGFX::GAL* gal ) cons
         break;
     }
 
+    case SH_ELLIPSE:
+    {
+        const SHAPE_ELLIPSE* ellipse = static_cast<const SHAPE_ELLIPSE*>( aShape );
+        const VECTOR2I       center = ellipse->GetCenter();
+        const int            major = ellipse->GetMajorRadius();
+        const int            minor = ellipse->GetMinorRadius();
+        const EDA_ANGLE      rotation = ellipse->GetRotation();
+        const bool           isArc = ellipse->IsArc();
+        const int            w = std::max( 1, ellipse->GetWidth() );
+
+        gal->SetIsFill( false );
+        gal->SetIsStroke( true );
+
+        if( showClearance && m_clearance > 0 )
+        {
+            gal->SetLineWidth( w + 2 * m_clearance );
+
+            if( isArc )
+                gal->DrawEllipseArc( center, major, minor, rotation, ellipse->GetStartAngle(), ellipse->GetEndAngle() );
+            else
+                gal->DrawEllipse( center, major, minor, rotation );
+        }
+
+        gal->SetLayerDepth( m_depth );
+        gal->SetStrokeColor( m_color );
+        gal->SetFillColor( m_color );
+        gal->SetLineWidth( w );
+
+        if( isArc )
+            gal->DrawEllipseArc( center, major, minor, rotation, ellipse->GetStartAngle(), ellipse->GetEndAngle() );
+        else
+            gal->DrawEllipse( center, major, minor, rotation );
+
+        break;
+    }
+
     case SH_COMPOUND:
         wxFAIL_MSG( wxT( "Router preview item: nested compound shapes not supported" ) );
         break;
@@ -539,11 +580,30 @@ void ROUTER_PREVIEW_ITEM::ViewDraw( int aLayer, KIGFX::VIEW* aView ) const
 }
 
 
-const COLOR4D ROUTER_PREVIEW_ITEM::getLayerColor( int aLayer ) const
+const COLOR4D ROUTER_PREVIEW_ITEM::getLayerColor( int aLayer, const PNS::ITEM* aItem ) const
 {
     auto settings = static_cast<PCB_RENDER_SETTINGS*>( m_view->GetPainter()->GetSettings() );
 
     COLOR4D color = settings->GetLayerColor( aLayer );
+
+    if( aItem && aItem->Net() && settings->GetNetColorMode() == NET_COLOR_MODE::ALL && IsCopperLayer( aLayer ) )
+    {
+        NETINFO_ITEM* ni = static_cast<NETINFO_ITEM*>( aItem->Net() );
+
+        auto ii = settings->GetNetColorMap().find( ni->GetNetCode() );
+
+        if( ii != settings->GetNetColorMap().end() && ii->second != COLOR4D::UNSPECIFIED )
+        {
+            color = ii->second;
+        }
+        else
+        {
+            NETCLASS* nc = ni->GetNetClass();
+
+            if( nc && nc->HasPcbColor() )
+                color = nc->GetPcbColor();
+        }
+    }
 
     if( m_flags & PNS_HEAD_TRACE )
         return color.Saturate( 1.0 );

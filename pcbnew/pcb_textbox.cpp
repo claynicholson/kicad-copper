@@ -124,7 +124,7 @@ bool PCB_TEXTBOX::Deserialize( const google::protobuf::Any& aContainer )
     if( !aContainer.UnpackTo( &boardText ) )
         return false;
 
-    const_cast<KIID&>( m_Uuid ) = KIID( boardText.id().value() );
+    SetUuidDirect( KIID( boardText.id().value() ) );
     SetLayer( FromProtoEnum<PCB_LAYER_ID, types::BoardLayer>( boardText.layer() ) );
     SetLocked( boardText.locked() == kiapi::common::types::LockedState::LS_LOCKED );
 
@@ -412,7 +412,7 @@ double PCB_TEXTBOX::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) const
     if( aLayer == LAYER_LOCKED_ITEM_SHADOW )
     {
         // Hide shadow if the main layer is not shown
-        if( !aView->IsLayerVisible( m_layer ) )
+        if( !aView->IsLayerVisibleCached( m_layer ) )
             return LOD_HIDE;
 
         // Hide shadow on dimmed tracks
@@ -843,8 +843,10 @@ static struct PCB_TEXTBOX_DESC
         PROPERTY_MANAGER& propMgr = PROPERTY_MANAGER::Instance();
         REGISTER_TYPE( PCB_TEXTBOX );
         propMgr.AddTypeCast( new TYPE_CAST<PCB_TEXTBOX, PCB_SHAPE> );
+        propMgr.AddTypeCast( new TYPE_CAST<PCB_TEXTBOX, EDA_SHAPE> );
         propMgr.AddTypeCast( new TYPE_CAST<PCB_TEXTBOX, EDA_TEXT> );
         propMgr.InheritsAfter( TYPE_HASH( PCB_TEXTBOX ), TYPE_HASH( PCB_SHAPE ) );
+        propMgr.InheritsAfter( TYPE_HASH( PCB_TEXTBOX ), TYPE_HASH( EDA_SHAPE ) );
         propMgr.InheritsAfter( TYPE_HASH( PCB_TEXTBOX ), TYPE_HASH( EDA_TEXT ) );
 
         propMgr.Mask( TYPE_HASH( PCB_TEXTBOX ), TYPE_HASH( EDA_SHAPE ), _HKI( "Shape" ) );
@@ -857,6 +859,7 @@ static struct PCB_TEXTBOX_DESC
         propMgr.Mask( TYPE_HASH( PCB_TEXTBOX ), TYPE_HASH( EDA_SHAPE ), _HKI( "Line Width" ) );
         propMgr.Mask( TYPE_HASH( PCB_TEXTBOX ), TYPE_HASH( EDA_SHAPE ), _HKI( "Line Style" ) );
         propMgr.Mask( TYPE_HASH( PCB_TEXTBOX ), TYPE_HASH( EDA_SHAPE ), _HKI( "Filled" ) );
+        propMgr.Mask( TYPE_HASH( PCB_TEXTBOX ), TYPE_HASH( EDA_SHAPE ), _HKI( "Line Color" ) );
         propMgr.Mask( TYPE_HASH( PCB_TEXTBOX ), TYPE_HASH( EDA_SHAPE ), _HKI( "Corner Radius" ) );
 
         propMgr.Mask( TYPE_HASH( PCB_TEXTBOX ), TYPE_HASH( EDA_TEXT ), _HKI( "Color" ) );

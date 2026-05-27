@@ -34,6 +34,7 @@
 #include <pcb_track.h>
 #include <string_utils.h>
 #include <zone.h>
+#include <unordered_map>
 
 
 // Constructor and destructor
@@ -59,6 +60,12 @@ void NETINFO_LIST::clear()
     for( it = m_netNames.begin(), itEnd = m_netNames.end(); it != itEnd; ++it )
         delete it->second;
 
+    detachAll();
+}
+
+
+void NETINFO_LIST::detachAll()
+{
     m_netNames.clear();
     m_netCodes.clear();
     m_newNetCode = 0;
@@ -178,9 +185,43 @@ void NETINFO_LIST::AppendNet( NETINFO_ITEM* aNewElement )
 
 void NETINFO_LIST::buildListOfNets()
 {
-    // Restore the initial state of NETINFO_ITEMs
+    // Preserve any parsed net-chain names and terminal pad UUIDs before clearing. The GUI load
+    // path calls BuildListOfNets() after the board file is parsed (see files.cpp) which was
+    // unintentionally wiping the m_netChain field set by the (net_chains ...) section.  Cache and
+    // restore them so persisted chains survive the rebuild.
+    std::unordered_map<int, wxString> preservedNetChains;
+    std::unordered_map<int, KIID>     preservedPad0;
+    std::unordered_map<int, KIID>     preservedPad1;
+
+    preservedNetChains.reserve( GetNetCount() );
+    preservedPad0.reserve( GetNetCount() );
+    preservedPad1.reserve( GetNetCount() );
+
+    for( NETINFO_ITEM* net : *this )
+    {
+        preservedNetChains[ net->GetNetCode() ] = net->GetNetChain();
+        preservedPad0[ net->GetNetCode() ]    = net->GetTerminalPadUuid( 0 );
+        preservedPad1[ net->GetNetCode() ]    = net->GetTerminalPadUuid( 1 );
+    }
+
+    // Restore the initial state of NETINFO_ITEMs (except chains & terminal pad UUIDs which we reapply)
     for( NETINFO_ITEM* net : *this )
         net->Clear();
+
+    for( NETINFO_ITEM* net : *this )
+    {
+        auto it = preservedNetChains.find( net->GetNetCode() );
+        if( it != preservedNetChains.end() )
+            net->SetNetChain( it->second );
+
+        auto ip0 = preservedPad0.find( net->GetNetCode() );
+        if( ip0 != preservedPad0.end() )
+            net->SetTerminalPadUuid( 0, ip0->second );
+
+        auto ip1 = preservedPad1.find( net->GetNetCode() );
+        if( ip1 != preservedPad1.end() )
+            net->SetTerminalPadUuid( 1, ip1->second );
+    }
 
     m_parent->SynchronizeNetsAndNetClasses( false );
     m_parent->SetAreasNetCodesFromNetNames();

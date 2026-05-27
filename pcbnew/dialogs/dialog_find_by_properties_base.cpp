@@ -156,7 +156,7 @@ DIALOG_FIND_BY_PROPERTIES_BASE::DIALOG_FIND_BY_PROPERTIES_BASE( wxWindow* parent
 
 	bButtonSizer->Add( 0, 0, 1, wxEXPAND, 5 );
 
-	m_closeButton = new wxButton( this, wxID_CLOSE, _("Close"), wxDefaultPosition, wxDefaultSize, 0 );
+	m_closeButton = new wxButton( this, wxID_CANCEL, _("Close"), wxDefaultPosition, wxDefaultSize, 0 );
 	bButtonSizer->Add( m_closeButton, 0, wxALL, 5 );
 
 	m_selectMatchingBtn = new wxButton( this, wxID_ANY, _("Select Matching"), wxDefaultPosition, wxDefaultSize, 0 );

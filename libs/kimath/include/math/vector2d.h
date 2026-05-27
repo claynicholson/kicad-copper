@@ -452,7 +452,6 @@ constexpr VECTOR2<T> operator+( const VECTOR2<T>& aLHS, const U& aScalar )
 }
 
 
-#ifndef SWIG
 template <Integral T, Integral U>
 constexpr VECTOR2<T> operator+( const VECTOR2<T>& aLHS, const U& aScalar )
 {
@@ -465,7 +464,6 @@ constexpr VECTOR2<T> operator+( const VECTOR2<T>& aLHS, const U& aScalar )
 {
     return VECTOR2<T>( KiROUND( aLHS.x + aScalar ), KiROUND( aLHS.y + aScalar ) );
 }
-#endif
 
 
 template <class T, class U>
@@ -483,7 +481,6 @@ constexpr VECTOR2<T> operator-( const VECTOR2<T>& aLHS, U aScalar )
 }
 
 
-#ifndef SWIG
 template <Integral T, Integral U>
 constexpr VECTOR2<T> operator-( const VECTOR2<T>& aLHS, U aScalar )
 {
@@ -496,7 +493,6 @@ constexpr VECTOR2<T> operator-( const VECTOR2<T>& aLHS, const U& aScalar )
 {
     return VECTOR2<T>( KiROUND( aLHS.x - aScalar ), KiROUND( aLHS.y - aScalar ) );
 }
-#endif
 
 
 template <class T>
@@ -507,11 +503,7 @@ constexpr VECTOR2<T> VECTOR2<T>::operator-()
 
 
 template <class T, class U>
-#ifdef SWIG
-constexpr double operator*( const VECTOR2<T>& aLHS, const VECTOR2<U>& aRHS )
-#else
 constexpr auto operator*( const VECTOR2<T>& aLHS, const VECTOR2<U>& aRHS )
-#endif
 {
     using extended_type = typename VECTOR2<std::common_type_t<T, U>>::extended_type;
     return (extended_type)aLHS.x * aRHS.x + (extended_type)aLHS.y * aRHS.y;

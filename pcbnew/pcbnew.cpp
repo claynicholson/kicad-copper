@@ -23,7 +23,6 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 
-#include <pcbnew_scripting_helpers.h>
 #include <pgm_base.h>
 #include <eda_pattern_match.h>
 #include <background_jobs_monitor.h>
@@ -67,7 +66,6 @@
 #include <panel_3D_opengl_options.h>
 #include <panel_3D_raytracing_options.h>
 #include <project_pcb.h>
-#include <python_scripting.h>
 #include <string_utils.h>
 #include <thread_pool.h>
 #include <trace_helpers.h>
@@ -94,10 +92,6 @@
 #include <board.h>
 #include <board_loader.h>
 #endif
-
-/* init functions defined by swig */
-
-extern "C" PyObject* PyInit__pcbnew( void );
 
 
 /**
@@ -231,7 +225,7 @@ static wxString filterFootprints( const wxString& aFilterJson )
 
         return wxString::FromUTF8( output.dump() );
     }
-    catch( const std::exception& e )
+    catch( const std::exception& )
     {
         return wxS( "[]" );
     }
@@ -262,9 +256,6 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
         case FRAME_PCB_EDITOR:
         {
             auto frame = new PCB_EDIT_FRAME( aKiway, aParent );
-
-            // give the scripting helpers access to our frame
-            ScriptingSetPcbEditFrame( frame );
 
             if( Kiface().IsSingle() )
             {
@@ -401,7 +392,7 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
             for( ACTION_TOOLBAR_CONTROL* control : ACTION_TOOLBAR::GetCustomControlList( FRAME_FOOTPRINT_EDITOR ) )
                 controls.push_back( control );
 
-            return new PANEL_TOOLBAR_CUSTOMIZATION( aParent, cfg, tb, actions, controls );
+            return new PANEL_TOOLBAR_CUSTOMIZATION( aParent, cfg, tb, FRAME_FOOTPRINT_EDITOR, actions, controls );
         }
 
         case PANEL_FP_COLORS:
@@ -472,7 +463,7 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
             for( ACTION_TOOLBAR_CONTROL* control : ACTION_TOOLBAR::GetCustomControlList( FRAME_PCB_EDITOR ) )
                 controls.push_back( control );
 
-            return new PANEL_TOOLBAR_CUSTOMIZATION( aParent, cfg, tb, actions, controls );
+            return new PANEL_TOOLBAR_CUSTOMIZATION( aParent, cfg, tb, FRAME_PCB_EDITOR, actions, controls );
         }
 
         case PANEL_PCB_ACTION_PLUGINS:
@@ -501,7 +492,7 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
             for( ACTION_TOOLBAR_CONTROL* control : ACTION_TOOLBAR::GetCustomControlList( FRAME_PCB_DISPLAY3D ) )
                 controls.push_back( control );
 
-            return new PANEL_TOOLBAR_CUSTOMIZATION( aParent, cfg, tb, actions, controls );
+            return new PANEL_TOOLBAR_CUSTOMIZATION( aParent, cfg, tb, FRAME_PCB_DISPLAY3D, actions, controls );
         }
 
         default:
@@ -553,9 +544,6 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
             // Signature: wxString (*)(const wxString& aFilterJson)
             return reinterpret_cast<void*>( &filterFootprints );
         }
-
-        case KIFACE_SCRIPTING_LEGACY:
-            return reinterpret_cast<void*>( PyInit__pcbnew );
 
         default:
             return nullptr;
@@ -812,6 +800,10 @@ void IFACE::closeCurrentDocument( KICAD_API_SERVER* aServer )
     }
 
     m_openContext.reset();
+
+    // The jobs handler caches the last-loaded board. Clear it so the next job
+    // uses the board from the newly opened document rather than a stale copy.
+    m_jobHandler->ClearCachedBoard();
 }
 
 
@@ -835,6 +827,11 @@ bool IFACE::HandleApiOpenDocument( const wxString& aPath, KICAD_API_SERVER* aSer
         projectPath.SetExt( FILEEXT::ProjectFileExtension );
 
     projectPath.MakeAbsolute();
+
+    // Close any existing document before loading a new project. LoadProject with
+    // aSetActive=true destroys the old PROJECT, which would leave the old board and
+    // context holding dangling m_project pointers.
+    closeCurrentDocument( aServer );
 
     SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
 
@@ -901,7 +898,6 @@ bool IFACE::HandleApiOpenDocument( const wxString& aPath, KICAD_API_SERVER* aSer
         return false;
     }
 
-    closeCurrentDocument( aServer );
     m_openContext = std::move( newContext );
 
     m_openHandler = std::make_unique<API_HANDLER_PCB>( m_openContext, nullptr );

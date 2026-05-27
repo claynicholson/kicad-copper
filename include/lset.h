@@ -309,7 +309,6 @@ public:
      */
     LSET& ClearUserDefinedLayers();
 
-#ifndef SWIG
     // Custom iterator to iterate over all set bits
     class KICOMMON_API all_set_layers_iterator : public BASE_SET::set_bits_iterator
     {
@@ -362,8 +361,6 @@ public:
     copper_layers_iterator copper_layers_end() const;
     non_copper_layers_iterator non_copper_layers_begin() const;
     non_copper_layers_iterator non_copper_layers_end() const;
-
-#endif
 
 };
 #endif // LSET_H

@@ -135,6 +135,7 @@ void FP_CACHE::Save( FOOTPRINT* aFootprintFilter )
 
             m_owner->SetOutputFormatter( &formatter );
             m_owner->Format( footprint.get() );
+            formatter.Finish();
         }
 
         m_cache_timestamp += fn.GetTimestamp();
@@ -846,6 +847,84 @@ void PCB_IO_KICAD_SEXPR::format( const BOARD* aBoard ) const
     for( BOARD_ITEM* gen : sorted_generators )
         Format( gen );
 
+    // After writing all items, write the aggregated net chains section (if any)
+    struct CHAIN_INFO
+    {
+        std::vector<NETINFO_ITEM*> nets;
+        PAD* pads[2] = { nullptr, nullptr };
+    };
+
+    // Simple lexicographic ordering using ValueStringCompare comparator logic
+    auto cmp = []( const wxString& a, const wxString& b )
+    {
+        return ValueStringCompare( a, b ) < 0;
+    };
+
+    std::map<wxString, CHAIN_INFO, decltype( cmp )> chains( cmp );
+
+    for( NETINFO_ITEM* net : aBoard->GetNetInfo() )
+    {
+        if( !net )
+            continue;
+
+        if( net->GetNetChain().IsEmpty() && !net->GetTerminalPad( 0 ) && !net->GetTerminalPad( 1 ) )
+            continue; // nothing to aggregate
+
+        wxString chainName = net->GetNetChain();
+
+        if( chainName.IsEmpty() && ( net->GetTerminalPad( 0 ) || net->GetTerminalPad( 1 ) ) )
+            chainName = net->GetNetname(); // synthetic name for unnamed terminal association
+
+        CHAIN_INFO& info = chains[chainName];
+        info.nets.push_back( net );
+        for( int i = 0; i < 2; ++i )
+        {
+            if( net->GetTerminalPad( i ) && !info.pads[i] )
+                info.pads[i] = net->GetTerminalPad( i );
+        }
+    }
+
+    size_t count = 0;
+    for( const auto& kv : chains )
+    {
+        const CHAIN_INFO& si = kv.second;
+        const wxString& chainName = kv.first;
+        // Persist if: multi-net OR terminal pads OR explicit (non-empty) chain name
+        if( si.nets.size() > 1 || si.pads[0] || si.pads[1] || !chainName.IsEmpty() )
+            ++count;
+    }
+
+    if( count )
+    {
+        m_out->Print( "(net_chains" );
+        for( const auto& kv : chains )
+        {
+            const wxString& name = kv.first;
+            const CHAIN_INFO& si = kv.second;
+
+            if( si.nets.size() == 1 && !si.pads[0] && !si.pads[1] && name.IsEmpty() )
+                continue;
+
+            m_out->Print( " (net_chain (name %s)", m_out->Quotew( name ).c_str() );
+            m_out->Print( " (members" );
+            for( NETINFO_ITEM* n : si.nets )
+            {
+                m_out->Print( " (net %s)", m_out->Quotew( n->GetNetname() ).c_str() );
+            }
+            m_out->Print( ")" );
+
+            for( int i = 0; i < 2; ++i )
+            {
+                if( si.pads[i] )
+                    m_out->Print( " (terminal_pad %s)",
+                                   m_out->Quotew( si.pads[i]->m_Uuid.AsString() ).c_str() );
+            }
+
+            m_out->Print( ")" );
+        }
+        m_out->Print( ")" );
+    }
+
     // Save any embedded files
     // Consolidate the embedded models in footprints into a single map
     // to avoid duplicating the same model in the board file.
@@ -1052,6 +1131,26 @@ void PCB_IO_KICAD_SEXPR::format( const PCB_SHAPE* aShape ) const
                       formatInternalUnits( aShape->GetEnd(), parentFP ).c_str() );
         break;
 
+    case SHAPE_T::ELLIPSE:
+        m_out->Print( "(%s_ellipse (center %s) (major_radius %s) (minor_radius %s) "
+                      "(rotation_angle %s)",
+                      prefix.c_str(), formatInternalUnits( aShape->GetEllipseCenter(), parentFP ).c_str(),
+                      formatInternalUnits( aShape->GetEllipseMajorRadius() ).c_str(),
+                      formatInternalUnits( aShape->GetEllipseMinorRadius() ).c_str(),
+                      EDA_UNIT_UTILS::FormatAngle( aShape->GetEllipseRotation() ).c_str() );
+        break;
+
+    case SHAPE_T::ELLIPSE_ARC:
+        m_out->Print( "(%s_ellipse_arc (center %s) (major_radius %s) (minor_radius %s) "
+                      "(rotation_angle %s) (start_angle %s) (end_angle %s)",
+                      prefix.c_str(), formatInternalUnits( aShape->GetEllipseCenter(), parentFP ).c_str(),
+                      formatInternalUnits( aShape->GetEllipseMajorRadius() ).c_str(),
+                      formatInternalUnits( aShape->GetEllipseMinorRadius() ).c_str(),
+                      EDA_UNIT_UTILS::FormatAngle( aShape->GetEllipseRotation() ).c_str(),
+                      EDA_UNIT_UTILS::FormatAngle( aShape->GetEllipseStartAngle() ).c_str(),
+                      EDA_UNIT_UTILS::FormatAngle( aShape->GetEllipseEndAngle() ).c_str() );
+        break;
+
     default:
         UNIMPLEMENTED_FOR( aShape->SHAPE_T_asString() );
         return;
@@ -1060,9 +1159,8 @@ void PCB_IO_KICAD_SEXPR::format( const PCB_SHAPE* aShape ) const
     aShape->GetStroke().Format( m_out, pcbIUScale );
 
     // The filled flag represents if a solid fill is present on circles, rectangles and polygons
-    if( ( aShape->GetShape() == SHAPE_T::POLY )
-        || ( aShape->GetShape() == SHAPE_T::RECTANGLE )
-        || ( aShape->GetShape() == SHAPE_T::CIRCLE ) )
+    if( ( aShape->GetShape() == SHAPE_T::POLY ) || ( aShape->GetShape() == SHAPE_T::RECTANGLE )
+        || ( aShape->GetShape() == SHAPE_T::CIRCLE ) || ( aShape->GetShape() == SHAPE_T::ELLIPSE ) )
     {
         switch( aShape->GetFillMode() )
         {
@@ -1104,7 +1202,7 @@ void PCB_IO_KICAD_SEXPR::format( const PCB_SHAPE* aShape ) const
                       formatInternalUnits( aShape->GetLocalSolderMaskMargin().value() ).c_str() );
     }
 
-    if( aShape->GetNetCode() > 0 )
+    if( !( m_ctl & CTL_OMIT_PAD_NETS ) && aShape->GetNetCode() > 0 )
         m_out->Print( "(net %s)", m_out->Quotew( aShape->GetNetname() ).c_str() );
 
     KICAD_FORMAT::FormatUuid( m_out, aShape->m_Uuid );
@@ -1495,6 +1593,50 @@ void PCB_IO_KICAD_SEXPR::format( const FOOTPRINT* aFootprint ) const
 
     if( !aFootprint->GetEmbeddedFiles()->IsEmpty() )
         aFootprint->WriteEmbeddedFiles( *m_out, !( m_ctl & CTL_FOR_BOARD ) );
+
+    // Save extruded 3D body info.
+    if( const EXTRUDED_3D_BODY* body = aFootprint->GetExtrudedBody(); body && body->m_height > 0 )
+    {
+        m_out->Print( "(model" );
+        m_out->Print( "(type extruded)" );
+        KICAD_FORMAT::FormatBool( m_out, "hide", !body->m_show );
+        m_out->Print( "(overall_height %s)", formatInternalUnits( body->m_height ).c_str() );
+        m_out->Print( "(body_pcb_gap %s)", formatInternalUnits( body->m_standoff ).c_str() );
+
+        if( body->m_layer == UNSELECTED_LAYER )
+            m_out->Print( "(layer pad_bbox)" );
+        else if( body->m_layer != UNDEFINED_LAYER )
+            m_out->Print( "(layer %s)", m_out->Quotew( LSET::Name( body->m_layer ) ).c_str() );
+        else
+            m_out->Print( "(layer auto)" );
+
+        {
+            static const char* matNames[] = { "plastic", "matte", "metal", "copper" };
+            m_out->Print( "(material %s)", matNames[static_cast<int>( body->m_material )] );
+        }
+
+        if( body->m_color != KIGFX::COLOR4D::UNSPECIFIED )
+        {
+            m_out->Print( "(color %s %s %s %s)", FormatDouble2Str( body->m_color.r ).c_str(),
+                          FormatDouble2Str( body->m_color.g ).c_str(), FormatDouble2Str( body->m_color.b ).c_str(),
+                          FormatDouble2Str( body->m_color.a ).c_str() );
+        }
+        else
+        {
+            m_out->Print( "(color unspecified)" );
+        }
+
+        m_out->Print( "(offset (xyz %s %s %s))", FormatDouble2Str( body->m_offset.x ).c_str(),
+                      FormatDouble2Str( body->m_offset.y ).c_str(), FormatDouble2Str( body->m_offset.z ).c_str() );
+
+        m_out->Print( "(scale (xyz %s %s %s))", FormatDouble2Str( body->m_scale.x ).c_str(),
+                      FormatDouble2Str( body->m_scale.y ).c_str(), FormatDouble2Str( body->m_scale.z ).c_str() );
+
+        m_out->Print( "(rotate (xyz %s %s %s))", FormatDouble2Str( body->m_rotation.x ).c_str(),
+                      FormatDouble2Str( body->m_rotation.y ).c_str(), FormatDouble2Str( body->m_rotation.z ).c_str() );
+
+        m_out->Print( ")" );
+    }
 
     // Save 3D info.
     auto bs3D = aFootprint->Models().begin();
@@ -2447,15 +2589,26 @@ void PCB_IO_KICAD_SEXPR::format( const PCB_GROUP* aGroup ) const
 {
     wxArrayString memberIds;
 
+    // Validate member pointers against the board cache to avoid use-after-free on dangling
+    // pointers (e.g. when a group held a reference to a deleted item).  This validation only
+    // applies when the group itself is part of m_board; for groups created off-board (e.g. a
+    // DeepClone() used by the clipboard) the cache contains the originals, not our clones, so
+    // skip the validation in that case and trust the member pointers.
+    bool                                validateAgainstBoard = false;
+    std::unordered_set<const EDA_ITEM*> validPtrs;
+
     if( m_board )
     {
         const auto& cache = m_board->GetItemByIdCache();
 
-        std::unordered_set<const EDA_ITEM*> validPtrs;
-
         for( const auto& [uuid, item] : cache )
             validPtrs.insert( item );
 
+        validateAgainstBoard = validPtrs.count( aGroup ) > 0;
+    }
+
+    if( validateAgainstBoard )
+    {
         for( EDA_ITEM* member : aGroup->GetItems() )
         {
             if( validPtrs.count( member ) )
@@ -2840,7 +2993,8 @@ void PCB_IO_KICAD_SEXPR::format( const PCB_TRACK* aTrack ) const
         }
     }
 
-    m_out->Print( "(net %s)", m_out->Quotew( aTrack->GetNetname() ).c_str() );
+    if( !( m_ctl & CTL_OMIT_PAD_NETS ) )
+        m_out->Print( "(net %s)", m_out->Quotew( aTrack->GetNetname() ).c_str() );
 
     KICAD_FORMAT::FormatUuid( m_out, aTrack->m_Uuid );
     m_out->Print( ")" );
@@ -2851,8 +3005,11 @@ void PCB_IO_KICAD_SEXPR::format( const ZONE* aZone ) const
 {
     m_out->Print( "(zone" );
 
-    if( aZone->IsOnCopperLayer() && !aZone->GetIsRuleArea() && aZone->GetNetCode() > 0 )
+    if( !( m_ctl & CTL_OMIT_PAD_NETS ) && aZone->IsOnCopperLayer() && !aZone->GetIsRuleArea()
+            && aZone->GetNetCode() > 0 )
+    {
         m_out->Print( "(net %s)", m_out->Quotew( aZone->GetNetname() ).c_str() );
+    }
 
     if( aZone->IsLocked() )
         KICAD_FORMAT::FormatBool( m_out, "locked", true );
@@ -2973,6 +3130,8 @@ void PCB_IO_KICAD_SEXPR::format( const ZONE* aZone ) const
     // Default is polygon filled.
     if( aZone->GetFillMode() == ZONE_FILL_MODE::HATCH_PATTERN )
         m_out->Print( "(mode hatch)" );
+    else if( aZone->GetFillMode() == ZONE_FILL_MODE::COPPER_THIEVING )
+        m_out->Print( "(mode thieving)" );
 
     if( !aZone->IsTeardropArea() )
     {
@@ -3029,6 +3188,28 @@ void PCB_IO_KICAD_SEXPR::format( const ZONE* aZone ) const
                       aZone->GetHatchBorderAlgorithm() ? "hatch_thickness" : "min_thickness",
                       FormatDouble2Str( aZone->GetHatchHoleMinArea() ).c_str() );
     }
+    else if( aZone->GetFillMode() == ZONE_FILL_MODE::COPPER_THIEVING )
+    {
+        const THIEVING_SETTINGS& thieving = aZone->GetThievingSettings();
+        const char* patternStr = "dots";
+
+        switch( thieving.pattern )
+        {
+        case THIEVING_PATTERN::SQUARES: patternStr = "squares"; break;
+        case THIEVING_PATTERN::HATCH:   patternStr = "hatch";   break;
+        case THIEVING_PATTERN::DOTS:
+        default:                        patternStr = "dots";    break;
+        }
+
+        m_out->Print( "(thieving (type %s) (size %s) (gap %s) (width %s) "
+                      "(stagger %s) (orientation %s))",
+                      patternStr,
+                      formatInternalUnits( thieving.element_size ).c_str(),
+                      formatInternalUnits( thieving.gap ).c_str(),
+                      formatInternalUnits( thieving.line_width ).c_str(),
+                      thieving.stagger ? "yes" : "no",
+                      FormatDouble2Str( thieving.orientation.AsDegrees() ).c_str() );
+    }
 
     m_out->Print( ")" );
 
@@ -3043,6 +3224,9 @@ void PCB_IO_KICAD_SEXPR::format( const ZONE* aZone ) const
 
         for( const SHAPE_LINE_CHAIN& chain : poly )
         {
+            if( chain.PointCount() == 0 )
+                continue;
+
             m_out->Print( "(polygon" );
             formatPolyPts( chain );
             m_out->Print( ")" );
@@ -3148,8 +3332,11 @@ BOARD* PCB_IO_KICAD_SEXPR::DoLoad( LINE_READER& aReader, BOARD* aAppendToMe,
 {
     init( aProperties );
 
-    PCB_IO_KICAD_SEXPR_PARSER parser( &aReader, aAppendToMe, m_queryUserCallback,
-                                      aProgressReporter, aLineCount );
+    bool preserveDestinationStackup =
+            aProperties && aProperties->contains( PCB_IO_LOAD_PROPERTIES::APPEND_PRESERVE_DESTINATION_STACKUP );
+
+    PCB_IO_KICAD_SEXPR_PARSER parser( &aReader, aAppendToMe, m_queryUserCallback, aProgressReporter, aLineCount,
+                                      preserveDestinationStackup );
     BOARD* board;
 
     try
@@ -3414,9 +3601,9 @@ void PCB_IO_KICAD_SEXPR::FootprintSave( const wxString& aLibraryPath, const FOOT
 
     if( it != m_cache->GetFootprints().end() )
     {
-        wxLogTrace( traceKicadPcbPlugin, wxT( "Removing footprint file '%s'." ), fullPath );
+        // Save() below writes atomically via sibling temp + rename, so no pre-delete.
+        wxLogTrace( traceKicadPcbPlugin, wxT( "Replacing footprint file '%s'." ), fullPath );
         m_cache->GetFootprints().erase( footprintName );
-        wxRemoveFile( fullPath );
     }
 
     // I need my own copy for the cache
@@ -3438,6 +3625,11 @@ void PCB_IO_KICAD_SEXPR::FootprintSave( const wxString& aLibraryPath, const FOOT
     // Detach it from the board and its group
     footprint->SetParent( nullptr );
     footprint->SetParentGroup( nullptr );
+
+    // Now that the clone is detached from its parent board, any m_netinfo pointers its
+    // descendants still carry reference NETINFO_ITEMs owned by that board and may dangle.
+    // Force them all to the board-independent ORPHANED singleton before serialization.
+    footprint->ClearAllNets();
 
     wxLogTrace( traceKicadPcbPlugin, wxT( "Creating s-expr footprint file '%s'." ), fullPath );
     m_cache->GetFootprints().insert( footprintName,

@@ -25,3 +25,13 @@ Rules that are not modified in the graphical editor preserve their original
 text formatting when saved.
 <br><br><br>
 
+`net_chain_length` vs `length`:
+
+When a net belongs to a chain and both constraints match, `net_chain_length` is checked against the trunk (the unique path between the two terminal pads) and `length` is ignored.  Stubs branching off the trunk don't count toward the trunk length; use `stub_length` to bound them.  If the chain has no terminal pads or the routed copper contains a loop, `net_chain_length` falls back to the sum of every member net plus series-passive bridging.  Nets that don't belong to a chain still see `length`.
+
+Time-domain targets:
+
+Both constraints accept `(time_domain yes)` to bound propagation delay instead of physical length.  For `net_chain_length` in time-domain mode the delay window applies to the chain as a whole; the tuner subtracts the routed delay from the other member nets to figure out what's left for the net being tuned.
+
+
+<br><br><br>

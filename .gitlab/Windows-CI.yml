@@ -31,7 +31,6 @@ win64_build:
       -G "Ninja" `
       -DCMAKE_TOOLCHAIN_FILE=C:\builder\vcpkg\scripts\buildsystems\vcpkg.cmake `
       -DCMAKE_BUILD_TYPE=Debug `
-      -DKICAD_SCRIPTING_WXPYTHON=OFF `
       -DKICAD_USE_OCC=ON `
       -DKICAD_BUILD_PNS_DEBUG_TOOL=ON `
       -DKICAD_USE_3DCONNEXION=ON `

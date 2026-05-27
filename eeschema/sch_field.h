@@ -50,12 +50,14 @@ class SCH_FIELD : public SCH_ITEM, public EDA_TEXT
 public:
     SCH_FIELD();    // For std::map::operator[]
 
-    SCH_FIELD( SCH_ITEM* aParent, FIELD_T aFieldId = FIELD_T::USER,
-               const wxString& aName = wxEmptyString );
+    explicit SCH_FIELD( SCH_ITEM* aParent, FIELD_T aFieldId = FIELD_T::USER, const wxString& aName = wxEmptyString );
 
-    SCH_FIELD( SCH_ITEM* aParent, SCH_TEXT* aText );
+    explicit SCH_FIELD( SCH_ITEM* aParent, SCH_TEXT* aText );
 
     SCH_FIELD( const SCH_FIELD& aText );
+
+    void Serialize( google::protobuf::Any& aContainer ) const override;
+    bool Deserialize( const google::protobuf::Any& aContainer ) override;
 
     ~SCH_FIELD() override
     { }
@@ -113,6 +115,13 @@ public:
      * Get a non-language-specific name for a field which can be used for storage, variable look-up, etc.
      */
     wxString GetCanonicalName() const;
+
+    /**
+     * Test whether @a aName is one of the known translations of the directive-label net class
+     * field name (used to recognise legacy/cross-locale files where the field name was saved as
+     * a translated string instead of the canonical "Netclass" token).
+     */
+    static bool IsNetclassLabelFieldName( const wxString& aName );
 
     void SetName( const wxString& aName );
 
@@ -265,6 +274,8 @@ public:
     BITMAPS GetMenuImage() const override;
 
     bool IsReplaceable() const override;
+
+    bool IsLocked() const override;
 
     VECTOR2I GetLibPosition() const { return EDA_TEXT::GetTextPos(); }
 

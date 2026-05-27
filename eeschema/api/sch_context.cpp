@@ -61,6 +61,11 @@ public:
         return m_frame->CanAcceptApiCommands();
     }
 
+    std::optional<SCH_SHEET_PATH> GetCurrentSheet() const override
+    {
+        return m_frame->GetCurrentSheet();
+    }
+
 private:
     SCH_EDIT_FRAME* m_frame;
 };
