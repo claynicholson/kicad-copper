@@ -685,7 +685,19 @@ if( NOT APPLE )
         CACHE PATH "Location of KiCad kifaces." )
 
     # Do not make these variables "PATH" b/c cmake will truncate them and we need the full path
-    if( NOT IS_ABSOLUTE ${CMAKE_INSTALL_DATADIR} )
+    if( WIN32 )
+        # kicad-copper: keep these relative on Windows so CPack/NSIS can
+        # stage them into the installer payload. CPack forbids absolute
+        # INSTALL DESTINATIONs (it needs to redirect into _CPack_Packages/).
+        # The binaries do not read embedded KICAD_DATA/KICAD_DOCS at runtime
+        # on Windows -- PATHS::GetStockDataPath()/GetDocumentationPath()
+        # resolve from the exe location via getWindowsKiCadRoot(). See
+        # common/paths.cpp.
+        set( KICAD_DATA ${CMAKE_INSTALL_DATADIR}/kicad
+            CACHE STRING "Location of KiCad data files." )
+        set( KICAD_DOCS ${CMAKE_INSTALL_DATADIR}/doc/kicad
+            CACHE STRING "Location of KiCad documentation files." )
+    elseif( NOT IS_ABSOLUTE ${CMAKE_INSTALL_DATADIR} )
         set( KICAD_DATA ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/kicad
             CACHE STRING "Location of KiCad data files." )
         set( KICAD_DOCS ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/doc/kicad
