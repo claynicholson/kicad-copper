@@ -188,8 +188,23 @@ jobs:
           COPPER_VERSION: ${{ steps.version.outputs.version }}
         run: |
           cd build/release
-          cpack -V
+          # Tee CPack's own output too so a separate artifact captures it even
+          # when GitHub Actions truncates the run log.
+          cpack -V 2>&1 | tee cpack_output.log
+          test ${PIPESTATUS[0]} -eq 0
           ls -la *.exe *.zip 2>/dev/null || true
+
+      - name: Upload packaging log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaging-failure-log
+          path: |
+            build/release/cpack_output.log
+            build/release/_CPack_Packages/win64/NSIS/NSISOutput.log
+            build/release/_CPack_Packages/win64/NSIS/project.nsi
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Collect artifacts
         id: artifacts
