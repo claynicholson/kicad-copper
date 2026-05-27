@@ -1,117 +1,163 @@
 # Releasing kicad-copper
 
 This repo ships a Windows `.exe` (NSIS installer) plus a portable `.zip` for
-each release. Releases are built by a GitHub Actions workflow and attached to
-a GitHub Release on `claynicholson/kicad-copper`.
+each release. **Releases are built locally and pushed to a GitHub Release** on
+`claynicholson/kicad-copper`. The CI workflow (`.github/workflows/release.yml`)
+exists as a fallback for contributors without an MSYS2 toolchain but is not the
+supported path.
 
-## TL;DR — cut a new release
+## TL;DR
 
-From a clean working tree on `master`:
-
-```powershell
-./scripts/release.ps1 0.2.0
-```
-
-That's it. The script:
-
-1. Validates the version (semver: `X.Y.Z` or `X.Y.Z-prerelease`).
-2. Updates the [`VERSION.txt`](../VERSION.txt) file.
-3. Commits the bump as `Release v0.2.0`.
-4. Tags the commit `v0.2.0`.
-5. Pushes the commit and tag to `origin`.
-
-The push of `v*` triggers
-[`.github/workflows/release.yml`](../.github/workflows/release.yml), which:
-
-1. Spins up a `windows-2022` runner.
-2. Sets up MSYS2 / UCRT64 with KiCad's build dependencies (cached).
-3. Configures + builds with CMake / Ninja (ccache'd).
-4. Runs `cpack` to produce `kicad-copper-<ver>-win64.exe` (NSIS) and
-   `kicad-copper-<ver>-win64.zip` (portable).
-5. Creates a GitHub Release at `v<ver>` with both files attached.
-
-Expected runtime: **~1–2 hours on a cold cache, ~30–45 minutes after caches
-warm up**. KiCad has a lot of C++ to compile, even on a 4-vCPU runner.
-
-## Dry run
+From a Windows machine with MSYS2 UCRT64 set up the way KiCad upstream
+documents:
 
 ```powershell
-./scripts/release.ps1 0.2.0 -DryRun
+./scripts/release-local.ps1 0.1.1
 ```
 
-Prints every git/file operation without performing it. Good for sanity-checking
-the version string and remote.
+That's it. One command. Configure -> build -> stage -> package -> upload.
 
-## Test the workflow without making a release
+The script is idempotent: if you re-run it, steps with existing outputs are
+skipped. To force a from-scratch rebuild, pass `-Clean`.
 
-Use **Actions → Release Windows .exe → Run workflow** in the GitHub UI (or
-`gh workflow run release.yml -f version=0.2.0-test`). This builds and uploads
-the artifacts as a regular workflow artifact (downloadable from the run page)
-**without** creating a GitHub Release. Useful when iterating on the workflow
-itself.
+## What it does
 
-## Version policy
+[`scripts/release-local.ps1`](../scripts/release-local.ps1) executes the full
+pipeline:
 
-- `MAJOR.MINOR.PATCH` (semver). Bump:
-  - `PATCH` for bug fixes only,
-  - `MINOR` for new features that are backwards-compatible,
-  - `MAJOR` for breaking changes.
-- Pre-releases are allowed (`0.2.0-rc.1`). They still create a GitHub Release;
-  flip the Release to "pre-release" in the UI if needed.
-- The version lives in [`VERSION.txt`](../VERSION.txt) and is read at CMake configure
-  time by [`cmake/CopperPackaging.cmake`](../cmake/CopperPackaging.cmake).
-- CI also overrides `COPPER_VERSION` from the tag, so the installer's embedded
-  version always matches the tag (even if someone forgot to bump `VERSION.txt`).
+1. **Sanity** - verify MSYS2 + Python stdlib are installed.
+2. **CMake configure** if `build/release/CMakeCache.txt` doesn't exist
+   (~10-12 minute Python detection on first run; subsequent runs skip).
+3. **Build** with Ninja + ccache (incremental; minutes on a warm tree,
+   30-50 minutes from scratch).
+4. **Stage** into `build/release/staging/`:
+   - sed-strip absolute paths from KiCad's generated `cmake_install.cmake`
+     files (upstream bakes `C:/Program Files/kicad/...` which CPack rejects),
+   - `cmake --install --prefix=staging`,
+   - copy `api/schemas/*.json` (cmake errors out before reaching them),
+   - copy `share/kicad/{resources,scripting,template}` (icons archive +
+     Python plugin scaffold + template marker - KiCad's Windows install rules
+     skip these),
+   - transitively walk every `.exe` and `.dll` in `staging/bin/` with
+     `objdump -p`, copying any `/ucrt64/bin/` dependency into `staging/bin/`
+     until fixed point,
+   - copy Python 3.14 stdlib into `staging/lib/python3.14/`.
+5. **Package** with `cpack` (custom standalone NSIS config that points at
+   the staged tree, bypassing KiCad's broken install machinery) plus a
+   `.NET ZipFile.CreateFromDirectory` portable archive.
+6. **Upload** to a GitHub Release. Creates the tag + release if absent;
+   replaces existing assets with the same name if present. Auth via the
+   git credential helper (Windows Credential Manager) - no PAT prompt.
 
-## Authentication
+Expected wall time: 5-10 minutes on a warm tree, 60-90 minutes from a clean
+build.
 
-The workflow uses the default `GITHUB_TOKEN`. No PATs required. Permissions
-needed (`contents: write`) are declared inline in the workflow.
-
-If you ever need to publish from a fork or a non-default remote, set
-`-Remote upstream` (or similar) on the release script.
-
-## Re-releasing a tag (escape hatch)
-
-If a release artifact is broken and you need to rebuild the same version:
+## Common flows
 
 ```powershell
-./scripts/release.ps1 0.2.0 -Force
+# Standard release flow - bumps version, full rebuild, upload
+./scripts/release-local.ps1 0.1.1
+
+# Build but don't release (for local verification)
+./scripts/release-local.ps1 0.1.1 -SkipUpload
+
+# Dry-run - show every step without changing state
+./scripts/release-local.ps1 0.1.1 -DryRun
+
+# Force from-scratch rebuild (wipes build/release/)
+./scripts/release-local.ps1 0.2.0 -Clean
 ```
 
-`-Force` deletes the local tag and pushes a new one. Then in GitHub: delete the
-existing Release (its assets go with it) and re-run the workflow, or push the
-tag with `--force` to retrigger the workflow.
+## Versioning
 
-Avoid this when possible — bump the patch instead (`0.2.1`).
+- `MAJOR.MINOR.PATCH` (semver). `PATCH` for bug fixes, `MINOR` for
+  backwards-compatible features, `MAJOR` for breaking changes.
+- The script reads from [`VERSION.txt`](../VERSION.txt) if no version arg.
+- Pre-release tags are allowed (`0.2.0-rc.1`). The GitHub UI lets you mark
+  the resulting Release as "pre-release" after the fact if you want.
 
-## Troubleshooting the first build
+## Prerequisites
 
-The MSYS2 package list in `release.yml` covers KiCad's standard Windows build,
-but the first run may surface a missing dep. Symptoms and fixes:
+This is what your local MSYS2 needs (one-time setup):
 
-- **CMake errors `Could NOT find <Lib>`** — add `mingw-w64-ucrt-x86_64-<lib>`
-  to the `install:` block in `release.yml`. Search package names with
-  `pacman -Ss <lib>` from a local UCRT64 shell.
-- **`cpack` produced no `.exe`** — NSIS missing. Verify
-  `mingw-w64-ucrt-x86_64-nsis` is installed in the workflow.
-- **Out-of-disk** — the runner has ~14 GB free on `D:`. Build dir + ccache fit,
-  but ramping `ccache --max-size` past 5 GB can break it. Don't.
-- **Build time exceeds 6 h** — `timeout-minutes: 360` in the workflow. Bump if
-  caches are still warming.
+```bash
+# In an MSYS2 UCRT64 shell
+pacman -S --needed \
+    base-devel \
+    mingw-w64-ucrt-x86_64-toolchain \
+    mingw-w64-ucrt-x86_64-cmake \
+    mingw-w64-ucrt-x86_64-ninja \
+    mingw-w64-ucrt-x86_64-pkgconf \
+    mingw-w64-ucrt-x86_64-ccache \
+    mingw-w64-ucrt-x86_64-nsis \
+    mingw-w64-ucrt-x86_64-boost \
+    mingw-w64-ucrt-x86_64-wxwidgets3.2-msw \
+    mingw-w64-ucrt-x86_64-wxwidgets3.2-msw-libs \
+    mingw-w64-ucrt-x86_64-python \
+    mingw-w64-ucrt-x86_64-swig \
+    mingw-w64-ucrt-x86_64-glew \
+    mingw-w64-ucrt-x86_64-glm \
+    mingw-w64-ucrt-x86_64-cairo \
+    mingw-w64-ucrt-x86_64-pixman \
+    mingw-w64-ucrt-x86_64-freetype \
+    mingw-w64-ucrt-x86_64-harfbuzz \
+    mingw-w64-ucrt-x86_64-fontconfig \
+    mingw-w64-ucrt-x86_64-curl \
+    mingw-w64-ucrt-x86_64-zlib \
+    mingw-w64-ucrt-x86_64-zstd \
+    mingw-w64-ucrt-x86_64-openssl \
+    mingw-w64-ucrt-x86_64-libgit2 \
+    mingw-w64-ucrt-x86_64-ngspice \
+    mingw-w64-ucrt-x86_64-opencascade \
+    mingw-w64-ucrt-x86_64-protobuf \
+    mingw-w64-ucrt-x86_64-abseil-cpp \
+    mingw-w64-ucrt-x86_64-nng \
+    mingw-w64-ucrt-x86_64-poppler \
+    mingw-w64-ucrt-x86_64-unixodbc
+```
 
-When a build fails, the workflow uploads the `compilation_log.txt` and CMake
-configure log as a workflow artifact — download from the run page for
-post-mortem.
+The script needs MSYS2 at `C:\msys64` and Python stdlib at
+`C:\msys64\ucrt64\lib\python3.14`. Both come from the pacman install.
+
+## What's intentionally NOT in the installer
+
+- **`share/kicad/demos/`** - a footprint in the `kit-dev-coldfire-xilinx_5213`
+  demo has a 125-character filename which overruns Windows `MAX_PATH` (260 chars)
+  inside NSIS's staging tree. Saves ~350 MB. To re-enable in a future version,
+  either filter that one demo or enable long-path support.
+- **Stock symbol/footprint/3D-model libraries** - these live in separate
+  repos (kicad-symbols, kicad-footprints, kicad-packages3D) and aren't part
+  of the kicad source tree. The official KiCad installer is ~900 MB largely
+  because of bundled 3D models (4.6 GB uncompressed). Users with KiCad 9.0
+  already installed can point Preferences -> Configure Paths at
+  `C:\Program Files\KiCad\9.0\share\kicad\{symbols,footprints,3dmodels}`.
+- **i18n / translations** - configured off (`KICAD_BUILD_I18N=OFF`).
+
+## Troubleshooting
+
+- **`MSYS2 not found`** - the script assumes `C:\msys64`. Edit `$msys2` in
+  `release-local.ps1` if yours is elsewhere.
+- **`Python stdlib not found`** - install
+  `mingw-w64-ucrt-x86_64-python` in MSYS2.
+- **`cpack did not produce .exe`** - check
+  `build/release/_CPack_Packages/win64/NSIS/NSISOutput.log`. The most
+  common cause is a path longer than 260 chars. Add the offending file
+  to the deny-list in step 4d.
+- **`Could not get GitHub token`** - the script uses the git credential
+  helper. Authenticate once via any `git push` to confirm credentials are
+  cached, then re-run.
+- **Stale build after a source change in a header that's pulled in
+  widely** - just re-run; ninja figures out what to rebuild. If something
+  feels off, `-Clean` forces a from-scratch rebuild.
 
 ## What the release looks like
 
-A successful release lands at
+A successful run lands at
 `https://github.com/claynicholson/kicad-copper/releases/tag/v<ver>` with:
 
-- `kicad-copper-<ver>-win64.exe` — NSIS installer (~150–250 MB)
-- `kicad-copper-<ver>-win64.zip` — portable build (~250–400 MB)
-- Auto-generated release notes (commit log since the previous tag).
+- `kicad-copper-<ver>-win64.exe` - NSIS installer (~238 MB)
+- `kicad-copper-<ver>-win64-portable.zip` - portable build (~336 MB)
+- Auto-generated release notes from the previous tag.
 
-Edit the release in the UI afterwards if you want to add highlights or known
-issues.
+Edit the release in the GitHub UI afterwards if you want to add
+highlights or known issues.
