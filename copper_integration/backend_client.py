@@ -234,7 +234,9 @@ class BackendClient:
     Methods raise BackendError subclasses on failure. Callers in the C++
     plugin map those onto user-visible states (see PROTOCOL.md §HTTP errors)."""
 
-    USER_AGENT = "KiCad-Copper/0.1"
+    # Must match the C++ client (copper_client.cpp) — the hosted edge blocks
+    # generic script User-Agents.
+    USER_AGENT = "KiCad-Copper/1.0"
 
     def __init__(self, transport: Transport, settings: Optional[Settings] = None):
         self._transport = transport
