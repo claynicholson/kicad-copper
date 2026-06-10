@@ -112,19 +112,11 @@ void CLIENT::doPost( const std::string& aEndpoint, const nlohmann::json& aBody,
     m_workerThread = std::make_unique<std::thread>(
         [this, aEndpoint, aBody, aOnResponse, aOnError]()
         {
-            // Ensure we have a valid token
+            // Auth is optional — the hosted backend accepts anonymous
+            // requests. Refresh opportunistically so a token is attached
+            // when one is available.
             if( !m_auth->IsAuthenticated() )
-            {
-                if( !m_auth->RefreshToken() )
-                {
-                    m_busy.store( false );
-
-                    if( aOnError )
-                        aOnError( "Not authenticated" );
-
-                    return;
-                }
-            }
+                m_auth->RefreshToken();
 
             KICAD_CURL_EASY curl;
 
@@ -132,7 +124,10 @@ void CLIENT::doPost( const std::string& aEndpoint, const nlohmann::json& aBody,
             curl.SetURL( url );
             curl.SetUserAgent( "KiCad-Copper/1.0" );
             curl.SetHeader( "Content-Type", "application/json" );
-            curl.SetHeader( "Authorization", "Bearer " + m_auth->GetAccessToken() );
+            std::string token = m_auth->GetAccessToken();
+
+            if( !token.empty() )
+                curl.SetHeader( "Authorization", "Bearer " + token );
             curl.SetPostFields( aBody.dump() );
 
             int rc = curl.Perform();
@@ -277,19 +272,11 @@ void CLIENT::doStreamPost( const std::string& aEndpoint, const nlohmann::json& a
     m_workerThread = std::make_unique<std::thread>(
         [this, aEndpoint, aBody, aOnEvent, aOnError]()
         {
-            // Ensure we have a valid token
+            // Auth is optional — the hosted backend accepts anonymous
+            // requests. Refresh opportunistically so a token is attached
+            // when one is available.
             if( !m_auth->IsAuthenticated() )
-            {
-                if( !m_auth->RefreshToken() )
-                {
-                    m_busy.store( false );
-
-                    if( aOnError )
-                        aOnError( "Not authenticated" );
-
-                    return;
-                }
-            }
+                m_auth->RefreshToken();
 
             KICAD_CURL_EASY curl;
 
@@ -298,7 +285,10 @@ void CLIENT::doStreamPost( const std::string& aEndpoint, const nlohmann::json& a
             curl.SetUserAgent( "KiCad-Copper/1.0" );
             curl.SetHeader( "Content-Type", "application/json" );
             curl.SetHeader( "Accept", "text/event-stream" );
-            curl.SetHeader( "Authorization", "Bearer " + m_auth->GetAccessToken() );
+            std::string token = m_auth->GetAccessToken();
+
+            if( !token.empty() )
+                curl.SetHeader( "Authorization", "Bearer " + token );
             curl.SetPostFields( aBody.dump() );
 
             // Set up SSE streaming via the curl write callback

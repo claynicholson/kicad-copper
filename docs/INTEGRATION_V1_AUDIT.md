@@ -276,4 +276,9 @@ Audit gaps closed since this document was written:
   401/403 → logout + re-auth prompt, 429 → rate-limit guidance, curl/stream
   failures → "connection lost, check Settings" with retry hint.
 
+- **Auth made optional.** The hosted backend has no `/auth/*` routes and
+  accepts anonymous requests, so the panel no longer hard-blocks sending
+  when logged out; the client attaches a Bearer token only when one exists
+  (OAuth or `COPPER_API_TOKEN`).
+
 Still open: G-REVIEW (plan preview UX), G-BRIDGE (low priority).

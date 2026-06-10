@@ -521,12 +521,8 @@ void COPPER_CHAT_PANEL::clearEmptyState()
 
 void COPPER_CHAT_PANEL::sendRequest( const wxString& aPrompt )
 {
-    if( !m_auth->IsAuthenticated() )
-    {
-        addAIMessage( wxT( "Please log in first to use Copper AI." ) );
-        return;
-    }
-
+    // Auth is optional — the hosted backend accepts anonymous requests, and
+    // the client attaches a Bearer token when one is available.
     if( m_client->IsBusy() )
     {
         addAIMessage( wxT( "Please wait for the current request to complete." ) );
