@@ -386,6 +386,16 @@ void COPPER_CHAT_PANEL::onPlanApproved( wxCommandEvent& aEvent )
     addAIMessage( wxString::Format( wxT( "Applied %zu operation(s). "
                                          "Press Ctrl-Z to undo." ),
                                     ops.size() ) );
+
+    if( auto* card = dynamic_cast<COPPER_PLAN_CARD*>( aEvent.GetEventObject() ) )
+        card->DisableActions();
+}
+
+
+void COPPER_CHAT_PANEL::onPlanDismissed( wxCommandEvent& aEvent )
+{
+    m_pendingOps.clear();
+    addAIMessage( wxT( "Plan dismissed. Nothing was applied." ) );
 }
 
 
@@ -465,6 +475,7 @@ void COPPER_CHAT_PANEL::addPlanCard( const COPPER::CopperResponse& aResponse )
     auto* card = new COPPER_PLAN_CARD( m_scrollArea, steps, placementInfo );
     card->Bind( COPPER_EVT_PLAN_APPROVED, &COPPER_CHAT_PANEL::onPlanApproved, this );
     card->Bind( COPPER_EVT_PLAN_EDITED, &COPPER_CHAT_PANEL::onPlanEdited, this );
+    card->Bind( COPPER_EVT_PLAN_DISMISSED, &COPPER_CHAT_PANEL::onPlanDismissed, this );
 
     m_messageSizer->Add( card, 0, wxEXPAND | wxALL, FromDIP( 8 ) );
     scrollToBottom();

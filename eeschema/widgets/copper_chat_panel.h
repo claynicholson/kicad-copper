@@ -93,6 +93,7 @@ private:
     void onHintClicked( wxCommandEvent& aEvent );
     void onPlanApproved( wxCommandEvent& aEvent );
     void onPlanEdited( wxCommandEvent& aEvent );
+    void onPlanDismissed( wxCommandEvent& aEvent );
     void onAuthSuccess( wxCommandEvent& aEvent );
     void onAuthFailure( wxCommandEvent& aEvent );
 

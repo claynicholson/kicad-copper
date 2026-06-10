@@ -92,9 +92,11 @@ private:
 
 wxDECLARE_EVENT( COPPER_EVT_PLAN_APPROVED, wxCommandEvent );
 wxDECLARE_EVENT( COPPER_EVT_PLAN_EDITED, wxCommandEvent );
+wxDECLARE_EVENT( COPPER_EVT_PLAN_DISMISSED, wxCommandEvent );
 
 /**
- * Displays a plan from the AI with numbered steps and Approve/Edit buttons.
+ * Displays a plan from the AI with numbered steps and Approve/Edit/Dismiss
+ * buttons.
  */
 class COPPER_PLAN_CARD : public wxPanel
 {
@@ -108,16 +110,21 @@ public:
     COPPER_PLAN_CARD( wxWindow* aParent, const std::vector<PlanStep>& aSteps,
                       const wxString& aPlacementInfo );
 
+    /// Grey out the action buttons (after the plan is applied or dismissed).
+    void DisableActions();
+
 protected:
     void OnPaint( wxPaintEvent& aEvent );
     void OnApprove( wxCommandEvent& aEvent );
     void OnEdit( wxCommandEvent& aEvent );
+    void OnDismiss( wxCommandEvent& aEvent );
 
 private:
     std::vector<PlanStep> m_steps;
     wxString              m_placementInfo;
     wxButton*             m_approveBtn;
     wxButton*             m_editBtn;
+    wxButton*             m_dismissBtn;
 
     wxDECLARE_EVENT_TABLE();
 };
@@ -140,6 +147,8 @@ public:
 
     void SetState( State aState );
     State GetState() const { return m_state; }
+    // Not GetName(): that would shadow wxWindow::GetName().
+    const wxString& GetStageName() const { return m_name; }
 
 protected:
     void OnPaint( wxPaintEvent& aEvent );

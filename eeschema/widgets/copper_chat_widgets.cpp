@@ -29,6 +29,7 @@
 
 wxDEFINE_EVENT( COPPER_EVT_PLAN_APPROVED, wxCommandEvent );
 wxDEFINE_EVENT( COPPER_EVT_PLAN_EDITED, wxCommandEvent );
+wxDEFINE_EVENT( COPPER_EVT_PLAN_DISMISSED, wxCommandEvent );
 wxDEFINE_EVENT( COPPER_EVT_HINT_CLICKED, wxCommandEvent );
 
 
@@ -235,8 +236,14 @@ COPPER_PLAN_CARD::COPPER_PLAN_CARD( wxWindow* aParent, const std::vector<PlanSte
     m_editBtn->SetForegroundColour( COPPER_COLORS::TEXT_PRIMARY );
     m_editBtn->Bind( wxEVT_BUTTON, &COPPER_PLAN_CARD::OnEdit, this );
 
+    m_dismissBtn = new wxButton( this, wxID_ANY, wxT( "Dismiss" ) );
+    m_dismissBtn->SetBackgroundColour( COPPER_COLORS::BG_TERTIARY );
+    m_dismissBtn->SetForegroundColour( COPPER_COLORS::TEXT_MUTED );
+    m_dismissBtn->Bind( wxEVT_BUTTON, &COPPER_PLAN_CARD::OnDismiss, this );
+
     btnSizer->Add( m_approveBtn, 0, wxRIGHT, FromDIP( 8 ) );
-    btnSizer->Add( m_editBtn, 0 );
+    btnSizer->Add( m_editBtn, 0, wxRIGHT, FromDIP( 8 ) );
+    btnSizer->Add( m_dismissBtn, 0 );
     mainSizer->Add( btnSizer, 0, wxALL, FromDIP( 8 ) );
 
     SetSizer( mainSizer );
@@ -271,6 +278,24 @@ void COPPER_PLAN_CARD::OnEdit( wxCommandEvent& aEvent )
     wxCommandEvent evt( COPPER_EVT_PLAN_EDITED );
     evt.SetEventObject( this );
     ProcessWindowEvent( evt );
+}
+
+
+void COPPER_PLAN_CARD::OnDismiss( wxCommandEvent& aEvent )
+{
+    DisableActions();
+
+    wxCommandEvent evt( COPPER_EVT_PLAN_DISMISSED );
+    evt.SetEventObject( this );
+    ProcessWindowEvent( evt );
+}
+
+
+void COPPER_PLAN_CARD::DisableActions()
+{
+    m_approveBtn->Disable();
+    m_editBtn->Disable();
+    m_dismissBtn->Disable();
 }
 
 
@@ -454,21 +479,10 @@ void COPPER_STAGE_PANEL::UpdateStage( const wxString& aName,
 {
     for( auto* indicator : m_indicators )
     {
-        // Match by checking the painted name (we store it internally)
-        // The indicator knows its own name from construction
-        // We need a getter... for now just iterate and check position
-    }
-
-    // Direct update by index is more reliable — find by name
-    for( size_t i = 0; i < m_indicators.size(); i++ )
-    {
-        // Use the control's label/name
-        if( m_indicators[i] )
+        if( indicator && indicator->GetStageName() == aName )
         {
-            // The stage indicator stores m_name internally
-            // We can update all of them and check
-            m_indicators[i]->SetState( aState );
-            break;  // TODO: proper name matching
+            indicator->SetState( aState );
+            return;
         }
     }
 }
