@@ -485,6 +485,16 @@ void COPPER_STAGE_PANEL::UpdateStage( const wxString& aName,
             return;
         }
     }
+
+    // Stages stream in one at a time — append indicators for new names so
+    // every stage shows up, not just the ones present at panel creation.
+    auto* indicator = new COPPER_STAGE_INDICATOR( this, aName, aState );
+    m_indicators.push_back( indicator );
+    m_sizer->Add( indicator, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP( 4 ) );
+    Layout();
+
+    if( wxWindow* parent = GetParent() )
+        parent->Layout();
 }
 
 
