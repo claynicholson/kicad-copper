@@ -254,3 +254,23 @@ multi-op apply. Closes: M3 (check 6).
 | G-PROTO     | M2        | 3,4      |
 | G-STUB      | M2        | 3,4,8    |
 | G-ASSESS    | M6        | all      |
+
+---
+
+## G. Status update (2026-06-10)
+
+Audit gaps closed since this document was written:
+
+- **G-SETTINGS — CLOSED.** `EESCHEMA_SETTINGS::m_Copper.api_url` exists with
+  JSON param binding (default `https://api.coppereda.com`),
+  `onSettingsClicked` opens an edit/validate/persist dialog, and
+  `COPPER_API_URL` env overrides settings in the panel ctor.
+- **G-CMAKE / G-FRAME — CLOSED** in M4 (panel compiles, links, and is docked
+  by `SCH_EDIT_FRAME`; full `ninja eeschema` build passes).
+- **G-PROTO / G-STUB / G-SEAM / G-HARNESS / G-ASSESS — CLOSED** (harness at
+  100/100 POLISHED, 146 tests passing).
+- Live e2e verified against https://api.coppereda.com via
+  `scripts/live_smoke.py` (generate → validate → apply → single undo).
+
+Still open: G-STATES (typed error states with action buttons), G-REVIEW
+(plan preview UX), G-BRIDGE (low priority).
