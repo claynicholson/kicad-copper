@@ -715,7 +715,8 @@ void COPPER_CHAT_PANEL::handleError( const std::string& aError )
 
         updateAuthUI();
         addAIMessage( wxT( "The backend rejected your credentials (session expired "
-                           "or unauthorized). Click Login to sign in again." ) );
+                           "or unauthorized). Click Login to sign in again, or set "
+                           "COPPER_API_TOKEN to a token the backend accepts." ) );
         return;
     }
 
