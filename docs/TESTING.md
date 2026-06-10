@@ -134,7 +134,8 @@ Steps (recorded in [DEMO.md](DEMO.md) once M6 is done):
 3. Toggle View → "Copper AI" to dock the chat panel.
 4. (Optional, self-host) `export COPPER_API_URL=http://localhost:8000`
    before launching, or set it in the Copper settings dialog.
-5. Click "Login" (or `export COPPER_API_TOKEN=…` to skip OAuth in dev).
+5. (Optional) Click "Login" (or `export COPPER_API_TOKEN=…` for a dev
+   token). Anonymous requests work against the hosted backend.
 6. In the panel, type:
    `RP2040 dev board with a 6-axis IMU for a flight controller`
 7. Watch stages stream in. A plan card appears. Click **Apply**.
