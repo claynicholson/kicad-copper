@@ -272,5 +272,8 @@ Audit gaps closed since this document was written:
 - Live e2e verified against https://api.coppereda.com via
   `scripts/live_smoke.py` (generate → validate → apply → single undo).
 
-Still open: G-STATES (typed error states with action buttons), G-REVIEW
-(plan preview UX), G-BRIDGE (low priority).
+- **G-STATES — CLOSED.** `handleError` now classifies transport errors:
+  401/403 → logout + re-auth prompt, 429 → rate-limit guidance, curl/stream
+  failures → "connection lost, check Settings" with retry hint.
+
+Still open: G-REVIEW (plan preview UX), G-BRIDGE (low priority).

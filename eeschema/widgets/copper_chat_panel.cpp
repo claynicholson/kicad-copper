@@ -708,6 +708,39 @@ void COPPER_CHAT_PANEL::handleSSEEvent( const COPPER::SSEEvent& aEvent )
 
 void COPPER_CHAT_PANEL::handleError( const std::string& aError )
 {
+    // Closes gap G-STATES: classify transport errors into actionable states.
+    // COPPER::CLIENT surfaces "HTTP <status>" for non-200 and
+    // "Request failed: ..." / "Stream request failed: ..." for curl errors.
+    if( aError.find( "HTTP 401" ) != std::string::npos
+            || aError.find( "HTTP 403" ) != std::string::npos )
+    {
+        if( m_auth && m_auth->IsAuthenticated() )
+            m_auth->Logout();
+
+        updateAuthUI();
+        addAIMessage( wxT( "The backend rejected your credentials (session expired "
+                           "or unauthorized). Click Login to sign in again." ) );
+        return;
+    }
+
+    if( aError.find( "HTTP 429" ) != std::string::npos )
+    {
+        addAIMessage( wxT( "The backend is rate-limiting requests. Wait a moment, "
+                           "then send your message again." ) );
+        return;
+    }
+
+    if( aError.rfind( "Request failed", 0 ) == 0
+            || aError.rfind( "Stream request failed", 0 ) == 0
+            || aError.find( "stream ended" ) != std::string::npos )
+    {
+        addAIMessage( wxString::Format(
+                wxT( "Backend connection lost (%s). Check your network or the API "
+                     "URL in Settings, then try again." ),
+                wxString::FromUTF8( aError ) ) );
+        return;
+    }
+
     addAIMessage( wxString::Format( wxT( "Error: %s" ), wxString::FromUTF8( aError ) ) );
 }
 
