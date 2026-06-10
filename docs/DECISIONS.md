@@ -112,7 +112,7 @@ with no code change."
 **Decision.** Resolution order for `COPPER_API_URL`:
 1. `COPPER_API_URL` environment variable (highest, for self-host / dev).
 2. `EESCHEMA_SETTINGS::m_Copper.api_url` (user-set via dialog).
-3. Default: `https://api.copper.dev` (hosted).
+3. Default: `https://api.coppereda.com` (hosted).
 
 Token order:
 1. OAuth token from `SECURE_TOKEN_STORE` (default).

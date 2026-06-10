@@ -45,6 +45,17 @@ const wxString AUTH::CALLBACK_PATH = wxS( "/callback" );
 AUTH::AUTH( const std::string& aApiUrl ) :
     m_apiUrl( aApiUrl )
 {
+    // ADR-005: COPPER_API_TOKEN env var bypasses OAuth for dev / self-host
+    // (including backends that don't enforce auth at all).
+    wxString envToken;
+
+    if( wxGetEnv( wxS( "COPPER_API_TOKEN" ), &envToken ) && !envToken.IsEmpty() )
+    {
+        m_envToken = std::string( envToken.ToUTF8() );
+        m_userEmail = "dev token";
+        wxLogWarning( "Copper: using COPPER_API_TOKEN from environment "
+                      "(dev override; OAuth login disabled)" );
+    }
 }
 
 
@@ -126,6 +137,11 @@ bool AUTH::LoadSavedTokens()
 
 bool AUTH::RefreshToken()
 {
+    // Env token never expires and cannot be refreshed — report success so
+    // callers proceed with the request (ADR-005).
+    if( !m_envToken.empty() )
+        return true;
+
     if( m_tokens.refresh_token.IsEmpty() )
         return false;
 
@@ -194,6 +210,9 @@ void AUTH::Logout()
 
 bool AUTH::IsAuthenticated() const
 {
+    if( !m_envToken.empty() )
+        return true;
+
     if( m_tokens.access_token.IsEmpty() )
         return false;
 
@@ -211,6 +230,9 @@ bool AUTH::IsAuthenticated() const
 
 std::string AUTH::GetAccessToken() const
 {
+    if( !m_envToken.empty() )
+        return m_envToken;
+
     return std::string( m_tokens.access_token.ToUTF8() );
 }
 

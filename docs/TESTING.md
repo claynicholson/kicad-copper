@@ -106,6 +106,21 @@ Then reference it from a test:
 backend.load_fixture("generate_my_case.sse")
 ```
 
+## Live backend smoke test (no KiCad needed)
+
+`scripts/live_smoke.py` exercises the hosted backend end-to-end exactly the
+way the plugin does: `POST /api/v1/generate` (SSE) → collect `done` →
+unwrap-if-nested → `validate_response` → `ApplyEngine` → `FakeSchematicApi`
+→ single undo.
+
+```bash
+PYTHONPATH=<copper-2> python scripts/live_smoke.py                        # hosted (api.coppereda.com)
+PYTHONPATH=<copper-2> python scripts/live_smoke.py http://localhost:8080  # local backend
+```
+
+It sends the plugin's `KiCad-Copper/1.0` User-Agent (the hosted edge blocks
+generic script UAs). Exit code 0 = full round trip passed.
+
 ## Manual smoke test in real KiCad
 
 The harness is intentionally headless. A real-KiCad manual smoke test is

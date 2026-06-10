@@ -21,7 +21,7 @@ All `x`/`y` in this document are **KiCad internal units (int, nanometers)**.
 Base URL (env > settings > default):
 1. `$COPPER_API_URL` (env)
 2. `EESCHEMA_SETTINGS::m_Copper.api_url`
-3. `https://api.copper.dev`
+3. `https://api.coppereda.com`
 
 Auth header on every request:
 ```

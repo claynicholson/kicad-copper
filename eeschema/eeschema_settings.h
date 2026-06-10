@@ -272,7 +272,7 @@ public:
      */
     struct COPPER_AI
     {
-        wxString api_url;                ///< default: https://api.copper.dev
+        wxString api_url;                ///< default: https://api.coppereda.com
         bool     show_panel_on_startup;  ///< auto-open the panel
         int      stream_idle_timeout_s;  ///< SSE idle timeout
         int      request_timeout_s;      ///< non-streaming timeout

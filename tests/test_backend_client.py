@@ -249,3 +249,40 @@ class TimeoutResolutionTest(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class NestedDoneUnwrapTest(unittest.TestCase):
+    """Backend <= v0.1.0 nested the CopperResponse under data["plan"] in the
+    `done` event. The client unwraps it (mirroring copper_chat_panel.cpp)."""
+
+    def setUp(self):
+        self.stub = StubBackend()
+        self.client = BackendClient(self.stub, Settings(api_url="https://example.test",
+                                                        saved_token="abc"))
+
+    def test_nested_done_payload_is_unwrapped(self):
+        inner = {
+            "protocol_version": 1,
+            "success": True,
+            "intent": "generate",
+            "message": "Compiled board",
+            "operations": [
+                {"type": "PLACE_COMPONENT",
+                 "data": {"lib_id": "Device:R", "reference": "R1", "value": "10k",
+                          "x": 2540000, "y": 2540000, "rotation": 0.0}},
+            ],
+            "plan": {"steps": [{"index": 0, "description": "Place R1"}],
+                     "placement_info": ""},
+            "erc": None,
+            "error": "",
+        }
+        nested = {"type": "done", "plan": inner}
+        self.stub.program_sse_text(
+            "event: done\ndata: " + json.dumps(nested) + "\n\n")
+
+        events = list(self.client.generate("a resistor"))
+        dones = [e for e in events if isinstance(e, Done)]
+        self.assertEqual(len(dones), 1)
+        self.assertTrue(dones[0].response.success)
+        self.assertEqual(len(dones[0].response.operations), 1)
+        self.assertEqual(dones[0].response.operations[0].data["reference"], "R1")

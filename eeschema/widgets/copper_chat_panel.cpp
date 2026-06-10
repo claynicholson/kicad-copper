@@ -38,6 +38,9 @@
 #include <sch_commit.h>
 
 #include <wx/dcbuffer.h>
+#include <wx/msgdlg.h>
+#include <wx/textdlg.h>
+#include <wx/utils.h>
 #include <wx/wrapsizer.h>
 
 #include <set>
@@ -93,12 +96,17 @@ COPPER_CHAT_PANEL::COPPER_CHAT_PANEL( wxWindow* aParent, SCH_EDIT_FRAME* aFrame 
     // Build empty state (shown initially)
     buildEmptyState();
 
-    // Initialize auth
+    // Initialize auth. ADR-005 resolution order: env > settings > default.
     EESCHEMA_SETTINGS* cfg = dynamic_cast<EESCHEMA_SETTINGS*>( m_frame->config() );
-    std::string apiUrl = "https://api.copper.dev";
+    std::string apiUrl = "https://api.coppereda.com";
 
-    if( cfg )
+    if( cfg && !cfg->m_Copper.api_url.IsEmpty() )
         apiUrl = cfg->m_Copper.api_url.ToStdString();
+
+    wxString envUrl;
+
+    if( wxGetEnv( wxS( "COPPER_API_URL" ), &envUrl ) && !envUrl.IsEmpty() )
+        apiUrl = std::string( envUrl.ToUTF8() );
 
     m_auth = std::make_unique<COPPER::AUTH>( apiUrl );
 
@@ -277,7 +285,43 @@ void COPPER_CHAT_PANEL::onLoginClicked( wxCommandEvent& aEvent )
 
 void COPPER_CHAT_PANEL::onSettingsClicked( wxCommandEvent& aEvent )
 {
-    // TODO: Show Copper settings dialog (API URL, etc.)
+    // Closes gap G-SETTINGS (docs/INTEGRATION_V1_AUDIT.md): edit the backend
+    // API URL and persist it to EESCHEMA_SETTINGS::m_Copper.api_url.
+    // Note: the COPPER_API_URL env var still overrides this at startup
+    // (ADR-005 resolution order: env > settings > default).
+    wxString current = wxString::FromUTF8( m_auth->GetApiUrl() );
+
+    wxTextEntryDialog dlg( this,
+                           wxT( "Copper backend API URL:" ),
+                           wxT( "Copper Settings" ),
+                           current );
+
+    if( dlg.ShowModal() != wxID_OK )
+        return;
+
+    wxString url = dlg.GetValue().Trim().Trim( false );
+
+    if( url.IsEmpty() )
+        return;
+
+    if( !url.StartsWith( wxT( "http://" ) ) && !url.StartsWith( wxT( "https://" ) ) )
+    {
+        wxMessageBox( wxT( "The API URL must start with http:// or https://" ),
+                      wxT( "Copper Settings" ), wxICON_ERROR | wxOK, this );
+        return;
+    }
+
+    // Strip any trailing slash so endpoint paths concatenate cleanly.
+    while( url.EndsWith( wxT( "/" ) ) )
+        url.RemoveLast();
+
+    EESCHEMA_SETTINGS* cfg = dynamic_cast<EESCHEMA_SETTINGS*>( m_frame->config() );
+
+    if( cfg )
+        cfg->m_Copper.api_url = url;
+
+    m_auth->SetApiUrl( std::string( url.ToUTF8() ) );
+    addAIMessage( wxString::Format( wxT( "Backend URL set to %s" ), url ) );
 }
 
 
@@ -635,6 +679,15 @@ void COPPER_CHAT_PANEL::handleSSEEvent( const COPPER::SSEEvent& aEvent )
     else if( aEvent.event == "done" )
     {
         nlohmann::json data = aEvent.dataAsJson();
+
+        // Defensive parsing (PROTOCOL.md says data is a flattened
+        // CopperResponse, but backend v0.1.0 nested it under "plan").
+        if( !data.contains( "operations" ) && data.contains( "plan" )
+                && data["plan"].is_object() && data["plan"].contains( "operations" ) )
+        {
+            data = data["plan"];
+        }
+
         COPPER::CopperResponse resp = COPPER::CopperResponse::fromJson( data );
         handleResponse( resp );
 

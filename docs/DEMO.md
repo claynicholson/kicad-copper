@@ -10,7 +10,7 @@ final safety net — not a harness gate.
   [eeschema/CMakeLists.txt](../eeschema/CMakeLists.txt) and the §0 audit
   notes in [FORK_SURFACE.md](FORK_SURFACE.md) §8).
 - A reachable Copper backend:
-  - hosted: `https://api.copper.dev` (default)
+  - hosted: `https://api.coppereda.com` (default)
   - local self-host: e.g. `http://localhost:8000`
 - An OAuth account, OR `COPPER_API_TOKEN` env var for dev (logs a warning
   per ADR-005).

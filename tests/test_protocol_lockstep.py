@@ -62,24 +62,31 @@ class CopperBuildToApplyEngineTest(unittest.TestCase):
     FIXTURE_NAME = "rp2040_min.yaml"
 
     def _build_apply_plan(self, tmpdir: Path) -> dict:
-        """Invoke `python -m copper.cli build <fixture> -o <tmp> --emit apply-plan`
-        and return the parsed apply-plan.json."""
+        """Invoke `node dist/cli.js build <fixture> -o <tmp> --emit apply-plan`
+        (the TS compiler — the python CLI was removed when copper-2 was ported
+        to TypeScript) and return the parsed apply-plan.json."""
         fixture_path = COPPER_REPO / "fixtures" / self.FIXTURE_NAME
         self.assertTrue(fixture_path.exists(), f"fixture not found: {fixture_path}")
 
+        cli_path = COPPER_REPO / "dist" / "cli.js"
+        self.assertTrue(
+            cli_path.exists(),
+            f"compiled CLI not found at {cli_path} — run `npm run build` in copper-2",
+        )
+
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "node not found on PATH")
+
         out_dir = tmpdir / "out"
-        # Run in copper-2's directory so module discovery + library loading work.
-        env = dict(os.environ)
-        env["PYTHONPATH"] = str(COPPER_REPO)
+        # Run in copper-2's directory so library loading works.
         r = subprocess.run(
             [
-                sys.executable, "-m", "copper.cli",
+                node, str(cli_path),
                 "build", str(fixture_path),
                 "-o", str(out_dir),
                 "--emit", "apply-plan",
             ],
             cwd=str(COPPER_REPO),
-            env=env,
             capture_output=True, text=True, timeout=60,
         )
         if r.returncode != 0:

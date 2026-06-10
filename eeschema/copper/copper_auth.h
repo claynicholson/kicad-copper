@@ -53,7 +53,7 @@ namespace COPPER
 class AUTH : public wxEvtHandler
 {
 public:
-    AUTH( const std::string& aApiUrl = "https://api.copper.dev" );
+    AUTH( const std::string& aApiUrl = "https://api.coppereda.com" );
     ~AUTH() override;
 
     /// Start the OAuth login flow (opens browser)
@@ -103,6 +103,7 @@ private:
     void fetchUserProfile();
 
     std::string    m_apiUrl;
+    std::string    m_envToken;   ///< COPPER_API_TOKEN dev override (ADR-005)
     std::string    m_userEmail;
     wxEvtHandler*  m_eventSink = nullptr;
 

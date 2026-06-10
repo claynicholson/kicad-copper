@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-DEFAULT_API_URL = "https://api.copper.dev"
+DEFAULT_API_URL = "https://api.coppereda.com"
 
 
 @dataclass

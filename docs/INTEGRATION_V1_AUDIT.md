@@ -109,7 +109,7 @@ would compile if the field existed; today it would not compile). Settings
 dialog handler is a TODO. **Gap G-SETTINGS.**
 - **What's missing:**
   - Add `EESCHEMA_SETTINGS::m_Copper { wxString api_url; }` (default
-    `"https://api.copper.dev"`) with JSON param binding.
+    `"https://api.coppereda.com"`) with JSON param binding.
   - Wire `onSettingsClicked` to a small `wxDialog` that edits this field.
   - Honor `COPPER_API_URL` env var as override (for self-host / local dev).
 - **Closes:** M4.

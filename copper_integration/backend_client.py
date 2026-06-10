@@ -300,6 +300,15 @@ class BackendClient:
                     placement_info=data.get("placement_info", ""),
                 )
             elif ev_type == "done":
+                # Defensive unwrap (mirrors copper_chat_panel.cpp): PROTOCOL.md
+                # says done data is a flattened CopperResponse, but backend
+                # <= v0.1.0 nested it under a "plan" key.
+                if (
+                    "operations" not in data
+                    and isinstance(data.get("plan"), dict)
+                    and "operations" in data["plan"]
+                ):
+                    data = data["plan"]
                 try:
                     validated = validate_response(data)
                 except ValidationError as ve:
