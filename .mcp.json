@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "copper-libs": {
+      "command": "node",
+      "args": ["mcp/copper-libs/server.mjs"]
+    }
+  }
+}
