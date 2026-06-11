@@ -980,6 +980,22 @@ wxString COPPER_CHAT_PANEL::getCurrentMode() const
 //  Schematic Context Extraction (replaces sidecar/context.py)
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Protocol coordinates are nanometers (ADR-006, PROTOCOL.md); eeschema
+// internal units are 100 nm (SCH_IU_PER_MM = 1e4). Convert at the boundary —
+// using nm as IU places everything 100x off the sheet.
+constexpr int SCH_NM_PER_IU = 100;
+
+static inline int nmToIu( long long aNm )
+{
+    return static_cast<int>( aNm / SCH_NM_PER_IU );
+}
+
+static inline VECTOR2I iuToNm( const VECTOR2I& aIu )
+{
+    return VECTOR2I( aIu.x * SCH_NM_PER_IU, aIu.y * SCH_NM_PER_IU );
+}
+
+
 COPPER::SchematicContext COPPER_CHAT_PANEL::ExtractContext()
 {
     COPPER::SchematicContext ctx;
@@ -1022,7 +1038,7 @@ COPPER::SchematicContext COPPER_CHAT_PANEL::ExtractContext()
             comp.value = sym->GetField( FIELD_T::VALUE )->GetText().ToStdString();
             // UTF8 has implicit `operator const std::string&` — no ToStdString() needed.
             comp.lib_id = sym->GetLibId().Format();
-            comp.position = sym->GetPosition();
+            comp.position = iuToNm( sym->GetPosition() );
             comp.rotation = sym->GetOrientation() * 90.0;
             ctx.components.push_back( comp );
             break;
@@ -1084,28 +1100,30 @@ COPPER::SchematicContext COPPER_CHAT_PANEL::ExtractContext()
         }
     }
 
-    // Bounding box
+    // Bounding box (bbox is IU; the protocol wants nm)
     if( bboxInit )
     {
-        ctx.bounding_box_min = bbox.GetOrigin();
-        ctx.bounding_box_max = bbox.GetEnd();
+        ctx.bounding_box_min = iuToNm( bbox.GetOrigin() );
+        ctx.bounding_box_max = iuToNm( bbox.GetEnd() );
     }
 
-    // Compute next free position (to the right of existing content, grid-aligned)
-    int gridNm = 2540000;  // 2.54mm = 100mil grid
+    // Compute next free position (to the right of existing content,
+    // grid-aligned). Grid math in IU, converted to nm at the end.
+    constexpr int gridIu = 25400;     // 2.54mm = 100mil grid, in IU
+    constexpr int gridNm = 2540000;   // same grid in protocol nm
 
     if( bboxInit )
     {
-        int freeX = bbox.GetRight() + gridNm * 10;  // 10 grid units right of content
+        int freeX = bbox.GetRight() + gridIu * 10;  // 10 grid units right of content
         int freeY = bbox.GetOrigin().y;
         // Snap to grid
-        freeX = ( freeX / gridNm ) * gridNm;
-        freeY = ( freeY / gridNm ) * gridNm;
-        ctx.free_position = VECTOR2I( freeX, freeY );
+        freeX = ( freeX / gridIu ) * gridIu;
+        freeY = ( freeY / gridIu ) * gridIu;
+        ctx.free_position = iuToNm( VECTOR2I( freeX, freeY ) );
     }
     else
     {
-        // Empty schematic — start near center
+        // Empty schematic — start near the center of an A4 sheet (nm)
         ctx.free_position = VECTOR2I( gridNm * 40, gridNm * 30 );
     }
 
@@ -1293,8 +1311,8 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
             std::string libIdStr = op.data.value( "lib_id", "" );
             std::string ref = op.data.value( "reference", "" );
             std::string val = op.data.value( "value", "" );
-            int posX = op.data.value( "x", 0 );
-            int posY = op.data.value( "y", 0 );
+            int posX = nmToIu( op.data.value( "x", 0LL ) );
+            int posY = nmToIu( op.data.value( "y", 0LL ) );
 
             LIB_ID libId;
             libId.Parse( wxString::FromUTF8( libIdStr ) );
@@ -1331,10 +1349,10 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
         }
         else if( op.type == "ADD_WIRE" )
         {
-            int startX = op.data.value( "start_x", 0 );
-            int startY = op.data.value( "start_y", 0 );
-            int endX = op.data.value( "end_x", 0 );
-            int endY = op.data.value( "end_y", 0 );
+            int startX = nmToIu( op.data.value( "start_x", 0LL ) );
+            int startY = nmToIu( op.data.value( "start_y", 0LL ) );
+            int endX = nmToIu( op.data.value( "end_x", 0LL ) );
+            int endY = nmToIu( op.data.value( "end_y", 0LL ) );
 
             SCH_LINE* wire = new SCH_LINE( VECTOR2I( startX, startY ), LAYER_WIRE );
             wire->SetEndPoint( VECTOR2I( endX, endY ) );
@@ -1343,8 +1361,8 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
         else if( op.type == "ADD_LABEL" )
         {
             std::string name = op.data.value( "name", "" );
-            int posX = op.data.value( "x", 0 );
-            int posY = op.data.value( "y", 0 );
+            int posX = nmToIu( op.data.value( "x", 0LL ) );
+            int posY = nmToIu( op.data.value( "y", 0LL ) );
             std::string labelType = op.data.value( "label_type", "local" );
 
             SCH_LABEL_BASE* label = nullptr;
@@ -1360,8 +1378,8 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
         }
         else if( op.type == "ADD_JUNCTION" )
         {
-            int posX = op.data.value( "x", 0 );
-            int posY = op.data.value( "y", 0 );
+            int posX = nmToIu( op.data.value( "x", 0LL ) );
+            int posY = nmToIu( op.data.value( "y", 0LL ) );
 
             SCH_JUNCTION* junction = new SCH_JUNCTION( VECTOR2I( posX, posY ) );
             commit.Add( junction, screen );
@@ -1369,8 +1387,8 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
         else if( op.type == "ADD_POWER_SYMBOL" )
         {
             std::string netName = op.data.value( "net_name", "" );
-            int posX = op.data.value( "x", 0 );
-            int posY = op.data.value( "y", 0 );
+            int posX = nmToIu( op.data.value( "x", 0LL ) );
+            int posY = nmToIu( op.data.value( "y", 0LL ) );
 
             // Power symbols are SCH_SYMBOLs from the power library
             LIB_ID libId;
