@@ -175,6 +175,9 @@ class ProtocolVersionAgreesTest(unittest.TestCase):
         DISPATCHED = {
             "PLACE_COMPONENT", "ADD_WIRE", "ADD_LABEL",
             "ADD_JUNCTION", "ADD_POWER_SYMBOL",
+            # Dispatched as harness no-ops: ADD_PIN_LABEL needs real library
+            # pin geometry (C++ client only); PLACEMENT_HINTS is advisory.
+            "ADD_PIN_LABEL", "PLACEMENT_HINTS",
         }
         unknown = set(OP_TYPE_NAMES) - DISPATCHED
         self.assertFalse(

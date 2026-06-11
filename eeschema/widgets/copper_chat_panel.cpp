@@ -19,6 +19,7 @@
 
 #include <widgets/copper_chat_panel.h>
 #include <widgets/copper_chat_widgets.h>
+#include <widgets/copper_placement.h>
 #include <copper/copper_auth.h>
 #include <copper/copper_client.h>
 #include <copper/copper_types.h>
@@ -1466,6 +1467,11 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
                 return;
             }
         }
+        else if( op.type == "PLACEMENT_HINTS" )
+        {
+            // Advisory: semantic placement hints consumed by RefinePlacement.
+            // Never schematic-mutating, so nothing to validate.
+        }
         else
         {
             addAIMessage( wxString::Format(
@@ -1475,6 +1481,26 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
         }
     }
 
+    // ── Client-side placement refinement (PLACEMENT_HINTS) ──
+    // The backend's coordinates come from auto-laid-out symbol stand-ins;
+    // rewrite them here against the REAL library geometry before committing.
+    std::vector<COPPER::Operation> ops = aOperations;
+
+    int refined = COPPER_PLACEMENT::RefinePlacement( ops,
+            [this]( const wxString& aLibIdStr ) -> LIB_SYMBOL*
+            {
+                LIB_ID id;
+
+                if( id.Parse( aLibIdStr ) >= 0 )
+                    return nullptr;
+
+                return resolveLibSymbol( id );
+            } );
+
+    if( COPPER::DebugEnabled() )
+        COPPER::DebugLog( "ExecuteOperations: RefinePlacement rewrote "
+                          + std::to_string( refined ) + " placement(s)" );
+
     // Create a commit for undo support
     SCH_COMMIT commit( m_frame );
 
@@ -1482,7 +1508,7 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
     // pin positions without searching the screen.
     std::map<wxString, SCH_SYMBOL*> placedByRef;
 
-    for( const auto& op : aOperations )
+    for( const auto& op : ops )
     {
         if( op.type == "PLACE_COMPONENT" )
         {

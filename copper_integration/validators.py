@@ -36,9 +36,11 @@ from copper.protocol.apply_plan import (  # noqa: E402
     ApplyPlan as _PydApplyPlan,
     AddJunction as _PydAddJunction,
     AddLabel as _PydAddLabel,
+    AddPinLabel as _PydAddPinLabel,
     AddPowerSymbol as _PydAddPowerSymbol,
     AddWire as _PydAddWire,
     PlaceComponent as _PydPlaceComponent,
+    PlacementHints as _PydPlacementHints,
 )
 from pydantic import ValidationError as _PydValidationError  # noqa: E402
 
@@ -94,6 +96,8 @@ _PYD_BY_TYPE = {
     "ADD_LABEL": _PydAddLabel,
     "ADD_JUNCTION": _PydAddJunction,
     "ADD_POWER_SYMBOL": _PydAddPowerSymbol,
+    "ADD_PIN_LABEL": _PydAddPinLabel,
+    "PLACEMENT_HINTS": _PydPlacementHints,
 }
 
 

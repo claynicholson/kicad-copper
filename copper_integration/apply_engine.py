@@ -222,6 +222,13 @@ class ApplyEngine:
             api.add_junction(token, d)
         elif t == "ADD_POWER_SYMBOL":
             api.add_power_symbol(token, d)
+        elif t == "ADD_PIN_LABEL":
+            # Pin-anchored labels need real library pin geometry, which only
+            # the C++ client has. The harness validates but does not apply.
+            pass
+        elif t == "PLACEMENT_HINTS":
+            # Advisory placement hints — never schematic-mutating.
+            pass
         else:  # pragma: no cover — validator should have caught this
             raise SchematicError(f"unknown op type {t!r} at index {op_index}")
 

@@ -271,6 +271,40 @@ KiCad library symbols, so emitted wire/label coordinates landed in empty
 space. Pin-anchored ops make the plugin the geometry authority. All nets are
 global by name; no `ADD_WIRE` ops are needed for connectivity.
 
+### `PLACEMENT_HINTS`
+```json
+{
+  "type": "PLACEMENT_HINTS",
+  "data": {
+    "clusters": [
+      { "module_id": "U1", "role": "mcu", "anchor_ref": "U1",
+        "refs": ["C1", "U1", "Y1"], "flow_rank": 2 }
+    ],
+    "attachments": [
+      { "ref": "C1", "to_ref": "U1", "to_pin": "IOVDD", "kind": "decap" }
+    ]
+  }
+}
+```
+
+Advisory, never schematic-mutating, at most one per plan (emitted first).
+The same split as `ADD_PIN_LABEL`: the backend compiles *meaning*, the
+client compiles *geometry*. The plugin's refinement pass
+(`copper_placement.cpp`) rewrites `PLACE_COMPONENT` coordinates against the
+real library bboxes/pins before committing:
+
+- `clusters[*].role`: one of `mcu | power | connector | peripheral |
+  passive | other`. `flow_rank` orders left→right signal-flow columns
+  (power 0, connector 1, mcu 2, peripherals 3). `anchor_ref` is the
+  cluster's biggest part; support parts pack in a grid beside it.
+- `attachments[*].kind`: `decap | pullup | pulldown | series`. The `ref`
+  part is pulled out of cluster packing and parked one grid step off its
+  host's REAL pin (`to_ref`/`to_pin`, matched with the `ADD_PIN_LABEL`
+  rules), so decoupling caps hug the power pins they serve.
+
+Clients that don't understand the op skip it and keep the backend's
+fallback `PLACE_COMPONENT` coordinates. Backends MAY omit it entirely.
+
 ## Response validation (plugin-side, before apply)
 
 Hard rejects (apply nothing, surface error):
@@ -288,6 +322,9 @@ Hard rejects (apply nothing, surface error):
 11. Any `ADD_PIN_LABEL` with empty `reference`/`pin`/`net_name`, or `style`
     not in {global, power}. At apply time: unresolvable reference or pin →
     whole plan discarded (fail-closed).
+
+(`PLACEMENT_HINTS` is never a hard reject: it is advisory and validated
+loosely; malformed hints degrade to the backend's coordinate fallback.)
 
 Soft warnings (apply with a banner):
 - `protocol_version == 1` and unknown fields present → log + accept.

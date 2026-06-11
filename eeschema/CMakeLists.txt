@@ -506,6 +506,7 @@ set( EESCHEMA_SRCS
     copper/copper_client.cpp
     widgets/copper_chat_widgets.cpp
     widgets/copper_chat_panel.cpp
+    widgets/copper_placement.cpp
     api/http_bridge.cpp
     )
 
