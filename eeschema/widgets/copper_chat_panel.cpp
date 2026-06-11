@@ -36,6 +36,9 @@
 #include <eeschema_settings.h>
 #include <connection_graph.h>
 #include <sch_commit.h>
+#include <project_sch.h>
+#include <libraries/symbol_library_adapter.h>
+#include <magic_enum.hpp>
 #include <tool/tool_manager.h>
 #include <tool/actions.h>
 
@@ -1148,6 +1151,75 @@ COPPER::SchematicContext COPPER_CHAT_PANEL::ExtractContext()
 //  Action Execution (Phase 2f)
 // ═══════════════════════════════════════════════════════════════════════════
 
+LIB_SYMBOL* COPPER_CHAT_PANEL::resolveLibSymbol( const LIB_ID& aLibId )
+{
+    if( LIB_SYMBOL* sym = m_frame->GetLibSymbol( aLibId ) )
+        return sym;
+
+    // GetLibSymbol only serves libraries the async preload already loaded
+    // (fetchIfLoaded). If the preload raced the global-table load (or never
+    // ran), every library reports "Library not found in library table" and
+    // every lookup fails. Force a synchronous load of just this library,
+    // then retry.
+    wxString nickname = aLibId.GetLibNickname();
+    SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &m_frame->Prj() );
+
+    if( !adapter )
+        return nullptr;
+
+    std::optional<LIB_STATUS> status = adapter->LoadOne( nickname );
+
+    if( COPPER::DebugEnabled() )
+    {
+        std::string msg = "resolveLibSymbol: forced LoadOne(" + std::string( nickname.ToUTF8() ) + ") -> ";
+
+        if( status )
+        {
+            msg += std::string( magic_enum::enum_name( status->load_status ) );
+
+            if( status->error )
+                msg += " error=" + std::string( status->error->message.ToUTF8() );
+        }
+        else
+        {
+            msg += "nullopt";
+        }
+
+        COPPER::DebugLog( msg );
+
+        // One-time dump of the overall library state for diagnosis.
+        static bool dumped = false;
+
+        if( !dumped )
+        {
+            dumped = true;
+
+            wxString envDir;
+            wxGetEnv( wxT( "KICAD10_SYMBOL_DIR" ), &envDir );
+            COPPER::DebugLog( "lib-diag: KICAD10_SYMBOL_DIR=" + std::string( envDir.ToUTF8() ) );
+
+            int loaded = 0, errored = 0, other = 0;
+
+            for( const auto& [nick, st] : adapter->GetLibraryStatuses() )
+            {
+                if( st.load_status == LOAD_STATUS::LOADED )
+                    loaded++;
+                else if( st.load_status == LOAD_STATUS::LOAD_ERROR )
+                    errored++;
+                else
+                    other++;
+            }
+
+            COPPER::DebugLog( "lib-diag: statuses loaded=" + std::to_string( loaded )
+                              + " error=" + std::to_string( errored )
+                              + " other=" + std::to_string( other ) );
+        }
+    }
+
+    return m_frame->GetLibSymbol( aLibId );
+}
+
+
 void COPPER_CHAT_PANEL::ExecuteOperations(
         const std::vector<COPPER::Operation>& aOperations )
 {
@@ -1319,7 +1391,7 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
 
             // Load the symbol from library — if it's missing we cannot
             // safely partial-apply (ADR-004). Discard the commit and surface.
-            LIB_SYMBOL* libSym = m_frame->GetLibSymbol( libId );
+            LIB_SYMBOL* libSym = resolveLibSymbol( libId );
 
             if( !libSym )
             {
@@ -1395,7 +1467,7 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
             libId.Parse( wxString::Format( wxT( "power:%s" ),
                                            wxString::FromUTF8( netName ) ) );
 
-            LIB_SYMBOL* libSym = m_frame->GetLibSymbol( libId );
+            LIB_SYMBOL* libSym = resolveLibSymbol( libId );
 
             if( !libSym )
             {

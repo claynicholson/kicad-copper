@@ -33,6 +33,8 @@
 #include <string>
 
 class SCH_EDIT_FRAME;
+class LIB_ID;
+class LIB_SYMBOL;
 class COPPER_STAGE_PANEL;
 class COPPER_DESIGN_FORM;
 class COPPER_THINKING_INDICATOR;
@@ -123,6 +125,11 @@ private:
 
     /// Remove the form from the message area without submitting.
     void destroyDesignForm();
+
+    /// Resolve a LIB_ID to a LIB_SYMBOL, forcing a synchronous library load
+    /// if the async preload missed it (see "Library not found in library
+    /// table" flood). Returns nullptr only if the symbol truly cannot load.
+    LIB_SYMBOL* resolveLibSymbol( const LIB_ID& aLibId );
 
     // ── API interaction ──
     void sendRequest( const wxString& aPrompt );

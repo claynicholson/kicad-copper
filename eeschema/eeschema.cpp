@@ -584,6 +584,21 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
             // Collect library load errors for async reporting
             wxString errors = adapter->GetLibraryLoadErrors();
 
+            // "Library not found in library table" is the fallback status for
+            // rows that have NO load entry at all — it means AsyncLoad ran
+            // before the library tables were (re)loaded and processed nothing.
+            // Retry once: AsyncLoad skips anything already LOADED/LOADING, so
+            // this only picks up the missed rows.
+            if( errors.Contains( _( "Library not found in library table" ) ) )
+            {
+                wxLogTrace( traceLibraries,
+                            "eeschema PreloadLibraries: rows missing load entries, retrying AsyncLoad" );
+
+                adapter->AsyncLoad();
+                adapter->BlockUntilLoaded();
+                errors = adapter->GetLibraryLoadErrors();
+            }
+
             wxLogTrace( traceLibraries, "eeschema PreloadLibraries: errors.IsEmpty()=%d, length=%zu",
                         errors.IsEmpty(), errors.length() );
 
