@@ -106,6 +106,16 @@ private:
     // ── Message handling ──
     void addUserMessage( const wxString& aText );
     void addAIMessage( const wxString& aText );
+
+    /// Dim monospace activity line (claude-code-style progress log).
+    /// Painted synchronously so the user sees progress during long applies.
+    void addLogMessage( const wxString& aText );
+
+    /// Run ERC, narrate every issue into the panel log, auto-fix what we
+    /// can (unconnected pins → NC flags), repeat until clean or stuck.
+    /// Returns the number of remaining errors.
+    int runErcAutoFix();
+
     void addPlanCard( const COPPER::CopperResponse& aResponse );
     void showStages( const std::vector<std::pair<wxString, int>>& aStages );
     void updateStage( const wxString& aName, int aState );

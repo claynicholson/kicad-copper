@@ -271,6 +271,20 @@ KiCad library symbols, so emitted wire/label coordinates landed in empty
 space. Pin-anchored ops make the plugin the geometry authority. All nets are
 global by name; no `ADD_WIRE` ops are needed for connectivity.
 
+### `ADD_NO_CONNECT`
+```json
+{
+  "type": "ADD_NO_CONNECT",
+  "data": { "reference": "U1", "pin": "GPIO16" }
+}
+```
+
+Pin-anchored no-connect flag. The plugin resolves the real pin position
+(same matching rules as `ADD_PIN_LABEL`) and drops an NC cross on it. The
+backend emits one for every symbol pin that belongs to no net — clean ERC
+demands an explicit NC on every dangling pin. Fail-closed at apply time
+like `ADD_PIN_LABEL`.
+
 ### `PLACEMENT_HINTS`
 ```json
 {
@@ -323,8 +337,19 @@ Hard rejects (apply nothing, surface error):
     not in {global, power}. At apply time: unresolvable reference or pin →
     whole plan discarded (fail-closed).
 
+12. Any `ADD_NO_CONNECT` with empty `reference`/`pin`. At apply time:
+    unresolvable reference or pin → whole plan discarded (fail-closed).
+
 (`PLACEMENT_HINTS` is never a hard reject: it is advisory and validated
 loosely; malformed hints degrade to the backend's coordinate fallback.)
+
+## Post-apply ERC loop (plugin-side)
+
+After every successful apply the plugin runs a narrated ERC fix loop (max
+3 passes): run full ERC → log every error/warning into the chat panel →
+auto-fix what it can (`ERCE_PIN_NOT_CONNECTED` → NC flag at the marker) →
+re-check. Each fix pass is its own undo entry ("Copper AI: ERC auto-fix").
+Remaining issues stay as schematic markers and are summarized in the panel.
 
 Soft warnings (apply with a banner):
 - `protocol_version == 1` and unknown fields present → log + accept.

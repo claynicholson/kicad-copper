@@ -38,6 +38,10 @@
 #include <eeschema_settings.h>
 #include <connection_graph.h>
 #include <sch_commit.h>
+#include <sch_marker.h>
+#include <erc/erc.h>
+#include <erc/erc_settings.h>
+#include <kiway.h>
 #include <project_sch.h>
 #include <libraries/symbol_library_adapter.h>
 #include <magic_enum.hpp>
@@ -45,6 +49,7 @@
 #include <tool/actions.h>
 
 #include <wx/dcbuffer.h>
+#include <wx/stattext.h>
 #include <wx/tokenzr.h>
 #include <wx/msgdlg.h>
 #include <wx/textdlg.h>
@@ -498,6 +503,31 @@ void COPPER_CHAT_PANEL::addAIMessage( const wxString& aText )
     m_conversationHistory.push_back( wxT( "ai: " ) + aText );
     bumpThinkingToBottom();
     scrollToBottom();
+}
+
+
+void COPPER_CHAT_PANEL::addLogMessage( const wxString& aText )
+{
+    if( COPPER::DebugEnabled() )
+        COPPER::DebugLog( "log: " + std::string( aText.ToUTF8() ) );
+
+    clearEmptyState();
+
+    auto* line = new wxStaticText( m_scrollArea, wxID_ANY, wxT( "\u00B7 " ) + aText );
+    wxFont font = line->GetFont();
+    font.SetFamily( wxFONTFAMILY_TELETYPE );
+    font.SetPointSize( std::max( 7, font.GetPointSize() - 1 ) );
+    line->SetFont( font );
+    line->SetForegroundColour( wxColour( 140, 140, 140 ) );
+
+    m_messageSizer->Add( line, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP( 14 ) );
+
+    bumpThinkingToBottom();
+    scrollToBottom();
+
+    // Apply + ERC run synchronously on the UI thread — force an immediate
+    // repaint so the log actually streams instead of appearing all at once.
+    m_scrollArea->Update();
 }
 
 
@@ -1467,6 +1497,16 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
                 return;
             }
         }
+        else if( op.type == "ADD_NO_CONNECT" )
+        {
+            if( op.data.value( "reference", std::string() ).empty()
+                || op.data.value( "pin", std::string() ).empty() )
+            {
+                addAIMessage( wxT( "Plan rejected: ADD_NO_CONNECT missing "
+                                   "reference/pin. Nothing applied." ) );
+                return;
+            }
+        }
         else if( op.type == "PLACEMENT_HINTS" )
         {
             // Advisory: semantic placement hints consumed by RefinePlacement.
@@ -1486,6 +1526,10 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
     // rewrite them here against the REAL library geometry before committing.
     std::vector<COPPER::Operation> ops = aOperations;
 
+    addLogMessage( wxString::Format( wxT( "validate: %zu operation(s) passed "
+                                          "fail-closed checks" ),
+                                     aOperations.size() ) );
+
     int refined = COPPER_PLACEMENT::RefinePlacement( ops,
             [this]( const wxString& aLibIdStr ) -> LIB_SYMBOL*
             {
@@ -1500,6 +1544,33 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
     if( COPPER::DebugEnabled() )
         COPPER::DebugLog( "ExecuteOperations: RefinePlacement rewrote "
                           + std::to_string( refined ) + " placement(s)" );
+
+    if( refined > 0 )
+        addLogMessage( wxString::Format( wxT( "placement: refined %d position(s) "
+                                              "against real library geometry" ),
+                                         refined ) );
+    else
+        addLogMessage( wxT( "placement: no hints in plan — using backend "
+                            "coordinates" ) );
+
+    {
+        size_t nSym = 0, nLbl = 0, nPwr = 0, nNc = 0;
+
+        for( const auto& op : ops )
+        {
+            if( op.type == "PLACE_COMPONENT" )
+                nSym++;
+            else if( op.type == "ADD_PIN_LABEL" )
+                op.data.value( "style", "global" ) == "power" ? nPwr++ : nLbl++;
+            else if( op.type == "ADD_NO_CONNECT" )
+                nNc++;
+        }
+
+        addLogMessage( wxString::Format( wxT( "apply: %zu symbol(s), %zu net "
+                                              "label(s), %zu power pin(s), %zu "
+                                              "no-connect(s)" ),
+                                         nSym, nLbl, nPwr, nNc ) );
+    }
 
     // Create a commit for undo support
     SCH_COMMIT commit( m_frame );
@@ -1638,18 +1709,10 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
                 SCH_SYMBOL* powerSym = new SCH_SYMBOL( *libSym, powerId, &sheet, 0 );
                 powerSym->SetPosition( pinPos );
 
-                // Rotate the power symbol away from the host pin (its own pin
-                // sits at the symbol origin, so rotation never moves the
-                // connection point). Default orientation hangs downward,
-                // which already suits pins that point down.
-                switch( pin->GetOrientation() )
-                {
-                case PIN_ORIENTATION::PIN_UP:    powerSym->SetOrientation( SYM_ORIENT_180 ); break;
-                case PIN_ORIENTATION::PIN_LEFT:  powerSym->SetOrientation( SYM_ORIENT_90 );  break;
-                case PIN_ORIENTATION::PIN_RIGHT: powerSym->SetOrientation( SYM_ORIENT_270 ); break;
-                default: break;
-                }
-
+                // NEVER rotate power symbols: the library defaults already
+                // encode the human convention (GND hangs down, +rails point
+                // up). The symbol's own pin sits at its origin, so the
+                // connection point stays exactly on the host pin regardless.
                 commit.Add( powerSym, screen );
             }
             else
@@ -1669,6 +1732,53 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
 
                 commit.Add( label, screen );
             }
+        }
+        else if( op.type == "ADD_NO_CONNECT" )
+        {
+            wxString ref = wxString::FromUTF8( op.data.value( "reference", "" ) );
+            wxString pinTok = wxString::FromUTF8( op.data.value( "pin", "" ) );
+
+            SCH_SHEET_PATH& sheet = m_frame->Schematic().CurrentSheet();
+            SCH_SYMBOL* host = nullptr;
+            auto it = placedByRef.find( ref );
+
+            if( it != placedByRef.end() )
+            {
+                host = it->second;
+            }
+            else
+            {
+                for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+                {
+                    SCH_SYMBOL* candidate = static_cast<SCH_SYMBOL*>( item );
+
+                    if( candidate->GetRef( &sheet ) == ref )
+                    {
+                        host = candidate;
+                        break;
+                    }
+                }
+            }
+
+            if( !host )
+            {
+                addAIMessage( wxString::Format(
+                    wxT( "Plan failed: no placed symbol with reference %s for "
+                         "no-connect. Nothing applied." ), ref ) );
+                return;
+            }
+
+            SCH_PIN* pin = findSymbolPin( host, sheet, pinTok );
+
+            if( !pin )
+            {
+                addAIMessage( wxString::Format(
+                    wxT( "Plan failed: pin '%s' not found on %s for "
+                         "no-connect. Nothing applied." ), pinTok, ref ) );
+                return;
+            }
+
+            commit.Add( new SCH_NO_CONNECT( pin->GetPosition() ), screen );
         }
         else if( op.type == "ADD_WIRE" )
         {
@@ -1755,6 +1865,8 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
     if( COPPER::DebugEnabled() )
         COPPER::DebugLog( "ExecuteOperations: commit pushed, refreshing canvas" );
 
+    addLogMessage( wxT( "apply: commit pushed — rebuilding connectivity" ) );
+
     // Refresh the canvas and bring the new items into view — generated
     // boards are often placed outside the current viewport, which looks
     // like "nothing happened".
@@ -1765,9 +1877,122 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
     if( TOOL_MANAGER* mgr = m_frame->GetToolManager() )
         mgr->RunAction( ACTIONS::zoomFitScreen );
 
-    addAIMessage( wxString::Format( wxT( "Applied %zu operation(s). "
-                                         "Press Ctrl-Z to undo." ),
-                                    aOperations.size() ) );
+    // ── Post-apply ERC: check, narrate, auto-fix, repeat ──
+    int remainingErrors = runErcAutoFix();
+
+    if( remainingErrors == 0 )
+    {
+        addAIMessage( wxString::Format( wxT( "Applied %zu operation(s) — ERC "
+                                             "clean. Press Ctrl-Z to undo." ),
+                                        aOperations.size() ) );
+    }
+    else
+    {
+        addAIMessage( wxString::Format( wxT( "Applied %zu operation(s). %d ERC "
+                                             "error(s) remain — see the log "
+                                             "above and the markers on the "
+                                             "schematic. Press Ctrl-Z to undo." ),
+                                        aOperations.size(), remainingErrors ) );
+    }
+}
+
+
+int COPPER_CHAT_PANEL::runErcAutoFix()
+{
+    if( !m_frame )
+        return 0;
+
+    SCHEMATIC& sch = m_frame->Schematic();
+    int errors = 0;
+    int warnings = 0;
+
+    constexpr int MAX_PASSES = 3;
+
+    for( int pass = 1; pass <= MAX_PASSES; ++pass )
+    {
+        addLogMessage( wxString::Format( wxT( "erc: pass %d — running electrical "
+                                              "rules check" ), pass ) );
+
+        // Clear stale markers so each pass reports current truth.
+        {
+            SCH_SCREENS screens( sch.Root() );
+            screens.DeleteAllMarkers( MARKER_BASE::MARKER_ERC, true );
+        }
+
+        ERC_TESTER tester( &sch );
+        tester.RunTests( m_frame->GetCanvas()->GetView()->GetDrawingSheet(), m_frame,
+                         m_frame->Kiway().KiFACE( KIWAY::FACE_CVPCB ), &m_frame->Prj(),
+                         nullptr );
+
+        errors = 0;
+        warnings = 0;
+        std::vector<VECTOR2I> fixablePins;
+
+        SCH_SCREENS screens( sch.Root() );
+
+        for( SCH_SCREEN* scr = screens.GetFirst(); scr; scr = screens.GetNext() )
+        {
+            for( SCH_ITEM* item : scr->Items().OfType( SCH_MARKER_T ) )
+            {
+                SCH_MARKER* marker = static_cast<SCH_MARKER*>( item );
+                std::shared_ptr<RC_ITEM> rc = marker->GetRCItem();
+
+                if( !rc )
+                    continue;
+
+                SEVERITY sev = sch.ErcSettings().GetSeverity( rc->GetErrorCode() );
+
+                if( sev == RPT_SEVERITY_IGNORE )
+                    continue;
+
+                const wxChar* sevName = ( sev == RPT_SEVERITY_ERROR ) ? wxT( "error" )
+                                                                      : wxT( "warning" );
+
+                if( sev == RPT_SEVERITY_ERROR )
+                    errors++;
+                else
+                    warnings++;
+
+                addLogMessage( wxString::Format( wxT( "erc: [%s] %s" ), sevName,
+                                                 rc->GetErrorMessage( true ) ) );
+
+                if( rc->GetErrorCode() == ERCE_PIN_NOT_CONNECTED )
+                    fixablePins.push_back( marker->GetPosition() );
+            }
+        }
+
+        if( errors == 0 && warnings == 0 )
+        {
+            addLogMessage( wxT( "erc: clean — no issues" ) );
+            break;
+        }
+
+        if( fixablePins.empty() || pass == MAX_PASSES )
+        {
+            addLogMessage( wxString::Format( wxT( "erc: %d error(s), %d warning(s) "
+                                                  "— nothing more auto-fixable" ),
+                                             errors, warnings ) );
+            break;
+        }
+
+        // Auto-fix: every unconnected pin gets an explicit no-connect flag.
+        SCH_COMMIT fixCommit( m_frame );
+
+        for( const VECTOR2I& pos : fixablePins )
+            fixCommit.Add( new SCH_NO_CONNECT( pos ), m_frame->GetScreen() );
+
+        fixCommit.Push( _( "Copper AI: ERC auto-fix" ) );
+
+        addLogMessage( wxString::Format( wxT( "erc: auto-fixed %zu unconnected "
+                                              "pin(s) with no-connect flags" ),
+                                         fixablePins.size() ) );
+
+        m_frame->RecalculateConnections( nullptr, NO_CLEANUP );
+    }
+
+    m_frame->GetCanvas()->Refresh();
+
+    return errors;
 }
 
 

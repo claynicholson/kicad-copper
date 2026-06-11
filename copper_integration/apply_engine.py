@@ -222,6 +222,10 @@ class ApplyEngine:
             api.add_junction(token, d)
         elif t == "ADD_POWER_SYMBOL":
             api.add_power_symbol(token, d)
+        elif t == "ADD_NO_CONNECT":
+            # Pin-anchored NC flag — same C++-only geometry story as
+            # ADD_PIN_LABEL below.
+            pass
         elif t == "ADD_PIN_LABEL":
             # Pin-anchored labels need real library pin geometry, which only
             # the C++ client has. The harness validates but does not apply.

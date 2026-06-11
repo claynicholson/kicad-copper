@@ -36,6 +36,7 @@ from copper.protocol.apply_plan import (  # noqa: E402
     ApplyPlan as _PydApplyPlan,
     AddJunction as _PydAddJunction,
     AddLabel as _PydAddLabel,
+    AddNoConnect as _PydAddNoConnect,
     AddPinLabel as _PydAddPinLabel,
     AddPowerSymbol as _PydAddPowerSymbol,
     AddWire as _PydAddWire,
@@ -97,6 +98,7 @@ _PYD_BY_TYPE = {
     "ADD_JUNCTION": _PydAddJunction,
     "ADD_POWER_SYMBOL": _PydAddPowerSymbol,
     "ADD_PIN_LABEL": _PydAddPinLabel,
+    "ADD_NO_CONNECT": _PydAddNoConnect,
     "PLACEMENT_HINTS": _PydPlacementHints,
 }
 
