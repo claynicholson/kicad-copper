@@ -482,6 +482,9 @@ void COPPER_CHAT_PANEL::addUserMessage( const wxString& aText )
 
 void COPPER_CHAT_PANEL::addAIMessage( const wxString& aText )
 {
+    if( COPPER::DebugEnabled() )
+        COPPER::DebugLog( "ai-msg: " + std::string( aText.ToUTF8() ) );
+
     clearEmptyState();
 
     auto* bubble = new COPPER_MESSAGE_BUBBLE( m_scrollArea, aText,
@@ -1216,20 +1219,39 @@ LIB_SYMBOL* COPPER_CHAT_PANEL::resolveLibSymbol( const LIB_ID& aLibId )
         }
     }
 
-    return m_frame->GetLibSymbol( aLibId );
+    LIB_SYMBOL* sym = m_frame->GetLibSymbol( aLibId );
+
+    if( !sym && COPPER::DebugEnabled() )
+        COPPER::DebugLog( "resolveLibSymbol: post-LoadOne lookup STILL null for "
+                          + std::string( aLibId.Format().c_str() ) );
+
+    return sym;
 }
 
 
 void COPPER_CHAT_PANEL::ExecuteOperations(
         const std::vector<COPPER::Operation>& aOperations )
 {
+    if( COPPER::DebugEnabled() )
+        COPPER::DebugLog( "ExecuteOperations: entry ops=" + std::to_string( aOperations.size() )
+                          + " frame=" + std::to_string( m_frame != nullptr ) );
+
     if( !m_frame )
         return;
 
-    SCH_SCREEN* screen = m_frame->Schematic().RootScreen();
+    // Use the screen the user is currently viewing — SCH_COMMIT only adds
+    // items to the live VIEW when the commit screen matches the frame's
+    // current screen (sch_commit.cpp pushSchEdit). Committing to RootScreen
+    // while viewing another sheet silently hides every new item.
+    SCH_SCREEN* screen = m_frame->GetScreen();
 
     if( !screen )
+    {
+        if( COPPER::DebugEnabled() )
+            COPPER::DebugLog( "ExecuteOperations: no RootScreen, bailing" );
+
         return;
+    }
 
     if( aOperations.empty() )
         return;
@@ -1395,6 +1417,10 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
 
             if( !libSym )
             {
+                if( COPPER::DebugEnabled() )
+                    COPPER::DebugLog( "ExecuteOperations: PLACE_COMPONENT symbol not found: "
+                                      + libIdStr + " — discarding commit" );
+
                 // SCH_COMMIT destructor will clean up any items we added so
                 // far. We never pushed, so the schematic is unchanged.
                 addAIMessage( wxString::Format(
@@ -1471,6 +1497,10 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
 
             if( !libSym )
             {
+                if( COPPER::DebugEnabled() )
+                    COPPER::DebugLog( "ExecuteOperations: ADD_POWER_SYMBOL not found: power:"
+                                      + netName + " — discarding commit" );
+
                 // Fail closed like PLACE_COMPONENT (ADR-004): a silently
                 // skipped power symbol leaves a net floating.
                 addAIMessage( wxString::Format(
@@ -1490,8 +1520,15 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
         }
     }
 
+    if( COPPER::DebugEnabled() )
+        COPPER::DebugLog( "ExecuteOperations: validation+build OK, pushing commit ("
+                          + std::to_string( aOperations.size() ) + " ops)" );
+
     // Push the commit (creates undo entry)
     commit.Push( _( "Copper AI: Execute plan" ) );
+
+    if( COPPER::DebugEnabled() )
+        COPPER::DebugLog( "ExecuteOperations: commit pushed, refreshing canvas" );
 
     // Refresh the canvas and bring the new items into view — generated
     // boards are often placed outside the current viewport, which looks
