@@ -1018,7 +1018,11 @@ void PGM_BASE::AddLibraryLoadMessages( const std::vector<LOAD_MESSAGE>& aMessage
         if( statusBar )
         {
             wxLogTrace( traceLibraries, "  -> forwarding to statusBar=%p", statusBar );
-            statusBar->AddWarningMessages( "load", aMessages );
+
+            // "libload" source: library load errors are cleared/re-set as a
+            // unit (here and in the MAIL_RELOAD_LIB handlers), independent of
+            // the "load" source used for document load warnings.
+            statusBar->AddWarningMessages( "libload", aMessages );
         }
     }
 }
@@ -1034,7 +1038,7 @@ void PGM_BASE::ClearLibraryLoadMessages()
     for( KISTATUSBAR* statusBar : m_libraryLoadStatusBars )
     {
         if( statusBar )
-            statusBar->ClearWarningMessages( "load" );
+            statusBar->ClearWarningMessages( "libload" );
     }
 }
 

@@ -1152,14 +1152,21 @@ void SCH_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
             SyncView();
         }
 
-        // Show any symbol library load errors in the status bar
+        // Show any symbol library load errors in the status bar. Use a
+        // dedicated source and always clear first: MAIL_RELOAD_LIB can fire
+        // while an async load is still in flight (e.g. from the design block
+        // preload), capturing a transient flood of "Library not found in
+        // library table" — the next mail after the load completes must be
+        // able to wipe that stale snapshot.
         if( KISTATUSBAR* statusBar = dynamic_cast<KISTATUSBAR*>( GetStatusBar() ) )
         {
             SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &Prj() );
             wxString errors = adapter->GetLibraryLoadErrors();
 
+            statusBar->ClearWarningMessages( "libload" );
+
             if( !errors.IsEmpty() )
-                statusBar->AddWarningMessages( "load", errors );
+                statusBar->AddWarningMessages( "libload", errors );
         }
 
         break;

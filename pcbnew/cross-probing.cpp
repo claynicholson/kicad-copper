@@ -782,14 +782,18 @@ void PCB_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
     {
         m_designBlocksPane->RefreshLibs();
 
-        // Show any footprint library load errors in the status bar
+        // Show any footprint library load errors in the status bar. Dedicated
+        // source + clear-first so a transient mid-load snapshot of fallback
+        // errors gets wiped by the next mail (see eeschema cross-probing).
         if( KISTATUSBAR* statusBar = dynamic_cast<KISTATUSBAR*>( GetStatusBar() ) )
         {
             FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &Prj() );
             wxString errors = adapter->GetLibraryLoadErrors();
 
+            statusBar->ClearWarningMessages( "libload" );
+
             if( !errors.IsEmpty() )
-                statusBar->AddWarningMessages( "load", errors );
+                statusBar->AddWarningMessages( "libload", errors );
         }
 
         break;
