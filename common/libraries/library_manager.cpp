@@ -48,6 +48,39 @@ struct LIBRARY_MANAGER_INTERNALS
 };
 
 
+// Env-gated file tracing (COPPER_DEBUG=1): wxLogTrace output is unreachable in
+// release GUI builds on Windows, so mirror key library-load events to the same
+// log the Copper panel uses (%TEMP%/copper_debug.log).
+static void copperLibTrace( const wxString& aMsg )
+{
+    static const bool enabled = []()
+    {
+        const char* v = std::getenv( "COPPER_DEBUG" );
+        return v && *v && std::strcmp( v, "0" ) != 0;
+    }();
+
+    if( !enabled )
+        return;
+
+    static std::mutex mtx;
+    std::lock_guard<std::mutex> lock( mtx );
+
+    const char* tmp = std::getenv( "TEMP" );
+
+    if( !tmp )
+        tmp = std::getenv( "TMP" );
+
+    if( !tmp )
+        return;
+
+    if( FILE* f = fopen( ( std::string( tmp ) + "/copper_debug.log" ).c_str(), "a" ) )
+    {
+        fprintf( f, "[libmgr] %s\n", static_cast<const char*>( aMsg.ToUTF8() ) );
+        fclose( f );
+    }
+}
+
+
 LIBRARY_MANAGER::LIBRARY_MANAGER()
 {
 }
@@ -108,10 +141,18 @@ void LIBRARY_MANAGER::loadTables( const wxString& aTablePath, LIBRARY_TABLE_SCOP
 
             aTarget[type] = std::move( table );
             loadNestedTables( *aTarget[type] );
+
+            copperLibTrace( wxString::Format( "loadTables: %s (%s) loaded from %s: ok=%d rows=%zu",
+                                              magic_enum::enum_name( type ).data(),
+                                              magic_enum::enum_name( aScope ).data(),
+                                              fn.GetFullPath(),
+                                              aTarget[type]->IsOk(),
+                                              aTarget[type]->Rows().size() ) );
         }
         else
         {
             wxLogTrace( traceLibraries, "No library table found at %s", fn.GetFullPath() );
+            copperLibTrace( wxString::Format( "loadTables: NO table at %s", fn.GetFullPath() ) );
         }
     }
 }
@@ -967,6 +1008,9 @@ void LIBRARY_MANAGER_ADAPTER::GlobalTablesChanged( std::initializer_list<LIBRARY
     if( !me )
         return;
 
+    copperLibTrace( wxString::Format( "GlobalTablesChanged(%s): aborting load + clearing global libs",
+                                      magic_enum::enum_name( Type() ).data() ) );
+
     abortLoad();
 
     {
@@ -1586,7 +1630,11 @@ void LIBRARY_MANAGER_ADAPTER::AsyncLoad()
     std::unique_lock<std::mutex> asyncLock( m_loadMutex, std::try_to_lock );
 
     if( !asyncLock )
+    {
+        copperLibTrace( wxString::Format( "AsyncLoad(%s): m_loadMutex busy, bailing",
+                                          magic_enum::enum_name( Type() ).data() ) );
         return;
+    }
 
     std::erase_if( m_futures,
                    []( std::future<void>& aFuture )
@@ -1598,10 +1646,15 @@ void LIBRARY_MANAGER_ADAPTER::AsyncLoad()
     if( !m_futures.empty() )
     {
         wxLogTrace( traceLibraries, "Cannot AsyncLoad, futures from a previous call remain!" );
+        copperLibTrace( wxString::Format( "AsyncLoad(%s): %zu unfinished futures remain, bailing",
+                                          magic_enum::enum_name( Type() ).data(), m_futures.size() ) );
         return;
     }
 
     std::vector<LIBRARY_TABLE_ROW*> rows = m_manager.Rows( Type() );
+
+    copperLibTrace( wxString::Format( "AsyncLoad(%s): %zu rows in tables",
+                                      magic_enum::enum_name( Type() ).data(), rows.size() ) );
 
     m_loadTotal.store( rows.size() );
     m_loadCount.store( 0 );
@@ -1665,8 +1718,15 @@ void LIBRARY_MANAGER_ADAPTER::AsyncLoad()
     if( workQueue->empty() )
     {
         wxLogTrace( traceLibraries, "AsyncLoad: all libraries already loaded; exiting" );
+        copperLibTrace( "AsyncLoad: workQueue empty (all loaded/loading); exiting" );
         return;
     }
+
+    copperLibTrace( wxString::Format( "AsyncLoad: queuing %zu libraries (first: %s scope=%s uri=%s)",
+                                      workQueue->size(),
+                                      workQueue->front().nickname,
+                                      magic_enum::enum_name( workQueue->front().scope ).data(),
+                                      workQueue->front().uri ) );
 
     // Cap loading threads to leave headroom for the GUI and other thread pool work.
     // Each worker pulls libraries from a shared queue, so we submit fewer tasks than
@@ -1749,6 +1809,10 @@ void LIBRARY_MANAGER_ADAPTER::AsyncLoad()
                                     .load_status = LOAD_STATUS::LOAD_ERROR,
                                     .error = result.error()
                             } );
+
+                            copperLibTrace( wxString::Format( "AsyncLoad worker: %s FAILED: %s",
+                                                              work.nickname,
+                                                              result.error().message ) );
                         }
 
                         ++m_loadCount;

@@ -24,6 +24,7 @@
  */
 
 #include <core/json_serializers.h>
+#include <copper/copper_client.h>
 #include <pgm_base.h>
 #include <kiface_base.h>
 #include <background_jobs_monitor.h>
@@ -449,6 +450,12 @@ private:
     std::atomic_bool                       m_libraryPreloadInProgress;
     std::atomic_bool                       m_libraryPreloadAbort;
 
+    // Set when PreloadLibraries is called while a preload is already running
+    // (e.g. project opened mid-load: ProjectChanged aborts the async load,
+    // then the follow-up PreloadLibraries hits the in-progress guard). The
+    // running preload picks this up and reruns AsyncLoad before reporting.
+    std::atomic_bool                       m_libraryPreloadRerun;
+
 #if defined( KICAD_IPC_API )
     void closeCurrentDocument( KICAD_API_SERVER* aServer );
 
@@ -529,7 +536,12 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
     bool expected = false;
 
     if( !m_libraryPreloadInProgress.compare_exchange_strong( expected, true ) )
+    {
+        // Don't silently drop the request: the running preload may have been
+        // aborted by a project change. Ask it to rerun AsyncLoad at the end.
+        m_libraryPreloadRerun.store( true );
         return;
+    }
 
     Pgm().ClearLibraryLoadMessages();
 
@@ -584,19 +596,43 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
             // Collect library load errors for async reporting
             wxString errors = adapter->GetLibraryLoadErrors();
 
+            COPPER::DebugLog( "PreloadLibraries: post-load statuses="
+                              + std::to_string( adapter->GetLibraryStatuses().size() )
+                              + " errors.len=" + std::to_string( errors.length() ) );
+
             // "Library not found in library table" is the fallback status for
-            // rows that have NO load entry at all — it means AsyncLoad ran
-            // before the library tables were (re)loaded and processed nothing.
-            // Retry once: AsyncLoad skips anything already LOADED/LOADING, so
-            // this only picks up the missed rows.
-            if( errors.Contains( _( "Library not found in library table" ) ) )
+            // rows that have NO load entry at all — it means the async load
+            // was aborted (project change) or raced the table load and never
+            // processed those rows. Also honor m_libraryPreloadRerun, set when
+            // a concurrent PreloadLibraries call hit the in-progress guard.
+            // AsyncLoad skips anything already LOADED/LOADING, so each pass
+            // only picks up the missed rows and the loop converges.
+            for( int attempt = 0; attempt < 5; ++attempt )
             {
+                bool rerunRequested = m_libraryPreloadRerun.exchange( false );
+
+                if( !rerunRequested
+                    && !errors.Contains( _( "Library not found in library table" ) ) )
+                {
+                    break;
+                }
+
                 wxLogTrace( traceLibraries,
-                            "eeschema PreloadLibraries: rows missing load entries, retrying AsyncLoad" );
+                            "eeschema PreloadLibraries: retrying AsyncLoad (attempt %d, rerun=%d)",
+                            attempt + 1, rerunRequested );
+
+                COPPER::DebugLog( "PreloadLibraries: retry attempt "
+                                  + std::to_string( attempt + 1 )
+                                  + " rerun=" + std::to_string( rerunRequested ) );
+
+                std::this_thread::sleep_for( std::chrono::milliseconds( 250 ) );
 
                 adapter->AsyncLoad();
                 adapter->BlockUntilLoaded();
                 errors = adapter->GetLibraryLoadErrors();
+
+                COPPER::DebugLog( "PreloadLibraries: after retry errors.len="
+                                  + std::to_string( errors.length() ) );
             }
 
             wxLogTrace( traceLibraries, "eeschema PreloadLibraries: errors.IsEmpty()=%d, length=%zu",
