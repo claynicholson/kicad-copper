@@ -132,7 +132,7 @@ Steps (recorded in [DEMO.md](DEMO.md) once M6 is done):
    `eeschema/CMakeLists.txt` (CMake gap G-CMAKE closed in M4).
 2. Run `eeschema` and open a blank `.kicad_sch`.
 3. Toggle View → "Copper AI" to dock the chat panel.
-4. (Optional, self-host) `export COPPER_API_URL=http://localhost:8000`
+4. (Optional, self-host) `export COPPER_API_URL=http://localhost:8080`
    before launching, or set it in the Copper settings dialog.
 5. (Optional) Click "Login" (or `export COPPER_API_TOKEN=…` for a dev
    token). Anonymous requests work against the hosted backend.

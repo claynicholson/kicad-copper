@@ -11,7 +11,7 @@ final safety net — not a harness gate.
   notes in [FORK_SURFACE.md](FORK_SURFACE.md) §8).
 - A reachable Copper backend:
   - hosted: `https://api.coppereda.com` (default)
-  - local self-host: e.g. `http://localhost:8000`
+  - local self-host: e.g. `http://localhost:8080`
 - Auth is optional — the hosted backend accepts anonymous requests. For
   authenticated use: an OAuth account, or `COPPER_API_TOKEN` env var for
   dev (logs a warning per ADR-005).
@@ -25,7 +25,7 @@ final safety net — not a harness gate.
    `true` in the eeschema config JSON, or via the Copper settings dialog
    once implemented.
 4. (Optional) Settings → Copper → set API URL to your backend, or
-   `export COPPER_API_URL=http://localhost:8000` before launching.
+   `export COPPER_API_URL=http://localhost:8080` before launching.
    For transport troubleshooting set `COPPER_DEBUG=1` — requests, HTTP
    statuses, curl errors and SSE events land in `%TEMP%\copper_debug.log`.
 5. (Optional) Click **Login** in the Copper panel header → OAuth browser
