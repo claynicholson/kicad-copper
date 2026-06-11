@@ -190,6 +190,48 @@ private:
 };
 
 
+// ─── COPPER_DESIGN_FORM ─────────────────────────────────────────────────────
+
+wxDECLARE_EVENT( COPPER_EVT_DESIGN_FORM_SUBMITTED, wxCommandEvent );
+wxDECLARE_EVENT( COPPER_EVT_DESIGN_FORM_CANCELLED, wxCommandEvent );
+
+class wxTextCtrl;
+class wxChoice;
+
+/**
+ * "Design from scratch" intake form. Instead of free-form chat, the user
+ * fills out structured fields (purpose, supplier, mounting, assembly) and
+ * the form composes a constraint-rich prompt for the design pipeline.
+ *
+ * Fires COPPER_EVT_DESIGN_FORM_SUBMITTED (prompt available via BuildPrompt())
+ * or COPPER_EVT_DESIGN_FORM_CANCELLED.
+ */
+class COPPER_DESIGN_FORM : public wxPanel
+{
+public:
+    COPPER_DESIGN_FORM( wxWindow* aParent );
+
+    /// Compose the structured design prompt from the current field values.
+    wxString BuildPrompt() const;
+
+protected:
+    void OnPaint( wxPaintEvent& aEvent );
+    void OnCreateClicked( wxCommandEvent& aEvent );
+    void OnCancelClicked( wxCommandEvent& aEvent );
+
+private:
+    wxTextCtrl* m_purpose;
+    wxChoice*   m_supplier;
+    wxChoice*   m_mounting;
+    wxChoice*   m_assembly;
+    wxTextCtrl* m_notes;
+    wxButton*   m_createBtn;
+    wxButton*   m_cancelBtn;
+
+    wxDECLARE_EVENT_TABLE();
+};
+
+
 // ─── COPPER_STAGE_PANEL ─────────────────────────────────────────────────────
 
 /**

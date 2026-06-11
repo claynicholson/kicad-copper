@@ -20,9 +20,11 @@
 #include <widgets/copper_chat_widgets.h>
 
 #include <wx/button.h>
+#include <wx/choice.h>
 #include <wx/dcbuffer.h>
 #include <wx/graphics.h>
 #include <wx/settings.h>
+#include <wx/textctrl.h>
 
 
 // ─── Event definitions ──────────────────────────────────────────────────────
@@ -31,6 +33,8 @@ wxDEFINE_EVENT( COPPER_EVT_PLAN_APPROVED, wxCommandEvent );
 wxDEFINE_EVENT( COPPER_EVT_PLAN_EDITED, wxCommandEvent );
 wxDEFINE_EVENT( COPPER_EVT_PLAN_DISMISSED, wxCommandEvent );
 wxDEFINE_EVENT( COPPER_EVT_HINT_CLICKED, wxCommandEvent );
+wxDEFINE_EVENT( COPPER_EVT_DESIGN_FORM_SUBMITTED, wxCommandEvent );
+wxDEFINE_EVENT( COPPER_EVT_DESIGN_FORM_CANCELLED, wxCommandEvent );
 
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -502,4 +506,199 @@ void COPPER_STAGE_PANEL::Clear()
 {
     m_sizer->Clear( true );
     m_indicators.clear();
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  COPPER_DESIGN_FORM
+// ═══════════════════════════════════════════════════════════════════════════
+
+wxBEGIN_EVENT_TABLE( COPPER_DESIGN_FORM, wxPanel )
+    EVT_PAINT( COPPER_DESIGN_FORM::OnPaint )
+wxEND_EVENT_TABLE()
+
+
+/// Form label helper — muted, small, consistent.
+static wxStaticText* designFormLabel( wxWindow* aParent, const wxString& aText )
+{
+    wxStaticText* label = new wxStaticText( aParent, wxID_ANY, aText );
+    label->SetForegroundColour( COPPER_COLORS::TEXT_SECONDARY );
+    return label;
+}
+
+
+COPPER_DESIGN_FORM::COPPER_DESIGN_FORM( wxWindow* aParent ) :
+        wxPanel( aParent, wxID_ANY )
+{
+    SetBackgroundStyle( wxBG_STYLE_PAINT );
+    SetBackgroundColour( COPPER_COLORS::PLAN_BG );
+
+    wxBoxSizer* mainSizer = new wxBoxSizer( wxVERTICAL );
+
+    wxStaticText* header = new wxStaticText( this, wxID_ANY, wxT( "DESIGN FROM SCRATCH" ) );
+    header->SetForegroundColour( COPPER_COLORS::ACCENT );
+    header->SetFont( header->GetFont().Bold() );
+    mainSizer->Add( header, 0, wxALL, FromDIP( 8 ) );
+
+    // Purpose (required)
+    mainSizer->Add( designFormLabel( this, wxT( "What is this board for?" ) ),
+                    0, wxLEFT | wxRIGHT, FromDIP( 8 ) );
+
+    m_purpose = new wxTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                                FromDIP( wxSize( -1, 56 ) ), wxTE_MULTILINE );
+    m_purpose->SetBackgroundColour( COPPER_COLORS::INPUT_BG );
+    m_purpose->SetForegroundColour( COPPER_COLORS::TEXT_PRIMARY );
+    m_purpose->SetHint( wxT( "e.g. battery-powered soil moisture sensor for a greenhouse" ) );
+    mainSizer->Add( m_purpose, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 8 ) );
+
+    // Supplier
+    mainSizer->Add( designFormLabel( this, wxT( "Preferred parts supplier" ) ),
+                    0, wxLEFT | wxRIGHT, FromDIP( 8 ) );
+
+    wxArrayString suppliers;
+    suppliers.Add( wxT( "No preference" ) );
+    suppliers.Add( wxT( "JLCPCB" ) );
+    suppliers.Add( wxT( "PCBWay" ) );
+    suppliers.Add( wxT( "LCSC" ) );
+    suppliers.Add( wxT( "Digi-Key" ) );
+    suppliers.Add( wxT( "Mouser" ) );
+    suppliers.Add( wxT( "Farnell" ) );
+
+    m_supplier = new wxChoice( this, wxID_ANY, wxDefaultPosition, wxDefaultSize, suppliers );
+    m_supplier->SetSelection( 0 );
+    mainSizer->Add( m_supplier, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 8 ) );
+
+    // Mounting technology
+    mainSizer->Add( designFormLabel( this, wxT( "Component mounting" ) ),
+                    0, wxLEFT | wxRIGHT, FromDIP( 8 ) );
+
+    wxArrayString mountings;
+    mountings.Add( wxT( "No preference" ) );
+    mountings.Add( wxT( "All SMD" ) );
+    mountings.Add( wxT( "All through-hole" ) );
+    mountings.Add( wxT( "Mixed SMD + through-hole" ) );
+
+    m_mounting = new wxChoice( this, wxID_ANY, wxDefaultPosition, wxDefaultSize, mountings );
+    m_mounting->SetSelection( 0 );
+    mainSizer->Add( m_mounting, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 8 ) );
+
+    // Assembly method
+    mainSizer->Add( designFormLabel( this, wxT( "How will it be assembled?" ) ),
+                    0, wxLEFT | wxRIGHT, FromDIP( 8 ) );
+
+    wxArrayString assemblies;
+    assemblies.Add( wxT( "No preference" ) );
+    assemblies.Add( wxT( "Assembly service (PCBA)" ) );
+    assemblies.Add( wxT( "Hand soldering" ) );
+
+    m_assembly = new wxChoice( this, wxID_ANY, wxDefaultPosition, wxDefaultSize, assemblies );
+    m_assembly->SetSelection( 0 );
+    mainSizer->Add( m_assembly, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 8 ) );
+
+    // Extra notes (optional)
+    mainSizer->Add( designFormLabel( this, wxT( "Anything else? (optional)" ) ),
+                    0, wxLEFT | wxRIGHT, FromDIP( 8 ) );
+
+    m_notes = new wxTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                              FromDIP( wxSize( -1, 44 ) ), wxTE_MULTILINE );
+    m_notes->SetBackgroundColour( COPPER_COLORS::INPUT_BG );
+    m_notes->SetForegroundColour( COPPER_COLORS::TEXT_PRIMARY );
+    m_notes->SetHint( wxT( "size limits, connectors, budget, supply voltage..." ) );
+    mainSizer->Add( m_notes, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 8 ) );
+
+    // Buttons
+    wxBoxSizer* btnSizer = new wxBoxSizer( wxHORIZONTAL );
+
+    m_createBtn = new wxButton( this, wxID_ANY, wxT( "Create Board" ) );
+    m_createBtn->SetBackgroundColour( COPPER_COLORS::ACCENT );
+    m_createBtn->SetForegroundColour( *wxWHITE );
+    m_createBtn->Bind( wxEVT_BUTTON, &COPPER_DESIGN_FORM::OnCreateClicked, this );
+
+    m_cancelBtn = new wxButton( this, wxID_ANY, wxT( "Cancel" ) );
+    m_cancelBtn->SetBackgroundColour( COPPER_COLORS::BG_TERTIARY );
+    m_cancelBtn->SetForegroundColour( COPPER_COLORS::TEXT_MUTED );
+    m_cancelBtn->Bind( wxEVT_BUTTON, &COPPER_DESIGN_FORM::OnCancelClicked, this );
+
+    btnSizer->Add( m_createBtn, 0, wxRIGHT, FromDIP( 8 ) );
+    btnSizer->Add( m_cancelBtn, 0 );
+    mainSizer->Add( btnSizer, 0, wxALL, FromDIP( 8 ) );
+
+    SetSizer( mainSizer );
+    mainSizer->Fit( this );
+}
+
+
+wxString COPPER_DESIGN_FORM::BuildPrompt() const
+{
+    wxString prompt = wxT( "Design a new circuit board from scratch.\n" );
+
+    prompt += wxT( "Purpose: " ) + m_purpose->GetValue().Trim().Trim( false ) + wxT( "\n" );
+
+    if( m_supplier->GetSelection() > 0 )
+    {
+        prompt += wxT( "Preferred supplier: " ) + m_supplier->GetStringSelection()
+                  + wxT( " — choose parts that are stocked there.\n" );
+    }
+
+    switch( m_mounting->GetSelection() )
+    {
+    case 1: prompt += wxT( "Mounting: use surface-mount (SMD) packages only.\n" ); break;
+    case 2: prompt += wxT( "Mounting: use through-hole (THT) packages only.\n" ); break;
+    case 3: prompt += wxT( "Mounting: a mix of SMD and through-hole packages is fine.\n" ); break;
+    default: break;
+    }
+
+    switch( m_assembly->GetSelection() )
+    {
+    case 1:
+        prompt += wxT( "Assembly: machine-assembled (PCBA service) — fine-pitch "
+                       "packages are acceptable.\n" );
+        break;
+    case 2:
+        prompt += wxT( "Assembly: hand-soldered — prefer large, easy-to-solder "
+                       "packages (0805 or larger passives, SOIC over QFN, avoid "
+                       "BGA and fine-pitch parts).\n" );
+        break;
+    default: break;
+    }
+
+    wxString notes = m_notes->GetValue().Trim().Trim( false );
+
+    if( !notes.IsEmpty() )
+        prompt += wxT( "Additional requirements: " ) + notes + wxT( "\n" );
+
+    return prompt;
+}
+
+
+void COPPER_DESIGN_FORM::OnPaint( wxPaintEvent& aEvent )
+{
+    wxAutoBufferedPaintDC dc( this );
+    wxSize size = GetClientSize();
+
+    dc.SetBrush( wxBrush( COPPER_COLORS::PLAN_BG ) );
+    dc.SetPen( wxPen( COPPER_COLORS::ACCENT, FromDIP( 1 ) ) );
+    dc.DrawRoundedRectangle( 0, 0, size.x, size.y, FromDIP( 8 ) );
+}
+
+
+void COPPER_DESIGN_FORM::OnCreateClicked( wxCommandEvent& aEvent )
+{
+    if( m_purpose->GetValue().Trim().Trim( false ).IsEmpty() )
+    {
+        m_purpose->SetFocus();
+        return;
+    }
+
+    wxCommandEvent evt( COPPER_EVT_DESIGN_FORM_SUBMITTED );
+    evt.SetEventObject( this );
+    ProcessWindowEvent( evt );
+}
+
+
+void COPPER_DESIGN_FORM::OnCancelClicked( wxCommandEvent& aEvent )
+{
+    wxCommandEvent evt( COPPER_EVT_DESIGN_FORM_CANCELLED );
+    evt.SetEventObject( this );
+    ProcessWindowEvent( evt );
 }

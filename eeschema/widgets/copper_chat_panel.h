@@ -34,6 +34,7 @@
 
 class SCH_EDIT_FRAME;
 class COPPER_STAGE_PANEL;
+class COPPER_DESIGN_FORM;
 
 namespace COPPER
 {
@@ -94,6 +95,8 @@ private:
     void onPlanApproved( wxCommandEvent& aEvent );
     void onPlanEdited( wxCommandEvent& aEvent );
     void onPlanDismissed( wxCommandEvent& aEvent );
+    void onDesignFormSubmitted( wxCommandEvent& aEvent );
+    void onDesignFormCancelled( wxCommandEvent& aEvent );
     void onAuthSuccess( wxCommandEvent& aEvent );
     void onAuthFailure( wxCommandEvent& aEvent );
 
@@ -105,6 +108,12 @@ private:
     void updateStage( const wxString& aName, int aState );
     void scrollToBottom();
     void clearEmptyState();
+
+    /// Show the structured "design from scratch" intake form (no-op if visible).
+    void showDesignForm();
+
+    /// Remove the form from the message area without submitting.
+    void destroyDesignForm();
 
     // ── API interaction ──
     void sendRequest( const wxString& aPrompt );
@@ -139,6 +148,9 @@ private:
 
     // Stage indicators
     COPPER_STAGE_PANEL*                 m_stagePanel;
+
+    // "Design from scratch" intake form (null when not shown)
+    COPPER_DESIGN_FORM*                 m_designForm;
 
     // Input bar
     wxPanel*                            m_inputPanel;

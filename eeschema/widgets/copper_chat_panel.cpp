@@ -62,6 +62,7 @@ COPPER_CHAT_PANEL::COPPER_CHAT_PANEL( wxWindow* aParent, SCH_EDIT_FRAME* aFrame 
         m_messageSizer( nullptr ),
         m_emptyStatePanel( nullptr ),
         m_stagePanel( nullptr ),
+        m_designForm( nullptr ),
         m_inputPanel( nullptr ),
         m_modeChoice( nullptr ),
         m_inputText( nullptr ),
@@ -212,6 +213,7 @@ void COPPER_CHAT_PANEL::buildInputBar()
     modes.Add( wxT( "Design" ) );
     modes.Add( wxT( "Chat" ) );
     modes.Add( wxT( "Recommend" ) );
+    modes.Add( wxT( "From Scratch" ) );
 
     m_modeChoice = new wxChoice( m_inputPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, modes );
     m_modeChoice->SetSelection( 0 );
@@ -254,6 +256,15 @@ void COPPER_CHAT_PANEL::buildEmptyState()
     welcomeText->SetForegroundColour( COPPER_COLORS::TEXT_MUTED );
     welcomeText->SetFont( welcomeText->GetFont().Larger().Larger() );
     emptySizer->Add( welcomeText, 0, wxALIGN_CENTER | wxBOTTOM, FromDIP( 24 ) );
+
+    // Structured intake — preferred entry point for brand-new boards
+    wxButton* scratchBtn = new wxButton( m_emptyStatePanel, wxID_ANY,
+                                         wxT( "Design from scratch \xe2\x86\x92" ) );  // →
+    scratchBtn->SetBackgroundColour( COPPER_COLORS::ACCENT );
+    scratchBtn->SetForegroundColour( *wxWHITE );
+    scratchBtn->Bind( wxEVT_BUTTON,
+                      [this]( wxCommandEvent& ) { showDesignForm(); } );
+    emptySizer->Add( scratchBtn, 0, wxALIGN_CENTER | wxBOTTOM, FromDIP( 16 ) );
 
     // Hint chips
     wxWrapSizer* chipSizer = new wxWrapSizer( wxHORIZONTAL );
@@ -376,6 +387,11 @@ void COPPER_CHAT_PANEL::onModeChanged( wxCommandEvent& aEvent )
         m_inputText->SetHint( wxT( "Ask a question..." ) );
     else if( mode == wxT( "Recommend" ) )
         m_inputText->SetHint( wxT( "What component do you need?" ) );
+    else if( mode == wxT( "From Scratch" ) )
+    {
+        m_inputText->SetHint( wxT( "Fill out the form above, then Create Board" ) );
+        showDesignForm();
+    }
 }
 
 
@@ -541,6 +557,74 @@ void COPPER_CHAT_PANEL::clearEmptyState()
 }
 
 
+void COPPER_CHAT_PANEL::showDesignForm()
+{
+    if( m_designForm )
+    {
+        scrollToBottom();
+        return;
+    }
+
+    clearEmptyState();
+
+    m_designForm = new COPPER_DESIGN_FORM( m_scrollArea );
+    m_designForm->Bind( COPPER_EVT_DESIGN_FORM_SUBMITTED,
+                        &COPPER_CHAT_PANEL::onDesignFormSubmitted, this );
+    m_designForm->Bind( COPPER_EVT_DESIGN_FORM_CANCELLED,
+                        &COPPER_CHAT_PANEL::onDesignFormCancelled, this );
+
+    m_messageSizer->Add( m_designForm, 0, wxEXPAND | wxALL, FromDIP( 8 ) );
+    scrollToBottom();
+}
+
+
+void COPPER_CHAT_PANEL::destroyDesignForm()
+{
+    if( !m_designForm )
+        return;
+
+    m_messageSizer->Detach( m_designForm );
+
+    // Deletion must be deferred: this runs from the form's own button events.
+    m_designForm->Hide();
+    wxWindow* form = m_designForm;
+    m_designForm = nullptr;
+    CallAfter( [form]() { form->Destroy(); } );
+
+    m_scrollArea->FitInside();
+    m_scrollArea->Layout();
+}
+
+
+void COPPER_CHAT_PANEL::onDesignFormSubmitted( wxCommandEvent& aEvent )
+{
+    wxString prompt = m_designForm->BuildPrompt();
+    destroyDesignForm();
+
+    // The composed prompt goes through the streaming design pipeline.
+    m_modeChoice->SetSelection( 0 );  // back to Design
+    m_inputText->SetHint( wxT( "What would you like to build?" ) );
+    sendRequest( prompt );
+}
+
+
+void COPPER_CHAT_PANEL::onDesignFormCancelled( wxCommandEvent& aEvent )
+{
+    destroyDesignForm();
+
+    m_modeChoice->SetSelection( 0 );  // back to Design
+    m_inputText->SetHint( wxT( "What would you like to build?" ) );
+
+    // Restore the welcome screen if the conversation hasn't started.
+    if( m_conversationHistory.empty() && !m_emptyStateVisible )
+    {
+        buildEmptyState();
+        m_scrollArea->FitInside();
+        m_scrollArea->Layout();
+    }
+}
+
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  API Interaction
 // ═══════════════════════════════════════════════════════════════════════════
@@ -598,9 +682,10 @@ void COPPER_CHAT_PANEL::sendRequest( const wxString& aPrompt )
         } );
     };
 
-    if( mode == wxT( "Design" ) )
+    if( mode == wxT( "Design" ) || mode == wxT( "From Scratch" ) )
     {
-        // Use SSE streaming for design mode
+        // Use SSE streaming for design mode (From Scratch composes a design
+        // prompt and rides the same pipeline)
         auto onEvent = [this]( const COPPER::SSEEvent& evt )
         {
             CallAfter( [this, evt]() { handleSSEEvent( evt ); } );
