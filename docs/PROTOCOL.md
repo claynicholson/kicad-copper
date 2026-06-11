@@ -243,6 +243,34 @@ The `operations` array in a `CopperResponse` is a list of these:
   (`power:VCC`, `power:GND`, `power:+3V3`, …) — if absent, the op is rejected
   with an actionable error referencing the missing symbol.
 
+### `ADD_PIN_LABEL`
+```json
+{
+  "type": "ADD_PIN_LABEL",
+  "data": { "reference": "U1", "pin": "SWCLK", "net_name": "SWCLK", "style": "global" }
+}
+```
+
+The preferred connectivity mechanism: no coordinates cross the wire. The
+plugin resolves the symbol placed earlier in the same plan (or already on the
+current sheet) by `reference`, locates the pin, and drops the net marker
+exactly on the pin's real position.
+
+- `reference`: required. Must match a `PLACE_COMPONENT` in the same plan or a
+  symbol on the current sheet.
+- `pin`: required. Matched against the library symbol's pins in order: exact
+  name, exact number, decoration-stripped name (`~{WP}(IO2)` → `WP`), any
+  `/`-separated alias segment (`SDA/SDI/SDO` matches `SDI`). Single-pin
+  symbols match any token.
+- `net_name`: required, non-empty.
+- `style`: `global` (default) → global label at the pin; `power` → instance
+  of `power:<net_name>` placed pin-on-pin (rotated away from the host pin).
+
+Rationale: the compiler's internal symbol geometry never matches the real
+KiCad library symbols, so emitted wire/label coordinates landed in empty
+space. Pin-anchored ops make the plugin the geometry authority. All nets are
+global by name; no `ADD_WIRE` ops are needed for connectivity.
+
 ## Response validation (plugin-side, before apply)
 
 Hard rejects (apply nothing, surface error):
@@ -257,6 +285,9 @@ Hard rejects (apply nothing, surface error):
 8. Any `ADD_WIRE` with `start == end`.
 9. Any `ADD_LABEL` with `label_type` not in {local, global, hierarchical}.
 10. Any `ADD_POWER_SYMBOL` with empty `net_name`.
+11. Any `ADD_PIN_LABEL` with empty `reference`/`pin`/`net_name`, or `style`
+    not in {global, power}. At apply time: unresolvable reference or pin →
+    whole plan discarded (fail-closed).
 
 Soft warnings (apply with a banner):
 - `protocol_version == 1` and unknown fields present → log + accept.

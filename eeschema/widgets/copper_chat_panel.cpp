@@ -26,6 +26,7 @@
 #include <schematic.h>
 #include <sch_screen.h>
 #include <sch_symbol.h>
+#include <sch_pin.h>
 #include <sch_line.h>
 #include <sch_label.h>
 #include <sch_junction.h>
@@ -43,6 +44,7 @@
 #include <tool/actions.h>
 
 #include <wx/dcbuffer.h>
+#include <wx/tokenzr.h>
 #include <wx/msgdlg.h>
 #include <wx/textdlg.h>
 #include <wx/utils.h>
@@ -1229,6 +1231,63 @@ LIB_SYMBOL* COPPER_CHAT_PANEL::resolveLibSymbol( const LIB_ID& aLibId )
 }
 
 
+// Strip KiCad pin-name decorations so backend pin names match library pins:
+// "~{WP}(IO2)" -> "WP", "DI(IO0)" -> "DI".
+static wxString normalizePinName( const wxString& aName )
+{
+    wxString out = aName;
+    out.Replace( wxT( "~{" ), wxEmptyString );
+    out.Replace( wxT( "}" ), wxEmptyString );
+
+    int paren = out.Find( wxT( '(' ) );
+
+    if( paren != wxNOT_FOUND )
+        out = out.Left( paren );
+
+    return out.Trim().Trim( false );
+}
+
+
+// Match a backend pin token against a symbol's pins: exact name, exact
+// number, normalized name, then any '/'-separated alias segment
+// ("SDA/SDI/SDO" matches "SDI").
+static SCH_PIN* findSymbolPin( SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aSheet,
+                               const wxString& aToken )
+{
+    std::vector<SCH_PIN*> pins = aSymbol->GetPins( &aSheet );
+
+    for( SCH_PIN* pin : pins )
+    {
+        if( pin->GetName() == aToken || pin->GetNumber() == aToken )
+            return pin;
+    }
+
+    for( SCH_PIN* pin : pins )
+    {
+        if( normalizePinName( pin->GetName() ) == aToken )
+            return pin;
+    }
+
+    for( SCH_PIN* pin : pins )
+    {
+        wxStringTokenizer tok( pin->GetName(), wxT( "/" ) );
+
+        while( tok.HasMoreTokens() )
+        {
+            if( normalizePinName( tok.GetNextToken() ) == aToken )
+                return pin;
+        }
+    }
+
+    // Single-pin symbols (power symbols, PWR_FLAG) are unambiguous no
+    // matter what the backend calls the pin.
+    if( pins.size() == 1 )
+        return pins[0];
+
+    return nullptr;
+}
+
+
 void COPPER_CHAT_PANEL::ExecuteOperations(
         const std::vector<COPPER::Operation>& aOperations )
 {
@@ -1369,6 +1428,28 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
                 return;
             }
         }
+        else if( op.type == "ADD_PIN_LABEL" )
+        {
+            const std::string style = op.data.value( "style", "global" );
+
+            if( op.data.value( "reference", std::string() ).empty()
+                || op.data.value( "pin", std::string() ).empty()
+                || op.data.value( "net_name", std::string() ).empty() )
+            {
+                addAIMessage( wxT( "Plan rejected: ADD_PIN_LABEL missing "
+                                   "reference/pin/net_name. Nothing applied." ) );
+                return;
+            }
+
+            if( style != "global" && style != "power" )
+            {
+                addAIMessage( wxString::Format(
+                    wxT( "Plan rejected: unknown ADD_PIN_LABEL style '%s'. "
+                         "Nothing applied." ),
+                    wxString::FromUTF8( style ) ) );
+                return;
+            }
+        }
         else if( op.type == "ADD_POWER_SYMBOL" )
         {
             if( op.data.value( "net_name", std::string() ).empty() )
@@ -1396,6 +1477,10 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
 
     // Create a commit for undo support
     SCH_COMMIT commit( m_frame );
+
+    // Symbols placed by THIS plan, so ADD_PIN_LABEL ops can resolve real
+    // pin positions without searching the screen.
+    std::map<wxString, SCH_SYMBOL*> placedByRef;
 
     for( const auto& op : aOperations )
     {
@@ -1443,7 +1528,121 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
             if( !val.empty() )
                 symbol->GetField( FIELD_T::VALUE )->SetText( wxString::FromUTF8( val ) );
 
+            placedByRef[ wxString::FromUTF8( ref ) ] = symbol;
             commit.Add( symbol, screen );
+        }
+        else if( op.type == "ADD_PIN_LABEL" )
+        {
+            wxString ref = wxString::FromUTF8( op.data.value( "reference", "" ) );
+            wxString pinTok = wxString::FromUTF8( op.data.value( "pin", "" ) );
+            std::string netName = op.data.value( "net_name", "" );
+            std::string style = op.data.value( "style", "global" );
+
+            SCH_SHEET_PATH& sheet = m_frame->Schematic().CurrentSheet();
+            SCH_SYMBOL* host = nullptr;
+            auto it = placedByRef.find( ref );
+
+            if( it != placedByRef.end() )
+            {
+                host = it->second;
+            }
+            else
+            {
+                // Edit flows label pins of symbols that already exist.
+                for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+                {
+                    SCH_SYMBOL* candidate = static_cast<SCH_SYMBOL*>( item );
+
+                    if( candidate->GetRef( &sheet ) == ref )
+                    {
+                        host = candidate;
+                        break;
+                    }
+                }
+            }
+
+            if( !host )
+            {
+                if( COPPER::DebugEnabled() )
+                    COPPER::DebugLog( "ExecuteOperations: ADD_PIN_LABEL no symbol for ref "
+                                      + std::string( ref.ToUTF8() ) );
+
+                addAIMessage( wxString::Format(
+                    wxT( "Plan failed: no placed symbol with reference %s for "
+                         "net %s. Nothing applied." ),
+                    ref, wxString::FromUTF8( netName ) ) );
+                return;
+            }
+
+            SCH_PIN* pin = findSymbolPin( host, sheet, pinTok );
+
+            if( !pin )
+            {
+                if( COPPER::DebugEnabled() )
+                    COPPER::DebugLog( "ExecuteOperations: ADD_PIN_LABEL pin '"
+                                      + std::string( pinTok.ToUTF8() ) + "' not on "
+                                      + std::string( ref.ToUTF8() ) );
+
+                addAIMessage( wxString::Format(
+                    wxT( "Plan failed: pin '%s' not found on %s (net %s). "
+                         "Nothing applied." ),
+                    pinTok, ref, wxString::FromUTF8( netName ) ) );
+                return;
+            }
+
+            VECTOR2I pinPos = pin->GetPosition();
+
+            if( style == "power" )
+            {
+                LIB_ID powerId;
+                powerId.Parse( wxString::Format( wxT( "power:%s" ),
+                                                 wxString::FromUTF8( netName ) ) );
+
+                LIB_SYMBOL* libSym = resolveLibSymbol( powerId );
+
+                if( !libSym )
+                {
+                    addAIMessage( wxString::Format(
+                        wxT( "Symbol not found in libraries: power:%s. "
+                             "Nothing applied." ),
+                        wxString::FromUTF8( netName ) ) );
+                    return;
+                }
+
+                SCH_SYMBOL* powerSym = new SCH_SYMBOL( *libSym, powerId, &sheet, 0 );
+                powerSym->SetPosition( pinPos );
+
+                // Rotate the power symbol away from the host pin (its own pin
+                // sits at the symbol origin, so rotation never moves the
+                // connection point). Default orientation hangs downward,
+                // which already suits pins that point down.
+                switch( pin->GetOrientation() )
+                {
+                case PIN_ORIENTATION::PIN_UP:    powerSym->SetOrientation( SYM_ORIENT_180 ); break;
+                case PIN_ORIENTATION::PIN_LEFT:  powerSym->SetOrientation( SYM_ORIENT_90 );  break;
+                case PIN_ORIENTATION::PIN_RIGHT: powerSym->SetOrientation( SYM_ORIENT_270 ); break;
+                default: break;
+                }
+
+                commit.Add( powerSym, screen );
+            }
+            else
+            {
+                SCH_GLOBALLABEL* label = new SCH_GLOBALLABEL( pinPos,
+                                                              wxString::FromUTF8( netName ) );
+
+                // Text extends away from the symbol body.
+                switch( pin->GetOrientation() )
+                {
+                case PIN_ORIENTATION::PIN_RIGHT: label->SetSpinStyle( SPIN_STYLE::LEFT );   break;
+                case PIN_ORIENTATION::PIN_LEFT:  label->SetSpinStyle( SPIN_STYLE::RIGHT );  break;
+                case PIN_ORIENTATION::PIN_UP:    label->SetSpinStyle( SPIN_STYLE::BOTTOM ); break;
+                case PIN_ORIENTATION::PIN_DOWN:  label->SetSpinStyle( SPIN_STYLE::UP );     break;
+                default:                         label->SetSpinStyle( SPIN_STYLE::LEFT );   break;
+                }
+
+                commit.Add( label, screen );
+            }
         }
         else if( op.type == "ADD_WIRE" )
         {
