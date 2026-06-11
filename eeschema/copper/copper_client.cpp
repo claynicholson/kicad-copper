@@ -26,11 +26,83 @@
 
 #include <wx/log.h>
 
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <fstream>
+#include <iomanip>
+#include <mutex>
 #include <sstream>
 
 
 namespace COPPER
 {
+
+bool DebugEnabled()
+{
+    static const bool enabled = []()
+    {
+        const char* v = std::getenv( "COPPER_DEBUG" );
+        return v && *v && std::strcmp( v, "0" ) != 0;
+    }();
+
+    return enabled;
+}
+
+
+std::string DebugLogPath()
+{
+    const char* tmp = std::getenv( "TEMP" );
+
+    if( !tmp )
+        tmp = std::getenv( "TMP" );
+
+    if( !tmp )
+        tmp = std::getenv( "TMPDIR" );
+
+    std::string dir = tmp ? tmp : ".";
+    return dir + "/copper_debug.log";
+}
+
+
+void DebugLog( const std::string& aLine )
+{
+    if( !DebugEnabled() )
+        return;
+
+    // Workers and the UI thread both log; serialize appends.
+    static std::mutex mtx;
+    std::lock_guard<std::mutex> lock( mtx );
+
+    std::ofstream f( DebugLogPath(), std::ios::app );
+
+    if( !f )
+        return;
+
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t( now );
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      now.time_since_epoch() ).count() % 1000;
+    std::tm tmBuf;
+#ifdef _WIN32
+    localtime_s( &tmBuf, &t );
+#else
+    localtime_r( &t, &tmBuf );
+#endif
+    f << std::put_time( &tmBuf, "%Y-%m-%d %H:%M:%S" ) << '.'
+      << std::setw( 3 ) << std::setfill( '0' ) << ms << "  " << aLine << '\n';
+}
+
+
+/// Clip long payloads so the log stays readable.
+static std::string debugTruncate( const std::string& aText, size_t aMax = 2000 )
+{
+    if( aText.size() <= aMax )
+        return aText;
+
+    return aText.substr( 0, aMax ) + "... [" + std::to_string( aText.size() ) + " bytes total]";
+}
 
 CLIENT::CLIENT( AUTH* aAuth ) :
     m_auth( aAuth )
@@ -130,16 +202,22 @@ void CLIENT::doPost( const std::string& aEndpoint, const nlohmann::json& aBody,
                 curl.SetHeader( "Authorization", "Bearer " + token );
             curl.SetPostFields( aBody.dump() );
 
+            DebugLog( "POST " + url + " auth=" + ( token.empty() ? "none" : "bearer" )
+                      + " body=" + debugTruncate( aBody.dump() ) );
+
             int rc = curl.Perform();
 
             if( m_cancelled.load() )
             {
+                DebugLog( "POST " + url + " cancelled" );
                 m_busy.store( false );
                 return;
             }
 
             if( rc != 0 )
             {
+                DebugLog( "POST " + url + " curl error rc=" + std::to_string( rc )
+                          + " (" + curl.GetErrorText( rc ) + ")" );
                 m_busy.store( false );
 
                 if( aOnError )
@@ -152,6 +230,8 @@ void CLIENT::doPost( const std::string& aEndpoint, const nlohmann::json& aBody,
 
             if( status != 200 )
             {
+                DebugLog( "POST " + url + " HTTP " + std::to_string( status )
+                          + " body=" + debugTruncate( curl.GetBuffer() ) );
                 m_busy.store( false );
 
                 if( aOnError )
@@ -164,6 +244,8 @@ void CLIENT::doPost( const std::string& aEndpoint, const nlohmann::json& aBody,
             {
                 nlohmann::json resp = nlohmann::json::parse( curl.GetBuffer() );
                 CopperResponse result = CopperResponse::fromJson( resp );
+                DebugLog( "POST " + url + " HTTP 200 body="
+                          + debugTruncate( curl.GetBuffer() ) );
                 m_busy.store( false );
 
                 if( aOnResponse )
@@ -171,6 +253,8 @@ void CLIENT::doPost( const std::string& aEndpoint, const nlohmann::json& aBody,
             }
             catch( const nlohmann::json::exception& e )
             {
+                DebugLog( "POST " + url + " JSON parse error: " + e.what()
+                          + " body=" + debugTruncate( curl.GetBuffer() ) );
                 m_busy.store( false );
 
                 if( aOnError )
@@ -222,6 +306,8 @@ static size_t sseWriteCallback( char* aPtr, size_t aSize, size_t aNmemb, void* a
                 SSEEvent evt;
                 evt.event = ctx->currentEvent.empty() ? "message" : ctx->currentEvent;
                 evt.data = ctx->currentData;
+
+                DebugLog( "SSE event=" + evt.event + " data=" + debugTruncate( evt.data, 500 ) );
 
                 if( ctx->onEvent )
                     ctx->onEvent( evt );
@@ -303,16 +389,22 @@ void CLIENT::doStreamPost( const std::string& aEndpoint, const nlohmann::json& a
             curl_easy_setopt( handle, CURLOPT_WRITEFUNCTION, sseWriteCallback );
             curl_easy_setopt( handle, CURLOPT_WRITEDATA, &writeData );
 
+            DebugLog( "POST(stream) " + url + " auth=" + ( token.empty() ? "none" : "bearer" )
+                      + " body=" + debugTruncate( aBody.dump() ) );
+
             int rc = curl.Perform();
 
             if( m_cancelled.load() )
             {
+                DebugLog( "POST(stream) " + url + " cancelled" );
                 m_busy.store( false );
                 return;
             }
 
             if( rc != 0 )
             {
+                DebugLog( "POST(stream) " + url + " curl error rc=" + std::to_string( rc )
+                          + " (" + curl.GetErrorText( rc ) + ")" );
                 m_busy.store( false );
 
                 if( aOnError )
@@ -325,6 +417,10 @@ void CLIENT::doStreamPost( const std::string& aEndpoint, const nlohmann::json& a
 
             if( status != 200 )
             {
+                // The error body went through the SSE callback; whatever is
+                // still buffered there is the closest thing to a payload.
+                DebugLog( "POST(stream) " + url + " HTTP " + std::to_string( status )
+                          + " residual=" + debugTruncate( writeData.buffer, 500 ) );
                 m_busy.store( false );
 
                 if( aOnError )
@@ -333,6 +429,7 @@ void CLIENT::doStreamPost( const std::string& aEndpoint, const nlohmann::json& a
                 return;
             }
 
+            DebugLog( "POST(stream) " + url + " HTTP 200 stream complete" );
             m_busy.store( false );
         } );
 }

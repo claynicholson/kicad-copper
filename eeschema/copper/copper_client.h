@@ -32,6 +32,18 @@ namespace COPPER
 class AUTH;
 
 /**
+ * Debug mode (set env COPPER_DEBUG=1): traces every request, response,
+ * SSE event and transport error to <temp>/copper_debug.log.
+ */
+bool DebugEnabled();
+
+/// Full path of the debug log file (valid whether or not debug is enabled).
+std::string DebugLogPath();
+
+/// Append one timestamped line to the debug log. No-op unless DebugEnabled().
+void DebugLog( const std::string& aLine );
+
+/**
  * HTTP client for communicating with the Copper cloud API.
  * All heavy I/O runs on a background thread; results are posted
  * back to the UI thread via wxQueueEvent.

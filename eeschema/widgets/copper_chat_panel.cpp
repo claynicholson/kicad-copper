@@ -115,6 +115,21 @@ COPPER_CHAT_PANEL::COPPER_CHAT_PANEL( wxWindow* aParent, SCH_EDIT_FRAME* aFrame 
 
     m_client = std::make_unique<COPPER::CLIENT>( m_auth.get() );
 
+    // Debug mode (COPPER_DEBUG=1): badge the header and trace the resolved
+    // endpoint so transport failures can be diagnosed from the log.
+    if( COPPER::DebugEnabled() )
+    {
+        m_titleLabel->SetLabel( wxT( "Copper AI [debug]" ) );
+        m_titleLabel->SetToolTip( wxString::Format(
+                wxT( "API: %s\nLog: %s" ),
+                wxString::FromUTF8( apiUrl ),
+                wxString::FromUTF8( COPPER::DebugLogPath() ) ) );
+        m_headerPanel->Layout();
+
+        COPPER::DebugLog( "panel init: api_url=" + apiUrl
+                          + " authenticated=" + ( m_auth->IsAuthenticated() ? "yes" : "no" ) );
+    }
+
     // Bind auth events
     Bind( COPPER_EVT_AUTH_SUCCESS, &COPPER_CHAT_PANEL::onAuthSuccess, this );
     Bind( COPPER_EVT_AUTH_FAILURE, &COPPER_CHAT_PANEL::onAuthFailure, this );
@@ -742,10 +757,24 @@ void COPPER_CHAT_PANEL::handleError( const std::string& aError )
             || aError.rfind( "Stream request failed", 0 ) == 0
             || aError.find( "stream ended" ) != std::string::npos )
     {
-        addAIMessage( wxString::Format(
+        wxString msg = wxString::Format(
                 wxT( "Backend connection lost (%s). Check your network or the API "
                      "URL in Settings, then try again." ),
-                wxString::FromUTF8( aError ) ) );
+                wxString::FromUTF8( aError ) );
+
+        if( COPPER::DebugEnabled() )
+        {
+            msg += wxString::Format( wxT( "\n\nAPI: %s\nDebug log: %s" ),
+                                     wxString::FromUTF8( m_auth->GetApiUrl() ),
+                                     wxString::FromUTF8( COPPER::DebugLogPath() ) );
+        }
+        else
+        {
+            msg += wxT( "\n\nTip: relaunch with COPPER_DEBUG=1 to trace requests "
+                        "to a log file." );
+        }
+
+        addAIMessage( msg );
         return;
     }
 
