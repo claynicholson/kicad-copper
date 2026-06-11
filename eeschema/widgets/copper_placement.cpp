@@ -20,6 +20,7 @@
 #include <widgets/copper_placement.h>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <map>
 #include <set>
@@ -40,7 +41,9 @@ constexpr long long GRID_NM = 2540000;            // 2.54 mm — the schematic g
 constexpr long long MARGIN_NM = 10 * GRID_NM;     // sheet margin
 constexpr long long COL_GAP_NM = 12 * GRID_NM;    // gap between flow columns
 constexpr long long CLUSTER_GAP_NM = 8 * GRID_NM; // gap between stacked clusters
-constexpr long long CELL_PAD_NM = 6 * GRID_NM;    // padding around grid cells
+constexpr long long CELL_PAD_NM = 9 * GRID_NM;    // padding around grid cells
+constexpr long long SAT_PAD_NM = 2 * GRID_NM;     // collision halo around parts
+constexpr long long SECTION_PAD_NM = 4 * GRID_NM; // frame padding around sections
 constexpr long long DEFAULT_EXTENT_NM = 4 * GRID_NM;
 
 long long snapNm( long long v )
@@ -65,10 +68,29 @@ struct PartGeom
 struct Cluster
 {
     std::string           moduleId;
+    std::string           role;
     int                   flowRank = 3;
     wxString              anchorRef;
     std::vector<wxString> refs; // placed, non-satellite members
 };
+
+struct Rect
+{
+    long long x1 = 0;
+    long long y1 = 0;
+    long long x2 = 0;
+    long long y2 = 0;
+};
+
+bool rectsOverlap( const Rect& a, const Rect& b )
+{
+    return a.x1 < b.x2 && b.x1 < a.x2 && a.y1 < b.y2 && b.y1 < a.y2;
+}
+
+Rect rectAt( long long cx, long long cy, long long w, long long h, long long pad )
+{
+    return { cx - w / 2 - pad, cy - h / 2 - pad, cx + w / 2 + pad, cy + h / 2 + pad };
+}
 
 struct Attachment
 {
@@ -135,7 +157,8 @@ namespace COPPER_PLACEMENT
 {
 
 int RefinePlacement( std::vector<COPPER::Operation>& aOperations,
-                     const std::function<LIB_SYMBOL*( const wxString& )>& aResolve )
+                     const std::function<LIB_SYMBOL*( const wxString& )>& aResolve,
+                     std::vector<SECTION_BOX>* aSections )
 {
     // ── Locate the advisory hints; without them keep backend coordinates ──
     const nlohmann::json* hints = nullptr;
@@ -197,6 +220,7 @@ int RefinePlacement( std::vector<COPPER::Operation>& aOperations,
         {
             Cluster c;
             c.moduleId = jc.value( "module_id", "" );
+            c.role = jc.value( "role", "" );
             c.flowRank = jc.value( "flow_rank", 3 );
             c.anchorRef = wxString::FromUTF8( jc.value( "anchor_ref", "" ) );
 
@@ -385,13 +409,27 @@ int RefinePlacement( std::vector<COPPER::Operation>& aOperations,
     }
 
     // ── Satellite snap: park each satellite just off its host's REAL pin ──
-    std::set<std::pair<long long, long long>> occupied;
+    // Collision is rectangle-vs-rectangle over every placed body (with a
+    // grid halo), so satellites can never sit on a neighbor — they slide
+    // perpendicular until they find genuinely free board.
+    std::vector<Rect> placedRects;
 
     for( const auto& [ref, c] : absCenter )
     {
-        (void) ref;
-        occupied.insert( { snapNm( c.first ), snapNm( c.second ) } );
+        const PartGeom& g = geom[ref];
+        placedRects.push_back( rectAt( c.first, c.second, g.w, g.h, SAT_PAD_NM ) );
     }
+
+    auto collides = [&]( const Rect& r )
+    {
+        for( const Rect& p : placedRects )
+        {
+            if( rectsOverlap( r, p ) )
+                return true;
+        }
+
+        return false;
+    };
 
     for( const auto& [ref, att] : satellites )
     {
@@ -421,24 +459,90 @@ int RefinePlacement( std::vector<COPPER::Operation>& aOperations,
         long long dirY = horizontal ? 0 : ( dy >= 0 ? 1 : -1 );
 
         long long reach = horizontal ? sat.w / 2 : sat.h / 2;
-        long long cxNm = pinX + dirX * ( 2 * GRID_NM + reach );
-        long long cyNm = pinY + dirY * ( 2 * GRID_NM + reach );
+        long long cxNm = pinX + dirX * ( 3 * GRID_NM + reach );
+        long long cyNm = pinY + dirY * ( 3 * GRID_NM + reach );
 
-        // Multiple satellites on the same pin neighborhood: slide
-        // perpendicular one cell at a time until the spot is free.
+        // Slide perpendicular one slot at a time until nothing overlaps.
         long long perpX = horizontal ? 0 : 1;
         long long perpY = horizontal ? 1 : 0;
         long long stepW = ( horizontal ? sat.h : sat.w ) + 2 * GRID_NM;
         int guard = 0;
 
-        while( occupied.count( { snapNm( cxNm ), snapNm( cyNm ) } ) && guard++ < 64 )
+        while( collides( rectAt( cxNm, cyNm, sat.w, sat.h, SAT_PAD_NM ) ) && guard++ < 128 )
         {
             cxNm += perpX * stepW;
             cyNm += perpY * stepW;
         }
 
         absCenter[ref] = { cxNm, cyNm };
-        occupied.insert( { snapNm( cxNm ), snapNm( cyNm ) } );
+        placedRects.push_back( rectAt( cxNm, cyNm, sat.w, sat.h, SAT_PAD_NM ) );
+    }
+
+    // ── Section frames: one padded bounds per cluster, satellites included ──
+    if( aSections )
+    {
+        std::map<wxString, size_t> clusterOf;
+
+        for( size_t i = 0; i < laidClusters.size(); ++i )
+        {
+            for( const auto& [ref, rc] : laidClusters[i].second.rel )
+            {
+                (void) rc;
+                clusterOf[ref] = i;
+            }
+        }
+
+        for( const auto& [ref, att] : satellites )
+        {
+            auto it = clusterOf.find( att.toRef );
+
+            if( it != clusterOf.end() && absCenter.count( ref ) )
+                clusterOf[ref] = it->second;
+        }
+
+        std::vector<Rect> bounds( laidClusters.size(),
+                                  Rect{ LLONG_MAX, LLONG_MAX, LLONG_MIN, LLONG_MIN } );
+
+        for( const auto& [ref, ci] : clusterOf )
+        {
+            auto it = absCenter.find( ref );
+
+            if( it == absCenter.end() )
+                continue;
+
+            const PartGeom& g = geom[ref];
+            Rect& b = bounds[ci];
+            b.x1 = std::min( b.x1, it->second.first - g.w / 2 );
+            b.y1 = std::min( b.y1, it->second.second - g.h / 2 );
+            b.x2 = std::max( b.x2, it->second.first + g.w / 2 );
+            b.y2 = std::max( b.y2, it->second.second + g.h / 2 );
+        }
+
+        for( size_t i = 0; i < laidClusters.size(); ++i )
+        {
+            const Rect& b = bounds[i];
+
+            if( b.x1 > b.x2 )
+                continue;
+
+            const Cluster* c = laidClusters[i].first;
+            SECTION_BOX sec;
+
+            if( c->moduleId == "_misc" )
+                sec.title = wxT( "misc" );
+            else if( !c->role.empty() && c->role != "other" )
+                sec.title = wxString::Format( wxT( "%s  [%s]" ),
+                                              wxString::FromUTF8( c->moduleId ),
+                                              wxString::FromUTF8( c->role ) );
+            else
+                sec.title = wxString::FromUTF8( c->moduleId );
+
+            sec.x = snapNm( b.x1 - SECTION_PAD_NM );
+            sec.y = snapNm( b.y1 - SECTION_PAD_NM );
+            sec.w = snapNm( b.x2 + SECTION_PAD_NM ) - sec.x;
+            sec.h = snapNm( b.y2 + SECTION_PAD_NM ) - sec.y;
+            aSections->push_back( sec );
+        }
     }
 
     // ── Write back: body center → symbol anchor, snapped to grid ──

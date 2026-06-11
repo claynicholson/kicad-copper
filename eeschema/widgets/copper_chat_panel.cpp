@@ -32,6 +32,8 @@
 #include <sch_label.h>
 #include <sch_junction.h>
 #include <sch_no_connect.h>
+#include <sch_shape.h>
+#include <sch_text.h>
 #include <sch_bus_entry.h>
 #include <sch_sheet.h>
 #include <sch_field.h>
@@ -1530,6 +1532,8 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
                                           "fail-closed checks" ),
                                      aOperations.size() ) );
 
+    std::vector<COPPER_PLACEMENT::SECTION_BOX> sections;
+
     int refined = COPPER_PLACEMENT::RefinePlacement( ops,
             [this]( const wxString& aLibIdStr ) -> LIB_SYMBOL*
             {
@@ -1539,7 +1543,8 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
                     return nullptr;
 
                 return resolveLibSymbol( id );
-            } );
+            },
+            &sections );
 
     if( COPPER::DebugEnabled() )
         COPPER::DebugLog( "ExecuteOperations: RefinePlacement rewrote "
@@ -1706,13 +1711,49 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
                     return;
                 }
 
+                // Route a short wire stub away from the pin and hang the
+                // power symbol off its end, so the symbol never sits on top
+                // of the host body. GND-ish nets drop below; rails rise.
+                constexpr int GRID_IU = 25400; // 2.54 mm in eeschema IU
+
+                VECTOR2I out( 0, 0 );
+
+                switch( pin->GetOrientation() )
+                {
+                case PIN_ORIENTATION::PIN_RIGHT: out = { -1, 0 }; break;
+                case PIN_ORIENTATION::PIN_LEFT:  out = { 1, 0 };  break;
+                case PIN_ORIENTATION::PIN_UP:    out = { 0, 1 };  break;
+                case PIN_ORIENTATION::PIN_DOWN:  out = { 0, -1 }; break;
+                default: break;
+                }
+
+                wxString netUpper = wxString::FromUTF8( netName ).Upper();
+                int ty = netUpper.Contains( wxT( "GND" ) ) ? 1 : -1;
+
+                VECTOR2I end = pinPos;
+
+                if( out.x != 0 )
+                    end = pinPos + VECTOR2I( out.x * 2 * GRID_IU, 0 );
+                else if( out.y == ty )
+                    end = pinPos + VECTOR2I( 0, ty * 2 * GRID_IU );
+
+                // (vertical pin pointing away from the net's natural
+                // direction: keep the symbol directly on the pin)
+
+                if( end != pinPos )
+                {
+                    SCH_LINE* wire = new SCH_LINE( pinPos, LAYER_WIRE );
+                    wire->SetEndPoint( end );
+                    commit.Add( wire, screen );
+                }
+
                 SCH_SYMBOL* powerSym = new SCH_SYMBOL( *libSym, powerId, &sheet, 0 );
-                powerSym->SetPosition( pinPos );
+                powerSym->SetPosition( end );
 
                 // NEVER rotate power symbols: the library defaults already
                 // encode the human convention (GND hangs down, +rails point
                 // up). The symbol's own pin sits at its origin, so the
-                // connection point stays exactly on the host pin regardless.
+                // connection point stays exactly on the stub end regardless.
                 commit.Add( powerSym, screen );
             }
             else
@@ -1853,6 +1894,36 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
             symbol->SetPosition( VECTOR2I( posX, posY ) );
             commit.Add( symbol, screen );
         }
+    }
+
+    // ── Section frames: dashed box + title per functional cluster ──
+    if( !sections.empty() )
+    {
+        constexpr int GRID_IU = 25400; // 2.54 mm in eeschema IU
+
+        for( const COPPER_PLACEMENT::SECTION_BOX& sec : sections )
+        {
+            VECTOR2I tl( (int) ( sec.x / 100 ), (int) ( sec.y / 100 ) );
+            VECTOR2I br( (int) ( ( sec.x + sec.w ) / 100 ),
+                         (int) ( ( sec.y + sec.h ) / 100 ) );
+
+            SCH_SHAPE* box = new SCH_SHAPE( SHAPE_T::RECTANGLE );
+            box->SetPosition( tl );
+            box->SetEnd( br );
+            box->SetStroke( STROKE_PARAMS( 0, LINE_STYLE::DASH,
+                                           KIGFX::COLOR4D( 0.4, 0.4, 0.4, 1.0 ) ) );
+            commit.Add( box, screen );
+
+            SCH_TEXT* title = new SCH_TEXT( VECTOR2I( tl.x, tl.y - GRID_IU / 2 ),
+                                            sec.title );
+            title->SetHorizJustify( GR_TEXT_H_ALIGN_LEFT );
+            title->SetVertJustify( GR_TEXT_V_ALIGN_BOTTOM );
+            title->SetBold( true );
+            commit.Add( title, screen );
+        }
+
+        addLogMessage( wxString::Format( wxT( "layout: %zu section frame(s) drawn" ),
+                                         sections.size() ) );
     }
 
     if( COPPER::DebugEnabled() )

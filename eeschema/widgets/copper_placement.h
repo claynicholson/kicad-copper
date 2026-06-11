@@ -24,12 +24,25 @@
 #include <vector>
 
 #include <copper/copper_types.h>
+#include <wx/string.h>
 
 class LIB_SYMBOL;
-class wxString;
 
 namespace COPPER_PLACEMENT
 {
+
+/**
+ * A functional section of the schematic: one hint cluster's final footprint
+ * (members + satellites), padded. Coordinates in nanometers, y down.
+ */
+struct SECTION_BOX
+{
+    wxString  title;
+    long long x = 0;
+    long long y = 0;
+    long long w = 0;
+    long long h = 0;
+};
 
 /**
  * Client-side placement refinement: rewrite PLACE_COMPONENT x/y (nanometers)
@@ -46,10 +59,13 @@ namespace COPPER_PLACEMENT
  *
  * @param aOperations plan ops, modified in place.
  * @param aResolve    lib_id string -> LIB_SYMBOL* (nullptr if unresolvable).
+ * @param aSections   optional out: one padded bounding box per hint cluster,
+ *                    suitable for drawing section frames.
  * @return number of PLACE_COMPONENT ops whose coordinates were rewritten.
  */
 int RefinePlacement( std::vector<COPPER::Operation>& aOperations,
-                     const std::function<LIB_SYMBOL*( const wxString& )>& aResolve );
+                     const std::function<LIB_SYMBOL*( const wxString& )>& aResolve,
+                     std::vector<SECTION_BOX>* aSections = nullptr );
 
 } // namespace COPPER_PLACEMENT
 
