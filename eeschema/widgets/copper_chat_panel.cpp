@@ -65,6 +65,7 @@ COPPER_CHAT_PANEL::COPPER_CHAT_PANEL( wxWindow* aParent, SCH_EDIT_FRAME* aFrame 
         m_emptyStatePanel( nullptr ),
         m_stagePanel( nullptr ),
         m_designForm( nullptr ),
+        m_thinking( nullptr ),
         m_inputPanel( nullptr ),
         m_modeChoice( nullptr ),
         m_inputText( nullptr ),
@@ -486,6 +487,7 @@ void COPPER_CHAT_PANEL::addAIMessage( const wxString& aText )
                          FromDIP( 8 ) );
 
     m_conversationHistory.push_back( wxT( "ai: " ) + aText );
+    bumpThinkingToBottom();
     scrollToBottom();
 }
 
@@ -512,6 +514,7 @@ void COPPER_CHAT_PANEL::addPlanCard( const COPPER::CopperResponse& aResponse )
     card->Bind( COPPER_EVT_PLAN_DISMISSED, &COPPER_CHAT_PANEL::onPlanDismissed, this );
 
     m_messageSizer->Add( card, 0, wxEXPAND | wxALL, FromDIP( 8 ) );
+    bumpThinkingToBottom();
     scrollToBottom();
 }
 
@@ -533,6 +536,7 @@ void COPPER_CHAT_PANEL::showStages(
     }
 
     m_stagePanel->SetStages( stages );
+    bumpThinkingToBottom();
     scrollToBottom();
 }
 
@@ -545,6 +549,48 @@ void COPPER_CHAT_PANEL::scrollToBottom()
     int x, y;
     m_scrollArea->GetVirtualSize( &x, &y );
     m_scrollArea->Scroll( 0, y );
+}
+
+
+void COPPER_CHAT_PANEL::bumpThinkingToBottom()
+{
+    // Mid-stream items (messages, stages, plan cards) are appended after the
+    // indicator — move it back to the end so the sweep always reads as
+    // "still working" at the bottom of the conversation.
+    if( !m_thinking )
+        return;
+
+    m_messageSizer->Detach( m_thinking );
+    m_messageSizer->Add( m_thinking, 0, wxALIGN_LEFT | wxLEFT | wxRIGHT | wxBOTTOM,
+                         FromDIP( 8 ) );
+}
+
+
+void COPPER_CHAT_PANEL::showThinking()
+{
+    if( m_thinking )
+        return;
+
+    clearEmptyState();
+
+    m_thinking = new COPPER_THINKING_INDICATOR( m_scrollArea );
+    m_messageSizer->Add( m_thinking, 0, wxALIGN_LEFT | wxLEFT | wxRIGHT | wxBOTTOM,
+                         FromDIP( 8 ) );
+    scrollToBottom();
+}
+
+
+void COPPER_CHAT_PANEL::hideThinking()
+{
+    if( !m_thinking )
+        return;
+
+    m_messageSizer->Detach( m_thinking );
+    m_thinking->Destroy();
+    m_thinking = nullptr;
+
+    m_scrollArea->FitInside();
+    m_scrollArea->Layout();
 }
 
 
@@ -664,6 +710,8 @@ void COPPER_CHAT_PANEL::sendRequest( const wxString& aPrompt )
     m_sendBtn->Disable();
     m_inputText->Disable();
 
+    showThinking();
+
     auto onResponse = [this]( const COPPER::CopperResponse& r )
     {
         // Must be called on UI thread via CallAfter
@@ -710,6 +758,8 @@ void COPPER_CHAT_PANEL::sendRequest( const wxString& aPrompt )
 
 void COPPER_CHAT_PANEL::handleResponse( const COPPER::CopperResponse& aResponse )
 {
+    hideThinking();
+
     if( !aResponse.success )
     {
         addAIMessage( wxString::Format( wxT( "Error: %s" ),
@@ -837,6 +887,8 @@ void COPPER_CHAT_PANEL::handleSSEEvent( const COPPER::SSEEvent& aEvent )
 
 void COPPER_CHAT_PANEL::handleError( const std::string& aError )
 {
+    hideThinking();
+
     // Closes gap G-STATES: classify transport errors into actionable states.
     // COPPER::CLIENT surfaces "HTTP <status>" for non-200 and
     // "Request failed: ..." / "Stream request failed: ..." for curl errors.

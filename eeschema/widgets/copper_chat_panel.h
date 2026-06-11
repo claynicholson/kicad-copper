@@ -35,6 +35,7 @@
 class SCH_EDIT_FRAME;
 class COPPER_STAGE_PANEL;
 class COPPER_DESIGN_FORM;
+class COPPER_THINKING_INDICATOR;
 
 namespace COPPER
 {
@@ -109,6 +110,14 @@ private:
     void scrollToBottom();
     void clearEmptyState();
 
+    /// Show/remove the animated "thinking" scanner-bar while a request is
+    /// in flight. Both are idempotent.
+    void showThinking();
+    void hideThinking();
+
+    /// Re-append the indicator after mid-stream items so it stays last.
+    void bumpThinkingToBottom();
+
     /// Show the structured "design from scratch" intake form (no-op if visible).
     void showDesignForm();
 
@@ -151,6 +160,9 @@ private:
 
     // "Design from scratch" intake form (null when not shown)
     COPPER_DESIGN_FORM*                 m_designForm;
+
+    // Animated "thinking" indicator (null when not shown)
+    COPPER_THINKING_INDICATOR*          m_thinking;
 
     // Input bar
     wxPanel*                            m_inputPanel;

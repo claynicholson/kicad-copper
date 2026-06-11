@@ -25,6 +25,10 @@
 #include <wx/graphics.h>
 #include <wx/settings.h>
 #include <wx/textctrl.h>
+#include <wx/timer.h>
+
+#include <algorithm>
+#include <cmath>
 
 
 // ─── Event definitions ──────────────────────────────────────────────────────
@@ -446,6 +450,143 @@ void COPPER_HINT_CHIP::OnClick( wxMouseEvent& aEvent )
     evt.SetString( m_text );
     evt.SetEventObject( this );
     ProcessWindowEvent( evt );
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  COPPER_THINKING_INDICATOR
+// ═══════════════════════════════════════════════════════════════════════════
+
+namespace
+{
+    constexpr int THINK_TIMER_MS = 33;       // ~30 fps
+    constexpr int THINK_DOTS = 10;           // scanner bar length
+    constexpr int THINK_PHRASE_TICKS = 90;   // ~3 s per phrase
+
+    const wxString THINK_PHRASES[] = {
+        wxT( "Thinking" ),
+        wxT( "Herding electrons" ),
+        wxT( "Consulting the datasheets" ),
+        wxT( "Routing the rat's nest" ),
+        wxT( "Plating the traces" ),
+        wxT( "Negotiating with Ohm's law" ),
+        wxT( "Warming up the soldering iron" ),
+    };
+
+    constexpr size_t THINK_PHRASE_COUNT = sizeof( THINK_PHRASES ) / sizeof( THINK_PHRASES[0] );
+
+    /// Linear blend between two colours, t in [0, 1].
+    wxColour blendColour( const wxColour& aFrom, const wxColour& aTo, double aT )
+    {
+        auto mix = []( int a, int b, double t ) { return a + (int) ( ( b - a ) * t ); };
+        return wxColour( mix( aFrom.Red(),   aTo.Red(),   aT ),
+                         mix( aFrom.Green(), aTo.Green(), aT ),
+                         mix( aFrom.Blue(),  aTo.Blue(),  aT ) );
+    }
+}
+
+
+wxBEGIN_EVENT_TABLE( COPPER_THINKING_INDICATOR, wxPanel )
+    EVT_PAINT( COPPER_THINKING_INDICATOR::OnPaint )
+wxEND_EVENT_TABLE()
+
+
+COPPER_THINKING_INDICATOR::COPPER_THINKING_INDICATOR( wxWindow* aParent ) :
+        wxPanel( aParent, wxID_ANY ),
+        m_phase( 0 ),
+        m_phraseIdx( 0 )
+{
+    SetBackgroundStyle( wxBG_STYLE_PAINT );
+
+    m_timer = new wxTimer( this );
+    Bind( wxEVT_TIMER, &COPPER_THINKING_INDICATOR::OnTimer, this, m_timer->GetId() );
+    m_timer->Start( THINK_TIMER_MS );
+}
+
+
+COPPER_THINKING_INDICATOR::~COPPER_THINKING_INDICATOR()
+{
+    m_timer->Stop();
+    delete m_timer;
+}
+
+
+wxSize COPPER_THINKING_INDICATOR::DoGetBestSize() const
+{
+    // Wide enough for the bar plus the longest phrase, so the bubble doesn't
+    // resize as phrases rotate.
+    wxClientDC dc( const_cast<COPPER_THINKING_INDICATOR*>( this ) );
+    dc.SetFont( GetFont() );
+
+    int maxPhrase = 0;
+
+    for( const wxString& p : THINK_PHRASES )
+        maxPhrase = std::max( maxPhrase, dc.GetTextExtent( p + wxT( "..." ) ).x );
+
+    int barWidth = THINK_DOTS * FromDIP( 9 );
+    return wxSize( FromDIP( 12 + 10 ) + barWidth + FromDIP( 10 ) + maxPhrase + FromDIP( 12 + 12 ),
+                   FromDIP( 34 ) );
+}
+
+
+void COPPER_THINKING_INDICATOR::OnTimer( wxTimerEvent& aEvent )
+{
+    m_phase++;
+
+    if( m_phase % THINK_PHRASE_TICKS == 0 )
+        m_phraseIdx = ( m_phraseIdx + 1 ) % THINK_PHRASE_COUNT;
+
+    Refresh();
+}
+
+
+void COPPER_THINKING_INDICATOR::OnPaint( wxPaintEvent& aEvent )
+{
+    wxAutoBufferedPaintDC dc( this );
+    wxSize size = GetClientSize();
+
+    // Panel background
+    dc.SetBrush( wxBrush( COPPER_COLORS::BG_PRIMARY ) );
+    dc.SetPen( *wxTRANSPARENT_PEN );
+    dc.DrawRectangle( 0, 0, size.x, size.y );
+
+    // AI-side bubble
+    dc.SetBrush( wxBrush( COPPER_COLORS::AI_BUBBLE ) );
+    dc.DrawRoundedRectangle( 0, 0, size.x, size.y, FromDIP( 10 ) );
+
+    dc.SetFont( GetFont() );
+
+    const int dotSpacing = FromDIP( 9 );
+    const int barX = FromDIP( 12 );
+    const wxString dot = wxString::FromUTF8( "\xe2\x97\x8f" );  // ● BLACK CIRCLE
+    const wxSize dotExtent = dc.GetTextExtent( dot );
+    const int textY = ( size.y - dotExtent.y ) / 2;
+
+    // Scanner sweep: triangle wave bouncing across [0, THINK_DOTS-1].
+    // One full left→right→left cycle every ~1.6 s at 30 fps.
+    const double speed = 0.25;
+    const double range = THINK_DOTS - 1;
+    double t = std::fmod( m_phase * speed, 2.0 * range );
+    double pos = ( t <= range ) ? t : 2.0 * range - t;
+
+    for( int i = 0; i < THINK_DOTS; i++ )
+    {
+        // Gaussian-ish falloff around the sweep position gives the bright
+        // head a soft comet tail instead of a hard edge.
+        double dist = std::abs( i - pos );
+        double intensity = std::exp( -( dist * dist ) / 2.0 );
+
+        dc.SetTextForeground( blendColour( COPPER_COLORS::TEXT_MUTED,
+                                           COPPER_COLORS::ACCENT, intensity ) );
+        dc.DrawText( dot, barX + i * dotSpacing, textY );
+    }
+
+    // Cycling phrase with a typed ellipsis (., .., ...)
+    int dots = ( m_phase / ( THINK_PHRASE_TICKS / 6 ) ) % 3 + 1;
+    wxString phrase = THINK_PHRASES[m_phraseIdx] + wxString( '.', dots );
+
+    dc.SetTextForeground( COPPER_COLORS::TEXT_SECONDARY );
+    dc.DrawText( phrase, barX + THINK_DOTS * dotSpacing + FromDIP( 10 ), textY );
 }
 
 

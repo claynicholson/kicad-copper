@@ -232,6 +232,44 @@ private:
 };
 
 
+// ─── COPPER_THINKING_INDICATOR ──────────────────────────────────────────────
+
+class wxTimer;
+class wxTimerEvent;
+
+/**
+ * Animated text "thinking" indicator shown while a request is in flight.
+ *
+ * Renders as an AI-side bubble containing a scanner bar — a row of text
+ * dots with a bright copper highlight that sweeps back and forth (bounces
+ * at the ends), each dot blending TEXT_MUTED → ACCENT by distance from the
+ * sweep position — followed by a cycling copper-flavored status phrase.
+ * Pure text, ~30 fps, no bitmaps.
+ *
+ * Lifetime: create + add to a sizer to start animating; Destroy() to stop
+ * (the timer is owned and stops in the destructor).
+ */
+class COPPER_THINKING_INDICATOR : public wxPanel
+{
+public:
+    COPPER_THINKING_INDICATOR( wxWindow* aParent );
+    ~COPPER_THINKING_INDICATOR() override;
+
+protected:
+    wxSize DoGetBestSize() const override;
+
+    void OnPaint( wxPaintEvent& aEvent );
+    void OnTimer( wxTimerEvent& aEvent );
+
+private:
+    wxTimer* m_timer;
+    int      m_phase;        // animation clock, one tick per timer fire
+    size_t   m_phraseIdx;    // index into the phrase rotation
+
+    wxDECLARE_EVENT_TABLE();
+};
+
+
 // ─── COPPER_STAGE_PANEL ─────────────────────────────────────────────────────
 
 /**
