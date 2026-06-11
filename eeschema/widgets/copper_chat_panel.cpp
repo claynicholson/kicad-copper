@@ -2024,8 +2024,44 @@ int COPPER_CHAT_PANEL::runErcAutoFix()
                 else
                     warnings++;
 
-                addLogMessage( wxString::Format( wxT( "erc: [%s] %s" ), sevName,
-                                                 rc->GetErrorMessage( true ) ) );
+                // Name the offending items so the log is actionable —
+                // "Pin not connected" forty times tells you nothing.
+                wxString where;
+
+                for( const KIID& kiid : { rc->GetMainItemID(), rc->GetAuxItemID() } )
+                {
+                    if( kiid == niluuid )
+                        continue;
+
+                    SCH_SHEET_PATH  itemPath;
+                    SCH_ITEM*       offender = sch.ResolveItem( kiid, &itemPath, true );
+
+                    if( !offender )
+                        continue;
+
+                    wxString desc;
+
+                    if( offender->Type() == SCH_PIN_T )
+                    {
+                        SCH_PIN*    pin = static_cast<SCH_PIN*>( offender );
+                        SCH_SYMBOL* parent =
+                                static_cast<SCH_SYMBOL*>( pin->GetParentSymbol() );
+
+                        desc = wxString::Format( wxT( "%s pin %s (%s)" ),
+                                parent ? parent->GetRef( &itemPath ) : wxString( wxT( "?" ) ),
+                                pin->GetNumber(), pin->GetName() );
+                    }
+                    else
+                    {
+                        desc = offender->GetItemDescription( m_frame, true );
+                    }
+
+                    where += where.IsEmpty() ? wxT( " — " ) : wxT( " / " );
+                    where += desc;
+                }
+
+                addLogMessage( wxString::Format( wxT( "erc: [%s] %s%s" ), sevName,
+                                                 rc->GetErrorMessage( true ), where ) );
 
                 if( rc->GetErrorCode() == ERCE_PIN_NOT_CONNECTED )
                     fixablePins.push_back( marker->GetPosition() );
