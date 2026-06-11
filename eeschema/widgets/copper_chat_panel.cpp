@@ -36,6 +36,8 @@
 #include <eeschema_settings.h>
 #include <connection_graph.h>
 #include <sch_commit.h>
+#include <tool/tool_manager.h>
+#include <tool/actions.h>
 
 #include <wx/dcbuffer.h>
 #include <wx/msgdlg.h>
@@ -67,7 +69,8 @@ COPPER_CHAT_PANEL::COPPER_CHAT_PANEL( wxWindow* aParent, SCH_EDIT_FRAME* aFrame 
         m_modeChoice( nullptr ),
         m_inputText( nullptr ),
         m_sendBtn( nullptr ),
-        m_emptyStateVisible( true )
+        m_emptyStateVisible( true ),
+        m_planCardShown( false )
 {
     SetBackgroundColour( COPPER_COLORS::BG_PRIMARY );
 
@@ -413,10 +416,10 @@ void COPPER_CHAT_PANEL::onPlanApproved( wxCommandEvent& aEvent )
 
     std::vector<COPPER::Operation> ops;
     ops.swap( m_pendingOps );  // take ownership, leave member empty
+
+    // ExecuteOperations reports its own outcome (success message or a
+    // fail-closed rejection) — don't claim success here.
     ExecuteOperations( ops );
-    addAIMessage( wxString::Format( wxT( "Applied %zu operation(s). "
-                                         "Press Ctrl-Z to undo." ),
-                                    ops.size() ) );
 
     if( auto* card = dynamic_cast<COPPER_PLAN_CARD*>( aEvent.GetEventObject() ) )
         card->DisableActions();
@@ -655,6 +658,7 @@ void COPPER_CHAT_PANEL::sendRequest( const wxString& aPrompt )
 
     // Pending ops from any previous unfinished plan are stale now.
     m_pendingOps.clear();
+    m_planCardShown = false;
 
     // Disable send while processing
     m_sendBtn->Disable();
@@ -715,11 +719,28 @@ void COPPER_CHAT_PANEL::handleResponse( const COPPER::CopperResponse& aResponse 
     }
 
     if( !aResponse.message.empty() )
-        addAIMessage( wxString::FromUTF8( aResponse.message ) );
+    {
+        // The stream may already have delivered the same text as a "message"
+        // event — don't repeat it.
+        wxString msg = wxString::FromUTF8( aResponse.message );
+
+        if( m_conversationHistory.empty()
+                || m_conversationHistory.back() != wxT( "ai: " ) + msg )
+        {
+            addAIMessage( msg );
+        }
+    }
 
     // Stash operations from the final response so onPlanApproved can apply them.
     // See docs/INTEGRATION_V1_AUDIT.md gap B1 / G-APPROVE.
     m_pendingOps = aResponse.operations;
+
+    if( m_planCardShown )
+    {
+        // The "plan" SSE event already rendered this request's card; the
+        // "done" payload only needed to be stashed (operations above).
+        return;
+    }
 
     if( !aResponse.plan.steps.empty() )
         addPlanCard( aResponse );
@@ -782,6 +803,7 @@ void COPPER_CHAT_PANEL::handleSSEEvent( const COPPER::SSEEvent& aEvent )
         nlohmann::json data = aEvent.dataAsJson();
         resp.plan = COPPER::PlanCard::fromJson( data );
         addPlanCard( resp );
+        m_planCardShown = true;
     }
     else if( aEvent.event == "done" )
     {
@@ -1234,8 +1256,9 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
                 // SCH_COMMIT destructor will clean up any items we added so
                 // far. We never pushed, so the schematic is unchanged.
                 addAIMessage( wxString::Format(
-                    wxT( "Symbol not found in libraries: %s. "
-                         "Nothing applied." ),
+                    wxT( "Symbol not found in libraries: %s. Nothing applied. "
+                         "Check that the KiCad symbol libraries are installed "
+                         "(Preferences > Manage Symbol Libraries)." ),
                     wxString::FromUTF8( libIdStr ) ) );
                 return;
             }
@@ -1304,24 +1327,43 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
 
             LIB_SYMBOL* libSym = m_frame->GetLibSymbol( libId );
 
-            if( libSym )
+            if( !libSym )
             {
-                SCH_SYMBOL* symbol = new SCH_SYMBOL( *libSym, libId,
-                                                      &m_frame->Schematic().CurrentSheet(),
-                                                      0 );
-                symbol->SetPosition( VECTOR2I( posX, posY ) );
-                commit.Add( symbol, screen );
+                // Fail closed like PLACE_COMPONENT (ADR-004): a silently
+                // skipped power symbol leaves a net floating.
+                addAIMessage( wxString::Format(
+                    wxT( "Symbol not found in libraries: power:%s. "
+                         "Nothing applied. Check that the KiCad symbol "
+                         "libraries are installed (Preferences > Manage "
+                         "Symbol Libraries)." ),
+                    wxString::FromUTF8( netName ) ) );
+                return;
             }
+
+            SCH_SYMBOL* symbol = new SCH_SYMBOL( *libSym, libId,
+                                                  &m_frame->Schematic().CurrentSheet(),
+                                                  0 );
+            symbol->SetPosition( VECTOR2I( posX, posY ) );
+            commit.Add( symbol, screen );
         }
     }
 
     // Push the commit (creates undo entry)
     commit.Push( _( "Copper AI: Execute plan" ) );
 
-    // Refresh the canvas
+    // Refresh the canvas and bring the new items into view — generated
+    // boards are often placed outside the current viewport, which looks
+    // like "nothing happened".
     m_frame->GetCanvas()->Refresh();
     m_frame->RefreshNetNavigator();
     m_frame->RecalculateConnections( nullptr, NO_CLEANUP );
+
+    if( TOOL_MANAGER* mgr = m_frame->GetToolManager() )
+        mgr->RunAction( ACTIONS::zoomFitScreen );
+
+    addAIMessage( wxString::Format( wxT( "Applied %zu operation(s). "
+                                         "Press Ctrl-Z to undo." ),
+                                    aOperations.size() ) );
 }
 
 

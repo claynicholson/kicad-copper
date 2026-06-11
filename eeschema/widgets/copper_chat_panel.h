@@ -162,6 +162,11 @@ private:
     bool                                m_emptyStateVisible;
     std::vector<wxString>               m_conversationHistory;
 
+    // True once a plan card was rendered for the current request. The SSE
+    // stream sends a "plan" event AND a "done" event carrying the same plan;
+    // without this guard the card (and message) would render twice.
+    bool                                m_planCardShown;
+
     // Operations awaiting the user's Approve click on a plan card.
     // Cleared after ExecuteOperations or Cancel. See docs/INTEGRATION_V1_AUDIT.md
     // gap B1 / G-APPROVE.

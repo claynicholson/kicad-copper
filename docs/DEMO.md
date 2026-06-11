@@ -58,6 +58,22 @@ Append a row to the end of this file each time you do the smoke test:
 |------------|--------------|----------|-----------------|--------|-------|
 | (template) | (sha)        | (Win/Mac/Linux) | hosted / local  | pass / fail | …  |
 
+## Troubleshooting: "Library 'X': Library not found in library table"
+
+The portable/staging build ships **no** symbol or footprint libraries
+(`share/kicad/` has no `symbols/` dir and no `template/sym-lib-table`), so
+on a machine without stock KiCad libraries every `PLACE_COMPONENT` fails
+("Symbol not found in libraries"). Fixes, fastest first:
+
+1. **Existing KiCad install** (e.g. 9.0 in Program Files): run the
+   `repair_library_tables` tool of the bundled MCP server
+   (`node mcp/copper-libs/server.mjs`), or set the `KICAD10_*_DIR` paths in
+   Preferences → Configure Paths to the stock install's `share/kicad/*`.
+2. **No KiCad install:** run the MCP `install_libraries` tool — clones the
+   official libs from GitLab and registers them.
+
+Restart eeschema afterwards; library tables are read at startup.
+
 ## Failure-path smoke checks (also good to do)
 
 - **Offline:** disconnect network → send a prompt → should see an
