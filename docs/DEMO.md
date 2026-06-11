@@ -26,6 +26,8 @@ final safety net — not a harness gate.
    once implemented.
 4. (Optional) Settings → Copper → set API URL to your backend, or
    `export COPPER_API_URL=http://localhost:8000` before launching.
+   For transport troubleshooting set `COPPER_DEBUG=1` — requests, HTTP
+   statuses, curl errors and SSE events land in `%TEMP%\copper_debug.log`.
 5. (Optional) Click **Login** in the Copper panel header → OAuth browser
    flow → tokens cached in OS keychain. Anonymous requests work against
    the hosted backend.

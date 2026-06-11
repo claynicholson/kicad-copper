@@ -136,6 +136,11 @@ Steps (recorded in [DEMO.md](DEMO.md) once M6 is done):
    before launching, or set it in the Copper settings dialog.
 5. (Optional) Click "Login" (or `export COPPER_API_TOKEN=…` for a dev
    token). Anonymous requests work against the hosted backend.
+   (Optional) `export COPPER_DEBUG=1` to trace every request, HTTP
+   status, curl error and SSE event to `%TEMP%\copper_debug.log` — the
+   panel header shows `[debug]` and connection-error messages include
+   the resolved API URL + log path. First stop when the panel reports
+   "Backend connection lost".
 6. In the panel, type:
    `RP2040 dev board with a 6-axis IMU for a flight controller`
 7. Watch stages stream in. A plan card appears. Click **Apply**.
