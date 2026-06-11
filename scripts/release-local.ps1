@@ -78,12 +78,29 @@ function Run($block, $tag) {
 
 # Invoke a bash command in the MSYS2 UCRT64 environment, passing the env
 # vars the login shell strips. Throws on non-zero exit.
+#
+# The command is written to a temp script and run via `bash -l <script>`
+# rather than `bash -lc <string>`: Windows PowerShell 5.1 mangles embedded
+# double quotes when passing native-command arguments, which corrupts any
+# command containing "$(...)" or quoted paths.
 function MsysBash([string]$cmd) {
     $env:MSYSTEM       = 'UCRT64'
     $env:CHERE_INVOKING= '1'
-    & $msysShell -lc $cmd
-    if ($LASTEXITCODE -ne 0) {
-        throw "MSYS2 command failed (exit $LASTEXITCODE): $cmd"
+
+    $tmp = Join-Path $env:TEMP ("msys-cmd-{0}.sh" -f [guid]::NewGuid())
+    # bash wants LF line endings and no BOM.
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($tmp, (($cmd -replace "`r`n", "`n") + "`n"), $utf8NoBom)
+    $tmpUnix = & "$msys2\usr\bin\cygpath.exe" -u $tmp
+
+    try {
+        & $msysShell -l $tmpUnix
+        if ($LASTEXITCODE -ne 0) {
+            throw "MSYS2 command failed (exit $LASTEXITCODE): $cmd"
+        }
+    }
+    finally {
+        Remove-Item $tmp -ErrorAction SilentlyContinue
     }
 }
 
