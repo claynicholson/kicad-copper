@@ -33,6 +33,13 @@ final safety net — not a harness gate.
    the hosted backend.
 6. In the input bar, mode = **Design**, type:
    > `RP2040 dev board with a 6-axis IMU for a flight controller`
+
+   Alternatively use **From Scratch** mode (or the "Design from scratch"
+   button on the welcome screen): fill out the structured intake form —
+   purpose, preferred supplier, all-SMD/all-THT/mixed mounting, PCBA vs
+   hand-solder assembly, free-text notes — and click **Create Board**.
+   The form composes a constraint-rich design prompt and rides the same
+   streaming pipeline as steps 7-12.
 7. Press Enter / Send.
 8. Observe stages stream in: `choosing_parts → expanding_reference_circuits
    → placement → wiring → verifying`. Mid-stream AI messages may appear.
