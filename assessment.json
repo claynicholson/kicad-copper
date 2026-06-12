@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-06-10T23:20:01Z",
+  "timestamp": "2026-06-12T03:43:01Z",
   "total_score": 100.0,
   "polished": true,
   "hard_gate_passes": 7,
@@ -46,7 +46,7 @@
       "score_unit": 1.0,
       "score_weighted": 14.0,
       "skipped": false,
-      "details": "40 tests, 0 failed, 0 errored",
+      "details": "47 tests, 0 failed, 0 errored",
       "failures": []
     },
     {
@@ -57,7 +57,7 @@
       "score_unit": 1.0,
       "score_weighted": 18.0,
       "skipped": false,
-      "details": "7 tests, 0 failed, 0 errored",
+      "details": "13 tests, 0 failed, 0 errored",
       "failures": []
     },
     {

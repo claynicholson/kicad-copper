@@ -297,6 +297,44 @@ class OpRejectionTest(unittest.TestCase):
                 "x": 0, "y": 0, "rotation": 45.0,
             })
 
+    def test_place_footprint_stored_on_symbol(self):
+        api = FakeSchematicApi()
+        tok = api.begin_commit("t")
+        api.place_component(tok, {
+            "lib_id": "Device:R", "reference": "R1", "value": "10k",
+            "footprint": "Resistor_SMD:R_0603_1608Metric",
+            "x": 0, "y": 0, "rotation": 0.0,
+        })
+        api.push_commit(tok)
+        (sym,) = api.list_symbols()
+        self.assertEqual(sym.footprint, "Resistor_SMD:R_0603_1608Metric")
+
+    def test_place_missing_footprint_defaults_empty(self):
+        api = FakeSchematicApi()
+        tok = api.begin_commit("t")
+        api.place_component(tok, _plan_data()["rp2040"])  # no footprint key
+        api.push_commit(tok)
+        (sym,) = api.list_symbols()
+        self.assertEqual(sym.footprint, "")
+
+    def test_place_footprint_no_colon_rejected(self):
+        api = FakeSchematicApi()
+        tok = api.begin_commit("t")
+        with self.assertRaises(SchematicError):
+            api.place_component(tok, {
+                "lib_id": "L:S", "reference": "U1", "value": "x",
+                "footprint": "R_0603", "x": 0, "y": 0,
+            })
+
+    def test_place_footprint_non_string_rejected(self):
+        api = FakeSchematicApi()
+        tok = api.begin_commit("t")
+        with self.assertRaises(SchematicError):
+            api.place_component(tok, {
+                "lib_id": "L:S", "reference": "U1", "value": "x",
+                "footprint": 7, "x": 0, "y": 0,
+            })
+
     def test_coord_out_of_range(self):
         api = FakeSchematicApi()
         tok = api.begin_commit("t")

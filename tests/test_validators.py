@@ -151,6 +151,63 @@ class PlaceComponentTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             validate_operation(self._op(rotation=True), _seen_refs=[])
 
+    # ── footprint (additive, optional; missing ⇒ "") ──
+
+    def test_footprint_ok(self):
+        v = validate_operation(
+            self._op(footprint="Resistor_SMD:R_0603_1608Metric"),
+            _seen_refs=[],
+        )
+        self.assertEqual(v.data["footprint"], "Resistor_SMD:R_0603_1608Metric")
+
+    def test_footprint_empty_ok(self):
+        # Power symbols carry footprint: "".
+        v = validate_operation(self._op(footprint=""), _seen_refs=[])
+        self.assertEqual(v.data["footprint"], "")
+
+    def test_footprint_missing_ok(self):
+        # Backward compat: pre-footprint backends omit the key entirely.
+        v = validate_operation(self._op(), _seen_refs=[])
+        self.assertNotIn("footprint", v.data)
+
+    def test_footprint_no_colon_rejected(self):
+        with self.assertRaises(ValidationError) as cm:
+            validate_operation(self._op(footprint="R_0603"), _seen_refs=[])
+        self.assertEqual(cm.exception.code, "place_bad_footprint")
+
+    def test_footprint_non_string_rejected(self):
+        with self.assertRaises(ValidationError) as cm:
+            validate_operation(self._op(footprint=42), _seen_refs=[])
+        self.assertEqual(cm.exception.code, "place_bad_footprint")
+
+    def test_footprint_passes_whole_response_validation(self):
+        # The pinned copper-2 Pydantic model predates footprint
+        # (extra="forbid") — the shim must still accept the full plan.
+        resp = {
+            "protocol_version": 1,
+            "success": True,
+            "intent": "generate",
+            "message": "",
+            "operations": [self._op(footprint="Lib:Name")],
+            "error": "",
+        }
+        v = validate_response(resp)
+        self.assertEqual(v.operations[0].data["footprint"], "Lib:Name")
+
+    def test_bad_footprint_rejects_whole_response(self):
+        resp = {
+            "protocol_version": 1,
+            "success": True,
+            "intent": "generate",
+            "message": "",
+            "operations": [self._op(footprint="nocolon")],
+            "error": "",
+        }
+        with self.assertRaises(ValidationError) as cm:
+            validate_response(resp)
+        self.assertEqual(cm.exception.code, "place_bad_footprint")
+        self.assertIn("operations[0]", cm.exception.path)
+
 
 class WireTest(unittest.TestCase):
     def test_ok(self):

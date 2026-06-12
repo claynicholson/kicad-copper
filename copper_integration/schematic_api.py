@@ -54,6 +54,7 @@ class Symbol:
     x: int
     y: int
     rotation: float = 0.0
+    footprint: str = ""  # KiCad footprint id 'Lib:Name', or "" (e.g. power symbols)
     is_power: bool = False  # ADD_POWER_SYMBOL sets True
 
     def to_dict(self) -> Dict[str, Any]:
@@ -382,6 +383,19 @@ class FakeSchematicApi(SchematicApi):
             if rotation not in (0.0, 90.0, 180.0, 270.0):
                 raise SchematicError(f"PLACE_COMPONENT: invalid rotation {rotation}")
 
+            # Optional, additive: missing means "" (no footprint assigned).
+            footprint = data.get("footprint", "")
+            if not isinstance(footprint, str):
+                raise SchematicError(
+                    f"PLACE_COMPONENT: footprint must be str, "
+                    f"got {type(footprint).__name__}"
+                )
+            if footprint and ":" not in footprint:
+                raise SchematicError(
+                    f"PLACE_COMPONENT: footprint must be 'Lib:Name' "
+                    f"(or empty), got {footprint!r}"
+                )
+
             sym = Symbol(
                 id=f"S{next(self._next_id)}",
                 lib_id=lib_id,
@@ -390,6 +404,7 @@ class FakeSchematicApi(SchematicApi):
                 x=x,
                 y=y,
                 rotation=rotation,
+                footprint=footprint,
                 is_power=False,
             )
             batch["symbols"].append(sym)

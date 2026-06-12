@@ -103,6 +103,59 @@ _PYD_BY_TYPE = {
 }
 
 
+def _check_place_footprint(data: Dict[str, Any], *, path: str = "$") -> None:
+    """PLACE_COMPONENT.footprint is additive (protocol_version stays 1) and
+    optional on the wire; missing means "". The copper-2 Pydantic model
+    predates the field (extra="forbid"), so the shim validates it here and
+    strips it before handing the op to Pydantic. Rules mirror copper-2's
+    protocol/apply_plan.ts: must be a string; when non-empty it must be a
+    KiCad footprint id 'Lib:Name' (i.e. contain ':')."""
+    if "footprint" not in data:
+        return
+    fp = data["footprint"]
+    if not isinstance(fp, str):
+        raise ValidationError(
+            f"PLACE_COMPONENT: footprint must be a string, "
+            f"got {type(fp).__name__}",
+            path=f"{path}.data.footprint",
+            code="place_bad_footprint",
+        )
+    if fp and ":" not in fp:
+        raise ValidationError(
+            f"PLACE_COMPONENT: footprint must be 'Lib:Name' (or empty), "
+            f"got {fp!r}",
+            path=f"{path}.data.footprint",
+            code="place_bad_footprint",
+        )
+
+
+def _strip_place_footprints(obj: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a shallow-ish copy of the response with `footprint` removed
+    from every PLACE_COMPONENT op's data, so the (older) copper-2 Pydantic
+    ApplyPlan model doesn't trip on the extra field. Per-op footprint
+    validation has already run by the time this is called."""
+    ops = obj.get("operations")
+    if not isinstance(ops, list):
+        return obj
+    out_ops: List[Any] = []
+    changed = False
+    for op in ops:
+        if (
+            isinstance(op, dict)
+            and op.get("type") == "PLACE_COMPONENT"
+            and isinstance(op.get("data"), dict)
+            and "footprint" in op["data"]
+        ):
+            data = {k: v for k, v in op["data"].items() if k != "footprint"}
+            out_ops.append({**op, "data": data})
+            changed = True
+        else:
+            out_ops.append(op)
+    if not changed:
+        return obj
+    return {**obj, "operations": out_ops}
+
+
 def _normalize_op_for_pydantic(op: Any) -> Dict[str, Any]:
     """The wire shape is `{type, data}` with op-specific fields under `data`.
     Pydantic models are flat (type + fields at the top level). Flatten."""
@@ -211,6 +264,11 @@ def validate_operation(
     Enforces PLACE_COMPONENT reference uniqueness when _seen_refs is passed."""
     flat = _normalize_op_for_pydantic(op)
     t = flat["type"]
+    if t == "PLACE_COMPONENT":
+        # Additive field the pinned copper-2 Pydantic model doesn't know yet:
+        # validate here, then strip so extra="forbid" doesn't reject it.
+        _check_place_footprint(flat, path=path)
+        flat.pop("footprint", None)
     model = _PYD_BY_TYPE[t]
     try:
         model.model_validate(flat)
@@ -305,8 +363,11 @@ def validate_response(obj: Any) -> ValidatedResponse:
     # Now run the whole-plan Pydantic validation — catches anything we missed
     # (e.g. the duplicate-reference root validator on ApplyPlan, plan-step
     # type checks, etc.).
+    # The pinned copper.protocol ApplyPlan predates PLACE_COMPONENT.footprint
+    # (extra="forbid" on per-op models). Per-op footprint validation already
+    # ran above; strip the field before the whole-plan pass.
     try:
-        full = _PydApplyPlan.model_validate(obj)
+        full = _PydApplyPlan.model_validate(_strip_place_footprints(obj))
     except _PydValidationError as e:
         first = e.errors()[0] if e.errors() else {}
         msg = first.get("msg", str(e))

@@ -58,11 +58,14 @@ def _mk_response(ops, *, success=True, intent="generate", message=""):
     })
 
 
-def _place(ref, x, y, lib="L:S", val="v"):
-    return {"type": "PLACE_COMPONENT", "data": {
+def _place(ref, x, y, lib="L:S", val="v", footprint=None):
+    data = {
         "lib_id": lib, "reference": ref, "value": val,
         "x": x, "y": y, "rotation": 0.0,
-    }}
+    }
+    if footprint is not None:
+        data["footprint"] = footprint
+    return {"type": "PLACE_COMPONENT", "data": data}
 
 
 def _wire(sx, sy, ex, ey):
@@ -159,6 +162,85 @@ class ApplyCorrectnessTest(unittest.TestCase):
         with self.assertRaises(ApplyError) as cm:
             engine.apply_validated(api, resp)
         self.assertEqual(cm.exception.code, "backend_failure")
+
+    # ── footprint plumbing (validators → engine → fake symbol) ──
+
+    def test_footprint_applied_to_placed_symbol(self):
+        api = FakeSchematicApi()
+        engine = ApplyEngine()
+        fp = "Resistor_SMD:R_0603_1608Metric"
+        resp = _mk_response([_place("R1", 0, 0, footprint=fp)])
+        result = engine.apply_validated(api, resp)
+        self.assertTrue(result.ok)
+        (sym,) = api.list_symbols()
+        self.assertEqual(sym.footprint, fp)
+
+    def test_missing_footprint_defaults_to_empty(self):
+        api = FakeSchematicApi()
+        engine = ApplyEngine()
+        resp = _mk_response([_place("R1", 0, 0)])  # no footprint key
+        engine.apply_validated(api, resp)
+        (sym,) = api.list_symbols()
+        self.assertEqual(sym.footprint, "")
+
+    def test_empty_footprint_kept_empty(self):
+        api = FakeSchematicApi()
+        engine = ApplyEngine()
+        resp = _mk_response([_place("R1", 0, 0, footprint="")])
+        engine.apply_validated(api, resp)
+        (sym,) = api.list_symbols()
+        self.assertEqual(sym.footprint, "")
+
+    def test_invalid_footprint_hard_rejects_plan(self):
+        api = FakeSchematicApi()
+        engine = ApplyEngine()
+        before = api.serialize()
+        raw = {
+            "protocol_version": PROTOCOL_VERSION,
+            "success": True,
+            "intent": "generate",
+            "message": "",
+            "operations": [_place("R1", 0, 0, footprint="no_colon_here")],
+            "error": "",
+        }
+        with self.assertRaises(ApplyError) as cm:
+            engine.apply_response(api, raw)
+        self.assertEqual(cm.exception.code, "response_invalid")
+        self.assertEqual(api.serialize(), before)
+
+    def test_non_string_footprint_hard_rejects_plan(self):
+        api = FakeSchematicApi()
+        engine = ApplyEngine()
+        raw = {
+            "protocol_version": PROTOCOL_VERSION,
+            "success": True,
+            "intent": "generate",
+            "message": "",
+            "operations": [_place("R1", 0, 0, footprint=123)],
+            "error": "",
+        }
+        with self.assertRaises(ApplyError) as cm:
+            engine.apply_response(api, raw)
+        self.assertEqual(cm.exception.code, "response_invalid")
+
+    def test_happy_fixture_footprints_land_on_symbols(self):
+        # generate_happy.sse carries footprints for U1/U2 and none for the
+        # power symbols — exactly the new backend output shape.
+        api = FakeSchematicApi()
+        engine = ApplyEngine()
+        engine.apply_validated(api, _happy_response())
+        by_ref = {s.reference: s for s in api.list_symbols()}
+        self.assertEqual(
+            by_ref["U1"].footprint,
+            "Package_QFN:QFN-56-1EP_7x7mm_P0.4mm_EP3.2x3.2mm",
+        )
+        self.assertEqual(
+            by_ref["U2"].footprint,
+            "Package_LGA:LGA-14_2.5x3mm_P0.5mm_LayoutBorder3x4y",
+        )
+        for s in api.list_symbols():
+            if s.is_power:
+                self.assertEqual(s.footprint, "")
 
 
 # ── Check 6: atomic rollback ──────────────────────────────────────────────

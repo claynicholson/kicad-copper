@@ -1352,7 +1352,8 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
     // Match the Python validators in copper_integration/validators.py:
     //  - known op.type
     //  - PLACE_COMPONENT: non-empty lib_id with ':', non-empty reference,
-    //    coords in [-1e9, 1e9], rotation in {0,90,180,270}, unique refs.
+    //    coords in [-1e9, 1e9], rotation in {0,90,180,270}, unique refs,
+    //    optional footprint (string; 'Lib:Name' when non-empty, missing ⇒ "").
     //  - ADD_WIRE: non-zero length, coords in range.
     //  - ADD_LABEL: non-empty name <=64 chars, known label_type.
     //  - ADD_POWER_SYMBOL: non-empty net_name, coords in range.
@@ -1404,6 +1405,30 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
                 addAIMessage( wxT( "Plan rejected: PLACE_COMPONENT coordinates "
                                    "out of range. Nothing applied." ) );
                 return;
+            }
+
+            // `footprint` is optional/additive (PROTOCOL.md): missing means "".
+            // When present it must be a string; when non-empty it must be a
+            // KiCad footprint id 'Lib:Name' (contain ':').
+            if( op.data.contains( "footprint" ) )
+            {
+                if( !op.data["footprint"].is_string() )
+                {
+                    addAIMessage( wxT( "Plan rejected: PLACE_COMPONENT footprint "
+                                       "must be a string. Nothing applied." ) );
+                    return;
+                }
+
+                const std::string fp = op.data["footprint"].get<std::string>();
+
+                if( !fp.empty() && fp.find( ':' ) == std::string::npos )
+                {
+                    addAIMessage( wxString::Format(
+                        wxT( "Plan rejected: PLACE_COMPONENT footprint must be "
+                             "'Lib:Name' or empty (got %s). Nothing applied." ),
+                        wxString::FromUTF8( fp ) ) );
+                    return;
+                }
             }
         }
         else if( op.type == "ADD_WIRE" )
@@ -1592,6 +1617,7 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
             std::string libIdStr = op.data.value( "lib_id", "" );
             std::string ref = op.data.value( "reference", "" );
             std::string val = op.data.value( "value", "" );
+            std::string footprint = op.data.value( "footprint", "" );
             int posX = nmToIu( op.data.value( "x", 0LL ) );
             int posY = nmToIu( op.data.value( "y", 0LL ) );
 
@@ -1629,6 +1655,12 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
 
             if( !val.empty() )
                 symbol->GetField( FIELD_T::VALUE )->SetText( wxString::FromUTF8( val ) );
+
+            // Assign the footprint so PCB layout works without a manual
+            // assignment pass. "" (power symbols, older backends) leaves the
+            // field untouched.
+            if( !footprint.empty() )
+                symbol->SetFootprintFieldText( wxString::FromUTF8( footprint ) );
 
             placedByRef[ wxString::FromUTF8( ref ) ] = symbol;
             commit.Add( symbol, screen );

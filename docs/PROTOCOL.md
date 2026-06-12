@@ -190,6 +190,7 @@ The `operations` array in a `CopperResponse` is a list of these:
     "lib_id": "MCU_RaspberryPi:RP2040",
     "reference": "U1",
     "value": "RP2040",
+    "footprint": "Package_QFN:QFN-56-1EP_7x7mm_P0.4mm_EP3.2x3.2mm",
     "x": 12700000,
     "y": 12700000,
     "rotation": 0.0
@@ -200,6 +201,12 @@ The `operations` array in a `CopperResponse` is a list of these:
 - `lib_id`: required, non-empty, format `lib:symbol`.
 - `reference`: required, non-empty, **unique within the plan**.
 - `value`: required, may be the same as the symbol name.
+- `footprint`: optional (additive; `protocol_version` stays 1). A KiCad
+  footprint id `Lib:Name` applied to the symbol's Footprint field so PCB
+  layout works without manual footprint assignment, or `""` when the part
+  has no footprint (e.g. power symbols). A **missing** key is treated as
+  `""`. When present it must be a string; when non-empty it must contain
+  `:` — anything else hard-rejects the plan.
 - `x`, `y`: required, int, in `[-1e9, 1e9]`.
 - `rotation`: optional, one of `0.0 / 90.0 / 180.0 / 270.0`.
 
@@ -339,6 +346,9 @@ Hard rejects (apply nothing, surface error):
 
 12. Any `ADD_NO_CONNECT` with empty `reference`/`pin`. At apply time:
     unresolvable reference or pin → whole plan discarded (fail-closed).
+
+13. Any `PLACE_COMPONENT.footprint` that is present but not a string, or
+    non-empty without a `:` (must be a KiCad `Lib:Name` footprint id).
 
 (`PLACEMENT_HINTS` is never a hard reject: it is advisory and validated
 loosely; malformed hints degrade to the backend's coordinate fallback.)
