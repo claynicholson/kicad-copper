@@ -28,6 +28,7 @@ struct PlaceComponentOp {
     std::string lib_id;
     std::string reference;
     std::string value;
+    std::string footprint;
     int32_t     x = 0;
     int32_t     y = 0;
     double      rotation = 0.0;
@@ -133,6 +134,7 @@ inline PlaceComponentOp PlaceComponentOp::from_json( const nlohmann::json& j ) {
     o.lib_id    = j.value( "lib_id", "" );
     o.reference = j.value( "reference", "" );
     o.value     = j.value( "value", "" );
+    o.footprint = j.value( "footprint", "" );
     o.x         = j.value( "x", 0 );
     o.y         = j.value( "y", 0 );
     o.rotation  = j.value( "rotation", 0.0 );
@@ -141,7 +143,7 @@ inline PlaceComponentOp PlaceComponentOp::from_json( const nlohmann::json& j ) {
 
 inline nlohmann::json PlaceComponentOp::to_json() const {
     return { {"type","PLACE_COMPONENT"}, {"lib_id",lib_id}, {"reference",reference},
-             {"value",value}, {"x",x}, {"y",y}, {"rotation",rotation} };
+             {"value",value}, {"footprint",footprint}, {"x",x}, {"y",y}, {"rotation",rotation} };
 }
 
 inline AddWireOp AddWireOp::from_json( const nlohmann::json& j ) {
