@@ -502,6 +502,8 @@ int RefinePlacement( std::vector<COPPER::Operation>& aOperations,
 
         std::vector<Rect> bounds( laidClusters.size(),
                                   Rect{ LLONG_MAX, LLONG_MAX, LLONG_MIN, LLONG_MIN } );
+        std::vector<int>  memberCount( laidClusters.size(), 0 );
+        std::vector<bool> hasRealPart( laidClusters.size(), false );
 
         for( const auto& [ref, ci] : clusterOf )
         {
@@ -516,6 +518,11 @@ int RefinePlacement( std::vector<COPPER::Operation>& aOperations,
             b.y1 = std::min( b.y1, it->second.second - g.h / 2 );
             b.x2 = std::max( b.x2, it->second.first + g.w / 2 );
             b.y2 = std::max( b.y2, it->second.second + g.h / 2 );
+
+            memberCount[ci]++;
+
+            if( !ref.StartsWith( wxT( "#" ) ) )
+                hasRealPart[ci] = true;
         }
 
         for( size_t i = 0; i < laidClusters.size(); ++i )
@@ -523,6 +530,11 @@ int RefinePlacement( std::vector<COPPER::Operation>& aOperations,
             const Rect& b = bounds[i];
 
             if( b.x1 > b.x2 )
+                continue;
+
+            // A frame around one lonely symbol (or a pile of virtual power
+            // symbols: PWR_FLAG / GND rails) is noise, not a section.
+            if( memberCount[i] < 2 || !hasRealPart[i] )
                 continue;
 
             const Cluster* c = laidClusters[i].first;
