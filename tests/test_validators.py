@@ -148,6 +148,51 @@ class DesignSummaryTest(unittest.TestCase):
         self.assertEqual(v.design_summary.bom, [])
 
 
+class PageHintTest(unittest.TestCase):
+    """The optional, additive `page` field (PROTOCOL.md §page) is parsed
+    tolerantly: accepted when present, None when absent, never rejected even
+    when partial or malformed. protocol_version stays 1."""
+
+    def test_response_without_page_is_none(self):
+        v = validate_response(_ok_response())
+        self.assertIsNone(v.page)
+
+    def test_page_null_is_none(self):
+        v = validate_response(_ok_response(page=None))
+        self.assertIsNone(v.page)
+
+    def test_page_present_parses(self):
+        v = validate_response(_ok_response(
+            page={"size": "A3", "width_mm": 420.0, "height_mm": 297.0}))
+        self.assertIsNotNone(v.page)
+        self.assertEqual(v.page.size, "A3")
+        self.assertEqual(v.page.width_mm, 420.0)
+        self.assertEqual(v.page.height_mm, 297.0)
+
+    def test_page_partial_shape_tolerated(self):
+        v = validate_response(_ok_response(page={"size": "A0"}))
+        self.assertIsNotNone(v.page)
+        self.assertEqual(v.page.size, "A0")
+        self.assertEqual(v.page.width_mm, 0.0)
+        self.assertEqual(v.page.height_mm, 0.0)
+
+    def test_page_malformed_never_rejects(self):
+        # Wrong types / wrong container must validate (never raise) — a bad
+        # hint just means "no resize" downstream.
+        for bad in ({"size": 5}, {"width_mm": "x"}, "A3", [], 42):
+            v = validate_response(_ok_response(page=bad))
+            # Non-dict → None; dict with junk → size coerced to "".
+            if isinstance(bad, dict):
+                self.assertIsNotNone(v.page)
+                self.assertEqual(v.page.size, "" if not isinstance(bad.get("size"), str) else bad["size"])
+            else:
+                self.assertIsNone(v.page)
+
+    def test_page_does_not_change_protocol_version(self):
+        v = validate_response(_ok_response(page={"size": "A4"}))
+        self.assertEqual(v.protocol_version, 1)
+
+
 class PlaceComponentTest(unittest.TestCase):
     def _op(self, **data_overrides):
         data = {

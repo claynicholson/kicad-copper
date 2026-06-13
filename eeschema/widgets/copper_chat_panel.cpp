@@ -26,6 +26,7 @@
 #include <sch_edit_frame.h>
 #include <schematic.h>
 #include <sch_screen.h>
+#include <page_info.h>
 #include <sch_symbol.h>
 #include <sch_pin.h>
 #include <sch_line.h>
@@ -444,6 +445,7 @@ void COPPER_CHAT_PANEL::onPlanDismissed( wxCommandEvent& aEvent )
 {
     m_pendingOps.clear();
     m_pendingSummary.reset();
+    m_pendingPage.reset();
     addAIMessage( wxT( "Plan dismissed. Nothing was applied." ) );
 }
 
@@ -813,6 +815,7 @@ void COPPER_CHAT_PANEL::sendRequest( const wxString& aPrompt )
 
     // Pending ops from any previous unfinished plan are stale now.
     m_pendingOps.clear();
+    m_pendingPage.reset();
     m_planCardShown = false;
 
     // Disable send while processing
@@ -875,6 +878,7 @@ void COPPER_CHAT_PANEL::handleResponse( const COPPER::CopperResponse& aResponse 
                                         wxString::FromUTF8( aResponse.error ) ) );
         m_pendingOps.clear();
         m_pendingSummary.reset();
+        m_pendingPage.reset();
         return;
     }
 
@@ -899,6 +903,10 @@ void COPPER_CHAT_PANEL::handleResponse( const COPPER::CopperResponse& aResponse 
     // read-only card renders after a successful apply. Absent on older
     // backends / the module-IR path.
     m_pendingSummary = aResponse.design_summary;
+
+    // Stash the optional page-size hint (PROTOCOL.md §page) so the apply can
+    // resize the sheet to fit the placed design. Absent on older backends.
+    m_pendingPage = aResponse.page;
 
     if( m_planCardShown )
     {
@@ -1704,6 +1712,36 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
 
     // Create a commit for undo support
     SCH_COMMIT commit( m_frame );
+
+    // ── Page resize (PROTOCOL.md §page) ──
+    // The backend recommends the smallest standard KiCad page the placed
+    // design fits on; resize BEFORE placing so components don't sprawl off an
+    // A4 border. Page settings live on the SCH_SCREEN (not a commit-tracked
+    // item — see DIALOG_EESCHEMA_PAGE_SETTINGS, which sets them directly), so
+    // we apply it on the screen here, logically part of this same apply.
+    // Fail-closed: an unknown / non-standard size leaves the page untouched
+    // and never aborts the apply (back-compat: absent hint → no resize).
+    if( m_pendingPage.has_value() && !m_pendingPage->size.empty() )
+    {
+        PAGE_INFO pageInfo = screen->GetPageSettings();
+        wxString  sizeName = wxString::FromUTF8( m_pendingPage->size );
+
+        // PAGE_INFO::SetType returns false for a non-standard name — skip then.
+        if( pageInfo.SetType( sizeName ) )
+        {
+            screen->SetPageSettings( pageInfo );
+            addLogMessage( wxString::Format(
+                    wxT( "page: resized sheet to %s to fit the design" ),
+                    sizeName ) );
+        }
+        else
+        {
+            addLogMessage( wxString::Format(
+                    wxT( "page: ignored unknown page size '%s' — sheet "
+                         "left unchanged" ),
+                    sizeName ) );
+        }
+    }
 
     // Symbols placed by THIS plan, so ADD_PIN_LABEL ops can resolve real
     // pin positions without searching the screen.

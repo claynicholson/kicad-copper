@@ -32,6 +32,8 @@ from copper_integration.validators import (
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
+_UNSET = object()  # sentinel: "no page key on the response" vs. an explicit one
+
 
 def _happy_response():
     """Fetch the canonical happy-path response by replaying generate_happy.sse
@@ -47,16 +49,21 @@ def _happy_response():
     raise AssertionError("no Done in happy fixture")
 
 
-def _mk_response(ops, *, success=True, intent="generate", message=""):
-    """Build a raw response dict (then validate)."""
-    return validate_response({
+def _mk_response(ops, *, success=True, intent="generate", message="", page=_UNSET):
+    """Build a raw response dict (then validate). When `page` is provided it is
+    placed verbatim on the response so we can exercise the optional §page hint
+    (including malformed shapes)."""
+    raw = {
         "protocol_version": PROTOCOL_VERSION,
         "success": success,
         "intent": intent,
         "message": message,
         "operations": ops,
         "error": "" if success else "boom",
-    })
+    }
+    if page is not _UNSET:
+        raw["page"] = page
+    return validate_response(raw)
 
 
 def _place(ref, x, y, lib="L:S", val="v", footprint=None):
@@ -201,6 +208,75 @@ class ApplyCorrectnessTest(unittest.TestCase):
         engine.apply_validated(api, resp)
         (sym,) = api.list_symbols()
         self.assertEqual(sym.footprint, "")
+
+    # ── §page: sheet resize on apply ──
+
+    def test_page_present_calls_set_page_and_serializes(self):
+        api = FakeSchematicApi()
+        engine = ApplyEngine()
+        resp = _mk_response(
+            [_place("R1", 0, 0)],
+            page={"size": "A3", "width_mm": 420.0, "height_mm": 297.0},
+        )
+        result = engine.apply_validated(api, resp)
+        self.assertTrue(result.ok)
+        self.assertEqual(api.page, "A3")
+        # The page is part of the committed, serialized state.
+        self.assertIn(b'"page":"A3"', api.serialize())
+
+    def test_page_absent_is_no_op(self):
+        api = FakeSchematicApi()
+        engine = ApplyEngine()
+        resp = _mk_response([_place("R1", 0, 0)])  # no page key
+        result = engine.apply_validated(api, resp)
+        self.assertTrue(result.ok)
+        self.assertIsNone(api.page)
+        self.assertIn(b'"page":null', api.serialize())
+
+    def test_page_malformed_is_tolerated_no_resize(self):
+        # A malformed page (no usable standard size) must never crash the apply
+        # nor resize the sheet — fail-closed.
+        for bad in (
+            {"width_mm": 100},   # no size
+            {"size": 123},       # size wrong type → coerced to "" → no resize
+            {"size": "Letter"},  # non-standard size name → rejected by set_page
+            "A3",                # not even an object → page is None
+            [],                  # wrong container → page is None
+        ):
+            api = FakeSchematicApi()
+            engine = ApplyEngine()
+            resp = _mk_response([_place("R1", 0, 0)], page=bad)
+            result = engine.apply_validated(api, resp)  # must not raise
+            self.assertTrue(result.ok)
+            self.assertIsNone(api.page, f"bad page {bad!r} should not resize")
+
+    def test_page_valid_size_with_junk_dimensions_still_resizes(self):
+        # The size name is authoritative — junk width/height is tolerated and
+        # the resize still happens to the named standard page.
+        api = FakeSchematicApi()
+        engine = ApplyEngine()
+        resp = _mk_response(
+            [_place("R1", 0, 0)],
+            page={"size": "A3", "width_mm": "wide"},  # junk numeric, valid size
+        )
+        result = engine.apply_validated(api, resp)
+        self.assertTrue(result.ok)
+        self.assertEqual(api.page, "A3")
+
+    def test_page_resize_reversed_by_single_undo(self):
+        api = FakeSchematicApi()
+        engine = ApplyEngine()
+        before = api.serialize()
+        resp = _mk_response(
+            [_place("R1", 0, 0)],
+            page={"size": "A2", "width_mm": 594.0, "height_mm": 420.0},
+        )
+        engine.apply_validated(api, resp)
+        self.assertEqual(api.page, "A2")
+        api.undo()
+        self.assertIsNone(api.page)
+        self.assertEqual(api.serialize(), before,
+                         "one undo() did not reverse the page resize")
 
     def test_invalid_footprint_hard_rejects_plan(self):
         api = FakeSchematicApi()

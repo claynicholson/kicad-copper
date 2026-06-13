@@ -195,6 +195,15 @@ class ApplyEngine:
             )
             raise
 
+        # Resize the sheet to the recommended page (PROTOCOL.md §page) as part
+        # of this apply. Done only once all ops + the quality gate have passed
+        # — so the abort paths above never touch the page and their byte-equal
+        # rollback assertion holds. Mirrors the C++ panel resizing the
+        # SCH_SCREEN before pushing the SCH_COMMIT. Fail-closed: an unknown
+        # size is a no-op inside set_page (no resize, no raise).
+        if validated.page is not None and validated.page.size:
+            api.set_page(validated.page.size)
+
         cid = api.push_commit(token)
         result.ok = True
         result.commit_id = cid

@@ -99,6 +99,7 @@ HTTP 200 + `Content-Type: application/json`:
     ]
   },
   "design_summary": { ... },  // optional; see §design_summary
+  "page": { ... },            // optional; see §page
   "error": ""                 // empty on success
 }
 ```
@@ -158,6 +159,32 @@ Every field is optional and parsed tolerantly: a partial or evolving shape never
 fails validation. The plugin renders this as a compact, read-only "design
 summary card" (overview, per-section list, power tree, BOM table, stats line)
 after a successful apply.
+
+### `page` (optional, additive)
+
+An optional top-level object on any `CopperResponse` — in practice the
+`/generate` `done` / apply-plan payload. **Additive — `protocol_version` stays
+`1`.** It MAY be absent or `null` (older backends emit neither); clients MUST
+handle its absence gracefully and MUST NOT reject a response that lacks it. A
+client that does not understand it ignores it (forward-compat per §Soft
+warnings).
+
+```jsonc
+"page": {
+  "size": "A4",         // KiCad standard page type name: "A4".."A0"
+  "width_mm": 297.0,    // informational; the size name drives the resize
+  "height_mm": 210.0
+}
+```
+
+It is the **smallest standard KiCad page the placed design fits on** — the
+recommended sheet size so an applied board isn't dropped off the default A4
+border. On apply, the plugin resizes the schematic sheet to `size` *before*
+placing components (via `PAGE_INFO::SetType(size)` on the `SCH_SCREEN`), as part
+of the same apply. **Fail-closed:** an unknown / non-standard `size` is ignored
+(no resize) and never aborts the apply; a missing `page` leaves the sheet
+unchanged (back-compat). `width_mm`/`height_mm` are informational — the `size`
+name is authoritative for the resize.
 
 ## Response — streaming (`/generate`)
 
@@ -244,7 +271,12 @@ The `operations` array in a `CopperResponse` is a list of these:
   layout works without manual footprint assignment, or `""` when the part
   has no footprint (e.g. power symbols). A **missing** key is treated as
   `""`. When present it must be a string; when non-empty it must contain
-  `:` — anything else hard-rejects the plan.
+  `:` — anything else hard-rejects the plan. The plugin assigns it with
+  `SCH_SYMBOL::SetFootprintFieldText()` (the `FIELD_T::FOOTPRINT` field).
+  **Note:** KiCad hides the Footprint field on the schematic by default —
+  the assignment is *not drawn* next to the symbol, but it is present on the
+  symbol and flows to the netlist / PCB layout. This is expected; the plugin
+  does not force the field visible.
 - `x`, `y`: required, int, in `[-1e9, 1e9]`.
 - `rotation`: optional, one of `0.0 / 90.0 / 180.0 / 270.0`.
 

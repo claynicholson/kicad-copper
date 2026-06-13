@@ -126,6 +126,40 @@ def _parse_design_summary(obj: Any) -> Optional[DesignSummary]:
 
 
 @dataclass
+class PageHint:
+    """Optional, additive page-size recommendation (PROTOCOL.md §page): the
+    smallest standard KiCad page the placed design fits on. Present on newer
+    backends' apply-plan / `done` payload; absent on older ones. Parsed
+    tolerantly — never rejects — so a partial/evolving shape is harmless."""
+
+    size: str
+    width_mm: float
+    height_mm: float
+    raw: Dict[str, Any]
+
+
+def _parse_page(obj: Any) -> Optional[PageHint]:
+    """Best-effort parse of the optional `page` field. Returns None when
+    absent/null/wrong-type; tolerates missing sub-fields. Never raises — a
+    page hint is additive guidance, not a hard gate (fail-closed: a bad hint
+    just means "no resize")."""
+    if not isinstance(obj, dict):
+        return None
+
+    def _num(key: str) -> float:
+        v = obj.get(key)
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+
+    size = obj.get("size")
+    return PageHint(
+        size=size if isinstance(size, str) else "",
+        width_mm=_num("width_mm"),
+        height_mm=_num("height_mm"),
+        raw=obj,
+    )
+
+
+@dataclass
 class ValidatedResponse:
     """Same shape the legacy harness exposed — drives ApplyEngine and tests."""
     protocol_version: int
@@ -140,6 +174,8 @@ class ValidatedResponse:
     raw: Dict[str, Any]
     # Optional, additive (PROTOCOL.md §design_summary). None when absent.
     design_summary: Optional[DesignSummary] = None
+    # Optional, additive (PROTOCOL.md §page). None when absent.
+    page: Optional[PageHint] = None
 
 
 # ── op-type → Pydantic model for single-op validation ──────────────────────
@@ -407,6 +443,7 @@ def validate_response(obj: Any) -> ValidatedResponse:
         erc=erc,
         raw=obj,
         design_summary=_parse_design_summary(obj.get("design_summary")),
+        page=_parse_page(obj.get("page")),
     )
 
 

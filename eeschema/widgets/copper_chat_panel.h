@@ -212,6 +212,11 @@ private:
     // §design_summary). Rendered as a read-only card after a successful apply.
     // Absent on older backends / the module-IR path.
     std::optional<COPPER::DesignSummary> m_pendingSummary;
+
+    // Optional page-size hint from the final response (PROTOCOL.md §page).
+    // Consumed by ExecuteOperations to resize the schematic sheet to fit the
+    // placed design before committing. Absent on older backends → no resize.
+    std::optional<COPPER::PageHint>     m_pendingPage;
 };
 
 

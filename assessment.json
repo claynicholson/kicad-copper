@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-06-12T03:52:23Z",
+  "timestamp": "2026-06-13T19:32:53Z",
   "total_score": 100.0,
   "polished": true,
   "hard_gate_passes": 7,
@@ -46,7 +46,7 @@
       "score_unit": 1.0,
       "score_weighted": 14.0,
       "skipped": false,
-      "details": "47 tests, 0 failed, 0 errored",
+      "details": "57 tests, 0 failed, 0 errored",
       "failures": []
     },
     {
@@ -57,7 +57,7 @@
       "score_unit": 1.0,
       "score_weighted": 18.0,
       "skipped": false,
-      "details": "13 tests, 0 failed, 0 errored",
+      "details": "23 tests, 0 failed, 0 errored",
       "failures": []
     },
     {
@@ -68,7 +68,7 @@
       "score_unit": 1.0,
       "score_weighted": 16.0,
       "skipped": false,
-      "details": "12 tests, 0 failed, 0 errored",
+      "details": "16 tests, 0 failed, 0 errored",
       "failures": []
     },
     {

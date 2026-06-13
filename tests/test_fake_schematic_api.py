@@ -151,6 +151,21 @@ class ByteEqualAbortTest(unittest.TestCase):
 
         self.assertEqual(api.snapshot_hash(), before)
 
+    def test_abort_rolls_back_page_resize(self):
+        # A page change inside an aborted commit must not persist (§page is
+        # committed state, so it participates in the byte-equal guarantee).
+        api = FakeSchematicApi()
+        d = _plan_data()
+        before = api.snapshot_hash()
+
+        tok = api.begin_commit("t")
+        api.place_component(tok, d["rp2040"])
+        api.set_page("A0")
+        api.abort_commit(tok)
+
+        self.assertIsNone(api.page)
+        self.assertEqual(api.snapshot_hash(), before)
+
 
 class InjectedFailureTest(unittest.TestCase):
     def test_injected_failure_on_specific_kind(self):
@@ -241,6 +256,42 @@ class UndoRedoTest(unittest.TestCase):
 
         api.undo()
         self.assertEqual(api.snapshot_hash(), before)
+
+    # ── §page: set_page + undo/redo of a page resize ──
+
+    def test_set_page_stores_validated_size(self):
+        api = FakeSchematicApi()
+        self.assertIsNone(api.page)
+        api.set_page("A2")
+        self.assertEqual(api.page, "A2")
+        self.assertIn(b'"page":"A2"', api.serialize())
+
+    def test_set_page_rejects_unknown_size(self):
+        api = FakeSchematicApi()
+        for bad in ("Letter", "a4", "", "  ", 4, None):
+            api.set_page(bad)
+            self.assertIsNone(api.page, f"{bad!r} should not be stored")
+
+    def test_page_resize_in_commit_reversed_by_undo(self):
+        api = FakeSchematicApi()
+        d = _plan_data()
+        before = api.snapshot_hash()
+
+        tok = api.begin_commit("Copper AI: Execute plan")
+        api.place_component(tok, d["rp2040"])
+        api.set_page("A1")  # the resize happens within the apply
+        api.push_commit(tok)
+        self.assertEqual(api.page, "A1")
+        self.assertNotEqual(api.snapshot_hash(), before)
+
+        # One undo reverses both the placement AND the page resize.
+        api.undo()
+        self.assertIsNone(api.page)
+        self.assertEqual(api.snapshot_hash(), before)
+
+        # Redo re-applies the page resize.
+        api.redo()
+        self.assertEqual(api.page, "A1")
 
 
 class OpRejectionTest(unittest.TestCase):

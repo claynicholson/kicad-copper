@@ -35,6 +35,11 @@ from typing import Any, Dict, List, Optional
 COORD_MIN = -1_000_000_000  # -1e9 nm — see PROTOCOL.md §coordinates
 COORD_MAX = 1_000_000_000
 
+# Standard KiCad page sizes the backend may recommend (PROTOCOL.md §page).
+# Mirrors PAGE_INFO's standard A-series types on the C++ side. Anything else
+# is ignored fail-closed (no resize) rather than rejected.
+VALID_PAGE_SIZES = ("A4", "A3", "A2", "A1", "A0")
+
 
 # ── exceptions ─────────────────────────────────────────────────────────────
 
@@ -258,6 +263,14 @@ class SchematicApi(ABC):
         rollback tests for byte-equality assertions. Excludes the undo
         stack on purpose: only the visible schematic matters."""
 
+    # Optional page-size hint (PROTOCOL.md §page). Additive in v1: a default
+    # no-op so older impls aren't forced to implement it. The C++ side resizes
+    # the SCH_SCREEN's PAGE_INFO; the fake records the size in committed state.
+    def set_page(self, size: str) -> None:  # noqa: D401 - optional hook
+        """Resize the schematic sheet to a standard page size ("A4".."A0").
+        Default no-op; concrete impls that model the page override this."""
+        return None
+
 
 # ── in-memory fake (the rest of the harness depends on this) ──────────────
 
@@ -281,6 +294,10 @@ class FakeSchematicApi(SchematicApi):
         self._next_commit_id = itertools.count(1)
 
         # The committed state.
+        # Page size (PROTOCOL.md §page). None until a plan with a page hint is
+        # applied. Part of committed state, so it's serialized and reflected in
+        # rollback byte-equality. Mirrors the C++ SCH_SCREEN PAGE_INFO.
+        self.page: Optional[str] = None
         self._symbols: Dict[str, Symbol] = {}
         self._wires: Dict[str, Wire] = {}
         self._labels: Dict[str, Label] = {}
@@ -306,6 +323,9 @@ class FakeSchematicApi(SchematicApi):
         self.fail_on_op_kind: Optional[str] = None
         self.fail_after_n_in_commit: Optional[int] = None
         self._op_count_in_commit: Dict[int, int] = {}
+        # Page value captured at begin_commit, so a page change in a commit is
+        # reversed by that commit's single undo. token.id -> page-or-None.
+        self._page_at_begin: Dict[int, Optional[str]] = {}
 
     # ── test hooks ──
 
@@ -349,12 +369,18 @@ class FakeSchematicApi(SchematicApi):
                 "no_connects": [],
             }
             self._op_count_in_commit[tid] = 0
+            # Snapshot the page so a page change made during this commit is
+            # part of its single undo (PROTOCOL.md §page — the C++ resize lives
+            # in the same SCH_COMMIT).
+            self._page_at_begin[tid] = self.page
             return CommitToken(id=tid, label=label)
 
     def abort_commit(self, token: CommitToken) -> None:
         with self._lock:
             if token.closed:
                 raise SchematicError("commit already closed")
+            # A page change made during an aborted commit is rolled back too.
+            self.page = self._page_at_begin.pop(token.id, self.page)
             self._pending.pop(token.id, None)
             self._op_count_in_commit.pop(token.id, None)
             token.closed = True
@@ -384,7 +410,16 @@ class FakeSchematicApi(SchematicApi):
                 self._no_connects[nc.id] = nc
 
             # Track for undo. Clear redo (standard undo-stack semantics).
-            self._undo.append({"label": token.label, "id": cid, **batch})
+            # page_before/page_after make a page resize part of this commit's
+            # single undo (PROTOCOL.md §page).
+            page_before = self._page_at_begin.pop(token.id, self.page)
+            self._undo.append({
+                "label": token.label,
+                "id": cid,
+                "page_before": page_before,
+                "page_after": self.page,
+                **batch,
+            })
             self._redo.clear()
 
             token.closed = True
@@ -405,6 +440,8 @@ class FakeSchematicApi(SchematicApi):
                 self._junctions.pop(j.id, None)
             for nc in entry["no_connects"]:
                 self._no_connects.pop(nc.id, None)
+            # Reverse any page resize this commit made.
+            self.page = entry.get("page_before", self.page)
             self._redo.append(entry)
             return entry["id"]
 
@@ -423,8 +460,29 @@ class FakeSchematicApi(SchematicApi):
                 self._junctions[j.id] = j
             for nc in entry["no_connects"]:
                 self._no_connects[nc.id] = nc
+            # Re-apply any page resize this commit made.
+            self.page = entry.get("page_after", self.page)
             self._undo.append(entry)
             return entry["id"]
+
+    # ── page size (PROTOCOL.md §page) ──
+
+    def set_page(self, size: str) -> str:
+        """Resize the sheet to a standard page size ("A4".."A0").
+
+        Validated and stored in committed state (serialized). Returns the page
+        in effect after the call (unchanged if the size was rejected). An
+        unknown / non-standard size is ignored fail-closed (no resize, no
+        raise) — the C++ side does the same (PAGE_INFO::SetType returns false →
+        skip)."""
+        if not isinstance(size, str):
+            return self.page
+        size = size.strip()
+        if size not in VALID_PAGE_SIZES:
+            return self.page
+        with self._lock:
+            self.page = size
+            return self.page
 
     # ── operations ──
 
@@ -715,6 +773,7 @@ class FakeSchematicApi(SchematicApi):
         state matters for rollback tests."""
         with self._lock:
             state = {
+                "page": self.page,
                 "symbols": [s.to_dict() for s in self.list_symbols()],
                 "wires": [w.to_dict() for w in self.list_wires()],
                 "labels": [la.to_dict() for la in self.list_labels()],

@@ -306,6 +306,29 @@ struct DesignSummary
     }
 };
 
+/// Optional, additive page-size recommendation (PROTOCOL.md §page). Present on
+/// newer backends' apply-plan / `done` payload: the smallest standard KiCad
+/// page the placed design fits on. Absent on older backends (older clients
+/// ignore it; protocol_version stays 1). Parsed tolerantly — every field
+/// defaults — so a partial or evolving shape never breaks parsing, and an
+/// unknown `size` simply fails the client-side standard-page lookup and is
+/// skipped (fail-closed: never abort the apply over a page hint).
+struct PageHint
+{
+    std::string size;        // "A4".."A0" (KiCad standard page type name)
+    double      width_mm = 0.0;
+    double      height_mm = 0.0;
+
+    static PageHint fromJson( const nlohmann::json& j )
+    {
+        PageHint p;
+        p.size = j.value( "size", "" );
+        p.width_mm = j.value( "width_mm", 0.0 );
+        p.height_mm = j.value( "height_mm", 0.0 );
+        return p;
+    }
+};
+
 /// Full response from the Copper cloud API
 struct CopperResponse
 {
@@ -317,6 +340,10 @@ struct CopperResponse
     std::string                  error;
     // Optional, additive (PROTOCOL.md §design_summary). Empty when absent.
     std::optional<DesignSummary> design_summary;
+    // Optional, additive (PROTOCOL.md §page). Recommended page size to fit the
+    // placed design. Empty when absent — the panel resizes the sheet only when
+    // present (back-compat: no hint → page left as-is).
+    std::optional<PageHint>      page;
 
     static CopperResponse fromJson( const nlohmann::json& j )
     {
@@ -338,6 +365,11 @@ struct CopperResponse
         // Tolerate missing/null: only parse when it's a real object.
         if( j.contains( "design_summary" ) && j["design_summary"].is_object() )
             r.design_summary = DesignSummary::fromJson( j["design_summary"] );
+
+        // Optional page-size hint (PROTOCOL.md §page). Only parse a real
+        // object; missing/null leaves the page untouched on apply.
+        if( j.contains( "page" ) && j["page"].is_object() )
+            r.page = PageHint::fromJson( j["page"] );
 
         return r;
     }
