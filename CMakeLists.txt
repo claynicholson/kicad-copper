@@ -797,13 +797,39 @@ mark_as_advanced( KICAD_BIN
 # kicad-copper: bundle vendored third-party plugins.
 #
 # The fetch script (scripts/fetch-bundled-plugins.{py,ps1}) vendors each plugin
-# into resources/copper/plugins/<name>/. We install that tree into ${KICAD_PLUGINS}
-# (share/kicad/plugins) so CPack/NSIS picks it up. Guarded: if the staging dir is
-# absent or contains only the manifest (no plugin subdirs vendored yet), we skip
-# the install() so configure never fails -- the release build must run the fetch
-# script first (see docs/DISTRIBUTION.md).
+# into resources/copper/plugins/<name>/. We install that tree into the directory
+# that this build's plugin manager ACTUALLY scans on launch, which is
+# PATHS::GetStockPluginsPath():
+#   * Windows: <install>/bin/scripting/plugins   (GetExecutablePath()/scripting/plugins)
+#   * else:    <KICAD_DATA>/scripting/plugins     (GetStockDataPath()/plugins via
+#              the non-MSW branch of GetStockPluginsPath)
+# NOT share/kicad/plugins (${KICAD_PLUGINS}). See common/paths.cpp.
+#
+# IMPORTANT (see docs/DISTRIBUTION.md): this fork removed the in-process SWIG /
+# wxPython ActionPlugin subsystem entirely (commit "REMOVED: SWIG, wxPython, and
+# Python integration", 518 files / ~97k deletions). The plugin manager that runs
+# on launch is the out-of-process IPC API manager (common/api/api_plugin_manager.cpp),
+# which loads a plugin only if its directory contains a `plugin.json` IPC manifest.
+# The three bundled plugins are classic ActionPlugins WITHOUT a plugin.json, so
+# installing them here makes them present + correctly located for the scanner, but
+# they will not surface until ported to the IPC API. We still target the real scan
+# path so the layout is correct and a future IPC-manifested plugin "just works".
+#
+# Guarded: if the staging dir is absent or has no plugin subdirs (fetch not run),
+# we skip install() so configure never fails.
 #================================================
 set( COPPER_BUNDLED_PLUGINS_DIR "${CMAKE_SOURCE_DIR}/resources/copper/plugins" )
+
+# Resolve the runtime stock-plugins scan path as an install-relative destination.
+if( WIN32 )
+    set( COPPER_PLUGIN_INSTALL_DEST "${KICAD_BIN}/scripting/plugins" )
+elseif( APPLE )
+    # macOS GetStockPluginsPath() -> <bundle>/Contents/SharedSupport/plugins == ${KICAD_PLUGINS}
+    set( COPPER_PLUGIN_INSTALL_DEST "${KICAD_PLUGINS}" )
+else()
+    # Linux GetStockPluginsPath() -> GetStockDataPath()/plugins == ${KICAD_DATA}/plugins
+    set( COPPER_PLUGIN_INSTALL_DEST "${KICAD_DATA}/plugins" )
+endif()
 
 file( GLOB COPPER_BUNDLED_PLUGIN_DIRS LIST_DIRECTORIES true
       "${COPPER_BUNDLED_PLUGINS_DIR}/*" )
@@ -816,9 +842,10 @@ foreach( _copper_plugin ${COPPER_BUNDLED_PLUGIN_DIRS} )
 endforeach()
 
 if( COPPER_HAVE_BUNDLED_PLUGINS )
-    message( STATUS "kicad-copper: bundling plugins from ${COPPER_BUNDLED_PLUGINS_DIR}" )
+    message( STATUS "kicad-copper: bundling plugins from ${COPPER_BUNDLED_PLUGINS_DIR} "
+             "-> ${COPPER_PLUGIN_INSTALL_DEST}" )
     install( DIRECTORY "${COPPER_BUNDLED_PLUGINS_DIR}/"
-             DESTINATION "${KICAD_PLUGINS}"
+             DESTINATION "${COPPER_PLUGIN_INSTALL_DEST}"
              COMPONENT bundled_plugins
              PATTERN ".git" EXCLUDE
              PATTERN "README.placeholder.md" EXCLUDE )

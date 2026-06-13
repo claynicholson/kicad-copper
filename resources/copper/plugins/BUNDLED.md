@@ -29,12 +29,18 @@ network access.
 
 ## Auto-load note (read before assuming these appear in pcbnew)
 
-KiCad Copper's pcbnew discovers **IPC API plugins** (directories containing a
-`plugin.json` manifest) under `PATHS::GetStockPluginsPath()`. On Windows that path
-resolves to `<install>/bin/scripting/plugins`, **not** `share/kicad/plugins`. The
-three plugins above are *classic SWIG `ActionPlugin` plugins* (they subclass
-`pcbnew.ActionPlugin` in `__init__.py`), which require the embedded SWIG Python
-scripting layer to be initialized at launch.
+This fork **removed the in-process SWIG / wxPython scripting subsystem entirely**,
+so it cannot run classic `pcbnew.ActionPlugin` plugins. The only plugin system it
+has is the **out-of-process IPC API manager**, which loads a plugin dir only if it
+contains a `plugin.json` manifest, found under `PATHS::GetStockPluginsPath()`
+(Windows: `<install>/bin/scripting/plugins`). It only scans when the user enables
+the KiCad API server (off by default).
 
-See `docs/DISTRIBUTION.md` for the current auto-load status and what is needed to
-make these plugins appear in the pcbnew Tools menu.
+The three plugins above are classic `ActionPlugin` plugins (they subclass
+`pcbnew.ActionPlugin` in `__init__.py`) and do **not** ship a `plugin.json`. They are
+installed to the correct scan path so the layout is right, but they will **not** load
+until ported to the IPC API. The CMake install targets the real scan path (see
+`CMakeLists.txt`), so no packaging change is needed once a plugin gains a manifest.
+
+See `docs/DISTRIBUTION.md` for the full auto-load status, the Python-runtime bundling
+checklist, and verification steps.

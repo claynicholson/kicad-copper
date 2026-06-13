@@ -137,7 +137,13 @@ if (-not (Test-Path $buildDir)) {
 $cacheFile = Join-Path $buildDir 'CMakeCache.txt'
 if (-not (Test-Path $cacheFile)) {
     Step "CMake configure (~10-12 minutes, mostly Python detection)"
-    $cfgCmd = "export COPPER_VERSION=$Version && cd `"`$(cygpath -u '$buildDir')`" && cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DKICAD_SCRIPTING_WXPYTHON=OFF -DKICAD_USE_3DCONNEXION=OFF -DKICAD_BUILD_QA_TESTS=OFF -DKICAD_BUILD_I18N=OFF -DKICAD_USE_OCC=ON -DOCC_INCLUDE_DIR=/ucrt64/include/opencascade -DOCC_LIBRARY_DIR=/ucrt64/lib -DKICAD_USE_CMAKE_FINDPROTOBUF=OFF -DKICAD_SPICE=ON -DKICAD_BUILD_PNS_DEBUG_TOOL=OFF ../.."
+    # NOTE: this fork removed the in-process SWIG/wxPython scripting subsystem
+    # (commit "REMOVED: SWIG, wxPython, and Python integration", 518 files). There
+    # is no KICAD_SCRIPTING_WXPYTHON option in this tree, so it is intentionally not
+    # passed (it would be a silently-ignored no-op). Plugins use the out-of-process
+    # IPC API model: a `plugin.json` manifest + an external Python interpreter
+    # discovered at runtime. See docs/DISTRIBUTION.md.
+    $cfgCmd = "export COPPER_VERSION=$Version && cd `"`$(cygpath -u '$buildDir')`" && cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DKICAD_USE_3DCONNEXION=OFF -DKICAD_BUILD_QA_TESTS=OFF -DKICAD_BUILD_I18N=OFF -DKICAD_USE_OCC=ON -DOCC_INCLUDE_DIR=/ucrt64/include/opencascade -DOCC_LIBRARY_DIR=/ucrt64/lib -DKICAD_USE_CMAKE_FINDPROTOBUF=OFF -DKICAD_SPICE=ON -DKICAD_BUILD_PNS_DEBUG_TOOL=OFF ../.."
     Run { MsysBash $cfgCmd } "cmake -G Ninja ..."
 } else {
     Sub "CMakeCache.txt exists - skipping configure (use -Clean to force)"

@@ -67,42 +67,110 @@ Three GPL/MIT plugins are vendored and staged into the installer:
    drops a `README.placeholder.md` into each dir (so the layout is correct) and
    exits non-zero so CI flags an incomplete payload.
 
-2. **Install** — `CMakeLists.txt` has an `install(DIRECTORY resources/copper/plugins/
-   DESTINATION ${KICAD_PLUGINS} ...)` rule (component `bundled_plugins`), guarded by
-   a `file(GLOB)` check so a missing/empty staging dir never breaks configure. On
-   Windows `${KICAD_PLUGINS}` is `share/kicad/plugins`. CPack/NSIS then bundles it.
+2. **Install** — `CMakeLists.txt` installs `resources/copper/plugins/` into the
+   directory the plugin manager actually scans at runtime,
+   `PATHS::GetStockPluginsPath()` (component `bundled_plugins`, guarded by a
+   `file(GLOB)` check so a missing/empty staging dir never breaks configure):
 
-### ⚠️ Auto-load status — important caveat
+   | Platform | Install destination                | Resolves from                                   |
+   |----------|------------------------------------|-------------------------------------------------|
+   | Windows  | `<install>/bin/scripting/plugins`  | `GetExecutablePath()` + `scripting/plugins`      |
+   | Linux    | `<KICAD_DATA>/plugins`             | `GetStockDataPath()` + `plugins`                 |
+   | macOS    | `${KICAD_PLUGINS}` (SharedSupport) | bundle `Contents/SharedSupport/plugins`          |
 
-The three bundled plugins are **classic SWIG `pcbnew.ActionPlugin` plugins**. KiCad
-Copper releases are configured with `-DKICAD_SCRIPTING_WXPYTHON=OFF` (see
-`scripts/release-local.ps1`), and this fork's pcbnew does not initialize the legacy
-SWIG Python scripting subsystem at launch. The plugin discovery that *does* run on
-startup is the **IPC API plugin manager** (`common/api/api_plugin_manager.cpp`),
-invoked from `PGM_BASE` (`common/pgm_base.cpp` → `ReloadPlugins()`):
+   This is **not** `share/kicad/plugins`; an earlier draft of this rule targeted
+   that path and the plugins would never have been scanned. `cmake --install` (run
+   by `release-local.ps1` step 4b) stages them automatically; CPack/NSIS then bundles
+   the result.
 
-- It scans `PATHS::GetStockPluginsPath()` — on Windows `<install>/bin/scripting/
-  plugins`, **not** `share/kicad/plugins` — plus the PCM 3rd-party dir and the user
-  dir (`%APPDATA%/kicad/<ver>/plugins`).
-- It registers a plugin only if its directory contains a **`plugin.json`** IPC API
-  manifest (`identifier`, `name`, `runtime`, ...). Classic `ActionPlugin`
-  `__init__.py` plugins have no such manifest.
+### ⚠️ Auto-load status — read this before expecting the plugins in the menu
 
-**Consequence:** with the current release configuration these plugins are *bundled
-and present on disk* under `share/kicad/plugins/`, and their layout/licensing/CMake
-packaging is correct and forward-compatible, but they will **not** auto-appear in
-the pcbnew Tools menu until one of the following is done (out of scope for this
-change, flagged for follow-up):
+**This fork has no in-process SWIG / wxPython scripting subsystem.** It was removed
+wholesale in commit *"REMOVED: SWIG, wxPython, and Python integration"* (518 files,
+~97k deletions): all `.i` interface files, `cmake/FindSWIG.cmake`,
+`cmake/FindwxPython.cmake`, `cmake/FindPythonLibs.cmake`, `include/macros_swig.h`,
+`common/swig/`, the `FRAME_PYTHON` scripting console, and every
+`InitPythonScripting` / classic-`ActionPlugin` loader call. **There is no
+`KICAD_SCRIPTING_WXPYTHON` CMake option in this tree** — passing `-D…=ON/OFF` is a
+silently-ignored no-op (the value seen in a pre-removal `CMakeCache.txt` is stale).
+Re-enabling in-process scripting would mean reverting that 97k-line removal and
+regenerating the SWIG `pcbnew` bindings — not a flag flip, and not doable without a
+full rebuild. So we did **not** flip a flag; instead we point the install at the
+real scan path and document the actual model below.
 
-- enable the SWIG/wxPython scripting layer in the release build and initialize it
-  in pcbnew so classic action plugins under the stock plugins path are discovered;
-  **and/or**
-- have the installer also place the plugins under the IPC stock path
-  (`bin/scripting/plugins`) for any plugin shipping a `plugin.json`.
+The only plugin system this fork runs on launch is the **out-of-process IPC API
+plugin manager** (`common/api/api_plugin_manager.cpp`), kicked off from
+`PGM_BASE::InitPgm()` → `m_plugin_manager->ReloadPlugins()` (`common/pgm_base.cpp:483`).
+**Two gates apply:** the call is wrapped in `#ifdef KICAD_IPC_API` (CMake option,
+default **ON**) *and* `commonSettings->m_Api.enable_server` (`api.enable_server`,
+default **false**). So even an IPC-manifested plugin is only scanned/loaded once the
+user turns on **Preferences → Plugins → "Enable KiCad API"** (the API server). Its
+discovery rules:
 
-A user can still load them manually by copying a plugin dir into
-`%APPDATA%/kicad/<ver>/scripting/plugins` in a KiCad build that has scripting
-enabled. This caveat is tracked here rather than silently shipping a dead menu.
+- It recursively scans `PATHS::GetStockPluginsPath()` (the table above), the PCM
+  3rd-party dir (`KICAD9_3RD_PARTY`/`plugins`-style), and the user dir
+  (`%APPDATA%/kicad/<ver>/plugins`) — `PLUGIN_TRAVERSER::OnFile`,
+  `api_plugin_manager.cpp:160`.
+- It registers a plugin **only if the directory contains a `plugin.json`** that
+  validates against `api.v1.schema.json` with required keys `identifier`, `name`,
+  `description`, and a `runtime` (the external Python interpreter / venv it launches
+  via `PYTHON_MANAGER::Execute`). See `common/api/api_plugin.cpp:63-159`.
+
+**The three bundled plugins are classic `pcbnew.ActionPlugin` plugins and do NOT
+ship a `plugin.json`** (jlcpcb-tools carries a PCM `metadata.template.json`, which is
+a different thing). Therefore:
+
+> With this release configuration the plugins are **bundled, licensed, and placed at
+> the correct scan path**, but they will **not** surface in the pcbnew Tools menu.
+> Making them load requires **porting each to the IPC API** (add a `plugin.json` with
+> a `runtime`, and rewrite the plugin to talk to KiCad over `kipy`/the IPC API
+> instead of importing the in-process `pcbnew` SWIG module). That port is per-plugin
+> upstream work and is out of scope here; this is tracked rather than silently
+> shipping a dead menu.
+
+If/when a plugin gains a valid `plugin.json`, no CMake change is needed — it will be
+discovered automatically because the install already targets the scan path.
+
+### Python runtime bundling (what's wired vs. still manual)
+
+The IPC model needs an **external** Python interpreter at runtime (KiCad launches it
+as a subprocess; it is *not* embedded for scripting). What the release currently does:
+
+- **Wired:** the MSYS2 UCRT64 `python3.14` interpreter + stdlib are already staged
+  into the portable tree by `release-local.ps1` (step "Python stdlib",
+  `lib/python3.14/...`), because `kicad.exe` links `libpython` for unrelated reasons.
+  `PYTHON_MANAGER::FindPythonInterpreter()` will also find a system Python on PATH.
+- **Wired:** bundled-plugin files are staged to the scan path (above).
+- **NOT wired / not needed for IPC:** there is **no** SWIG `_pcbnew.pyd` / `pcbnew.py`
+  module in this fork (it was deleted), and **no wxPython** is bundled. IPC plugins
+  don't import the in-process `pcbnew` module or wxPython; they depend on the `kipy`
+  package, which a plugin's `runtime` venv is expected to provide. We do **not**
+  pre-create per-plugin venvs in the installer.
+
+Checklist if you later ship an IPC-ported plugin and want it to work on a clean box:
+
+1. Plugin dir under the scan path contains a valid `plugin.json` (`identifier`,
+   `name`, `description`, `runtime`).
+2. A Python interpreter is resolvable — bundled `lib/python3.14` or system PATH.
+3. The plugin's `runtime` venv has `kipy` (and the plugin's own deps) installed, or
+   the plugin declares an `install` step KiCad runs on first use.
+4. `api/schemas/api.v1.schema.json` is staged (it already is — step 4c).
+
+### Verifying after a build
+
+1. Install/extract the release and launch **pcbnew**.
+2. Confirm the plugin scan path exists and is populated:
+   `…\KiCad Copper\bin\scripting\plugins\{jlcpcb-tools,ibom,round-tracks}\`.
+3. Turn on **Preferences → Plugins → "Enable KiCad API"** (`api.enable_server`,
+   off by default) — without it the manager never scans, even for IPC plugins.
+4. Tools menu / the plugins toolbar: **with the current (un-ported) plugins these
+   will NOT appear** — that is expected per the caveat above. To prove the pipeline,
+   drop a minimal `plugin.json` test plugin into the scan dir, relaunch (with the API
+   enabled), and confirm it shows up in Preferences → Plugins.
+5. Enable API trace logging (set `KICAD_TRACE=KICAD_API`) and check the log: with the
+   API server on, the manager prints "scanning system path
+   (…bin/scripting/plugins…) for plugins" on launch, confirming the path alignment
+   even when no IPC plugin is present.
 
 ## 3. Building / packaging the release
 
