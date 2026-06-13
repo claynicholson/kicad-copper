@@ -89,6 +89,65 @@ class ResponseShapeTest(unittest.TestCase):
         self.assertTrue(v.success)
 
 
+_DESIGN_SUMMARY = {
+    "board": {"name": "RP2040 Dev Board", "description": "USB-C powered MCU board"},
+    "overview": "A minimal RP2040 board with USB-C power and a status LED.",
+    "sections": [
+        {"group": "Power", "purpose": "5V from USB-C, 3V3 LDO",
+         "references": ["U2", "C1", "C2"]},
+        {"group": "MCU", "purpose": "RP2040 core", "references": ["U1"]},
+    ],
+    "power": [
+        {"rail": "5V", "voltage": "5.0V", "source": "USB-C VBUS", "est_current": "500mA"},
+        {"rail": "3V3", "voltage": "3.3V", "source": "U2 LDO", "est_current": "300mA"},
+    ],
+    "pin_map": [
+        {"ref": "U1", "pin": "GP0", "signal": "UART_TX"},
+        {"ref": "U1", "pin": "GP1", "signal": "UART_RX"},
+    ],
+    "bom": [
+        {"references": ["U1"], "quantity": 1, "value": "RP2040",
+         "lib_id": "MCU_RaspberryPi:RP2040", "footprint": "Package_DFN_QFN:QFN-56"},
+        {"references": ["C1", "C2"], "quantity": 2, "value": "100nF",
+         "lib_id": "Device:C", "footprint": "Capacitor_SMD:C_0402"},
+    ],
+    "stats": {"parts": 4, "unique_parts": 3, "nets": 12, "no_connects": 2},
+    "notes": "Add a crystal for precise timing if needed.",
+}
+
+
+class DesignSummaryTest(unittest.TestCase):
+    """The optional, additive `design_summary` field (PROTOCOL.md) must be
+    accepted when present and absent equally — protocol_version stays 1."""
+
+    def test_response_without_design_summary_validates(self):
+        v = validate_response(_ok_response())
+        self.assertIsNone(v.design_summary)
+
+    def test_response_with_design_summary_validates(self):
+        v = validate_response(_ok_response(design_summary=_DESIGN_SUMMARY))
+        self.assertIsNotNone(v.design_summary)
+        ds = v.design_summary
+        self.assertEqual(ds.board["name"], "RP2040 Dev Board")
+        self.assertEqual(len(ds.sections), 2)
+        self.assertEqual(len(ds.power), 2)
+        self.assertEqual(len(ds.bom), 2)
+        self.assertEqual(ds.stats["parts"], 4)
+        self.assertIn("RP2040", ds.overview)
+
+    def test_design_summary_null_is_none(self):
+        v = validate_response(_ok_response(design_summary=None))
+        self.assertIsNone(v.design_summary)
+
+    def test_design_summary_partial_shape_tolerated(self):
+        # Missing sub-fields fall back to empties; never raises.
+        v = validate_response(_ok_response(design_summary={"overview": "hi"}))
+        self.assertIsNotNone(v.design_summary)
+        self.assertEqual(v.design_summary.overview, "hi")
+        self.assertEqual(v.design_summary.sections, [])
+        self.assertEqual(v.design_summary.bom, [])
+
+
 class PlaceComponentTest(unittest.TestCase):
     def _op(self, **data_overrides):
         data = {

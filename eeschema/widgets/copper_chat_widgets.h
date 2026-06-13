@@ -130,6 +130,65 @@ private:
 };
 
 
+// ─── COPPER_DESIGN_SUMMARY_CARD ─────────────────────────────────────────────
+
+/**
+ * A compact, read-only "design summary card" rendered after a successful
+ * generate/apply. Shows the overview, per-section list (group → purpose →
+ * refs), the power tree, a BOM table, and a one-line stats footer.
+ *
+ * The widget owns a flattened copy of the summary fields (mirrors how
+ * COPPER_PLAN_CARD owns PlanStep) so this header stays free of copper_types.h.
+ */
+class COPPER_DESIGN_SUMMARY_CARD : public wxPanel
+{
+public:
+    struct Section
+    {
+        wxString group;
+        wxString purpose;
+        wxString references;  // pre-joined "R1, R2, C3"
+    };
+
+    struct PowerRail
+    {
+        wxString rail;
+        wxString voltage;
+        wxString source;
+        wxString estCurrent;
+    };
+
+    struct BomRow
+    {
+        wxString references;  // pre-joined
+        int      quantity = 0;
+        wxString value;
+        wxString libId;
+        wxString footprint;
+    };
+
+    struct Data
+    {
+        wxString               boardName;
+        wxString               boardDescription;
+        wxString               overview;
+        std::vector<Section>   sections;
+        std::vector<PowerRail> power;
+        std::vector<BomRow>    bom;
+        wxString               stats;  // pre-formatted one-liner
+        wxString               notes;
+    };
+
+    COPPER_DESIGN_SUMMARY_CARD( wxWindow* aParent, const Data& aData );
+
+protected:
+    void OnPaint( wxPaintEvent& aEvent );
+
+private:
+    wxDECLARE_EVENT_TABLE();
+};
+
+
 // ─── COPPER_STAGE_INDICATOR ─────────────────────────────────────────────────
 
 /**

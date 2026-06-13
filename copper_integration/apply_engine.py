@@ -223,13 +223,15 @@ class ApplyEngine:
         elif t == "ADD_POWER_SYMBOL":
             api.add_power_symbol(token, d)
         elif t == "ADD_NO_CONNECT":
-            # Pin-anchored NC flag — same C++-only geometry story as
-            # ADD_PIN_LABEL below.
-            pass
+            # Pin-anchored NC flag. Resolves the pin token to pads via the
+            # SchematicApi (a name → every matching pad; a number → one pad),
+            # mirroring C++ findSymbolPins. The fake applies when pin geometry
+            # is registered; without it the api raises and the plan fails
+            # closed — same fail-closed contract as the C++ panel.
+            api.add_no_connect(token, d)
         elif t == "ADD_PIN_LABEL":
-            # Pin-anchored labels need real library pin geometry, which only
-            # the C++ client has. The harness validates but does not apply.
-            pass
+            # Pin-anchored labels — same multi-pad resolution as ADD_NO_CONNECT.
+            api.add_pin_label(token, d)
         elif t == "PLACEMENT_HINTS":
             # Advisory placement hints — never schematic-mutating.
             pass

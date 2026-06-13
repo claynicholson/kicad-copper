@@ -175,8 +175,11 @@ class ProtocolVersionAgreesTest(unittest.TestCase):
         DISPATCHED = {
             "PLACE_COMPONENT", "ADD_WIRE", "ADD_LABEL",
             "ADD_JUNCTION", "ADD_POWER_SYMBOL",
-            # Dispatched as harness no-ops: ADD_PIN_LABEL needs real library
-            # pin geometry (C++ client only); PLACEMENT_HINTS is advisory.
+            # ADD_PIN_LABEL / ADD_NO_CONNECT resolve a pin token to pads (a
+            # name → every matching pad). Applied when pin geometry is
+            # registered; a validated no-op headless when it isn't (geometry
+            # lives in the real library, C++ client only). PLACEMENT_HINTS is
+            # advisory.
             "ADD_PIN_LABEL", "ADD_NO_CONNECT", "PLACEMENT_HINTS",
         }
         unknown = set(OP_TYPE_NAMES) - DISPATCHED

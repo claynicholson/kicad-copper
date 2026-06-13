@@ -95,6 +95,81 @@ class Junction:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class NoConnect:
+    id: str
+    x: int
+    y: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class Pin:
+    """A single physical pad on a symbol. `number` is unique per symbol;
+    `name` may repeat across pads (USB-C "D+"/"GND"/"VBUS" each sit on two
+    pads). `x`/`y` are the absolute pin endpoint where a label / no-connect
+    anchors. Mirrors the C++ SCH_PIN fields findSymbolPins() reads."""
+    number: str
+    name: str
+    x: int
+    y: int
+
+
+# ── pin-token resolution (mirrors C++ findSymbolPins in copper_chat_panel) ──
+
+def _normalize_pin_name(name: str) -> str:
+    """Strip KiCad pin-name decorations so backend tokens match library pins:
+    "~{WP}(IO2)" -> "WP", "DI(IO0)" -> "DI". Mirrors C++ normalizePinName()."""
+    out = name.replace("~{", "").replace("}", "")
+    paren = out.find("(")
+    if paren != -1:
+        out = out[:paren]
+    return out.strip()
+
+
+def resolve_pin_tokens(pins: List[Pin], token: str) -> List[Pin]:
+    """Match a backend pin token against a symbol's pins and return EVERY pad
+    it resolves to.
+
+    A pin NUMBER is a physical pad, so an exact-number match anchors exactly
+    that one pad. A pin NAME can repeat across pads, so a name match returns
+    ALL pads carrying that name (one label / one no-connect per pad).
+
+    Resolution order (matches C++ findSymbolPins): exact number, exact name,
+    normalized name, '/'-separated alias segment ("SDA/SDI/SDO" matches "SDI"),
+    then single-pin-any-token fallback. Empty list = no match (fail-closed)."""
+    # Pin numbers are unique per pad: an exact hit is a single physical pad.
+    for p in pins:
+        if p.number == token:
+            return [p]
+
+    # Names can repeat: gather every pad whose name equals the token.
+    matches = [p for p in pins if p.name == token]
+    if matches:
+        return matches
+
+    matches = [p for p in pins if _normalize_pin_name(p.name) == token]
+    if matches:
+        return matches
+
+    matches = []
+    for p in pins:
+        for seg in p.name.split("/"):
+            if _normalize_pin_name(seg) == token:
+                matches.append(p)
+                break
+    if matches:
+        return matches
+
+    # Single-pin symbols (power symbols, PWR_FLAG) are unambiguous.
+    if len(pins) == 1:
+        return [pins[0]]
+
+    return []
+
+
 # ── commit token ───────────────────────────────────────────────────────────
 
 @dataclass
@@ -151,6 +226,16 @@ class SchematicApi(ABC):
     @abstractmethod
     def add_power_symbol(self, token: CommitToken, data: Dict[str, Any]) -> str: ...
 
+    @abstractmethod
+    def add_pin_label(self, token: CommitToken, data: Dict[str, Any]) -> List[str]:
+        """Anchor a pin-label on EVERY pad the op's pin token resolves to (a
+        name that maps to N pads → N labels). Returns the created label ids."""
+
+    @abstractmethod
+    def add_no_connect(self, token: CommitToken, data: Dict[str, Any]) -> List[str]:
+        """Place a no-connect on EVERY pad the op's pin token resolves to.
+        Returns the created no-connect ids."""
+
     # read-only queries
     @abstractmethod
     def list_symbols(self) -> List[Symbol]: ...
@@ -163,6 +248,9 @@ class SchematicApi(ABC):
 
     @abstractmethod
     def list_junctions(self) -> List[Junction]: ...
+
+    @abstractmethod
+    def list_no_connects(self) -> List[NoConnect]: ...
 
     @abstractmethod
     def serialize(self) -> bytes:
@@ -197,6 +285,12 @@ class FakeSchematicApi(SchematicApi):
         self._wires: Dict[str, Wire] = {}
         self._labels: Dict[str, Label] = {}
         self._junctions: Dict[str, Junction] = {}
+        self._no_connects: Dict[str, NoConnect] = {}
+
+        # Pin geometry per symbol reference (test-only; not committed state, so
+        # it never affects serialize()). The C++ side reads this from the real
+        # SCH_SYMBOL/library; the fake gets it via register_pins().
+        self._pins_by_ref: Dict[str, List[Pin]] = {}
 
         # Pending batch per open commit.
         # token.id -> dict with the four item-kind lists.
@@ -219,6 +313,13 @@ class FakeSchematicApi(SchematicApi):
         """Tell the fake to reject this lib_id with SchematicError, modelling
         the C++ GetLibSymbol() returning nullptr."""
         self._missing_lib_ids.add(lib_id)
+
+    def register_pins(self, reference: str, pins: List[Pin]) -> None:
+        """Give a symbol reference its pin geometry, modelling what the C++
+        side reads from the real SCH_SYMBOL/library. Used by ADD_PIN_LABEL /
+        ADD_NO_CONNECT to resolve a pin token to pads. Not committed state."""
+        with self._lock:
+            self._pins_by_ref[reference] = list(pins)
 
     def inject_failure(
         self,
@@ -245,6 +346,7 @@ class FakeSchematicApi(SchematicApi):
                 "wires": [],
                 "labels": [],
                 "junctions": [],
+                "no_connects": [],
             }
             self._op_count_in_commit[tid] = 0
             return CommitToken(id=tid, label=label)
@@ -278,6 +380,8 @@ class FakeSchematicApi(SchematicApi):
                 self._labels[la.id] = la
             for j in batch["junctions"]:
                 self._junctions[j.id] = j
+            for nc in batch["no_connects"]:
+                self._no_connects[nc.id] = nc
 
             # Track for undo. Clear redo (standard undo-stack semantics).
             self._undo.append({"label": token.label, "id": cid, **batch})
@@ -299,6 +403,8 @@ class FakeSchematicApi(SchematicApi):
                 self._labels.pop(la.id, None)
             for j in entry["junctions"]:
                 self._junctions.pop(j.id, None)
+            for nc in entry["no_connects"]:
+                self._no_connects.pop(nc.id, None)
             self._redo.append(entry)
             return entry["id"]
 
@@ -315,6 +421,8 @@ class FakeSchematicApi(SchematicApi):
                 self._labels[la.id] = la
             for j in entry["junctions"]:
                 self._junctions[j.id] = j
+            for nc in entry["no_connects"]:
+                self._no_connects[nc.id] = nc
             self._undo.append(entry)
             return entry["id"]
 
@@ -501,6 +609,84 @@ class FakeSchematicApi(SchematicApi):
             self._bump(token)
             return sym.id
 
+    def _resolve_pins_for(
+        self, reference: str, pin_token: str
+    ) -> Optional[List[Pin]]:
+        """Resolve a pin token to pads. Returns None when no pin geometry is
+        registered for the reference — in production that geometry lives in the
+        real SCH_SYMBOL/library (C++ side); headless callers without it treat
+        the op as a validated no-op (the prior harness behavior). When geometry
+        IS registered but the token matches nothing, raises (fail-closed)."""
+        pins = self._pins_by_ref.get(reference)
+        if pins is None:
+            return None
+        matches = resolve_pin_tokens(pins, pin_token)
+        if not matches:
+            raise SchematicError(
+                f"pin {pin_token!r} not found on {reference!r}"
+            )
+        return matches
+
+    def add_pin_label(self, token: CommitToken, data: Dict[str, Any]) -> List[str]:
+        with self._lock:
+            batch = self._check_token(token)
+            self._maybe_fail(token, "add_pin_label")
+
+            ref = data.get("reference", "")
+            if not ref:
+                raise SchematicError("ADD_PIN_LABEL: missing reference")
+            pin_token = data.get("pin", "")
+            if not pin_token:
+                raise SchematicError("ADD_PIN_LABEL: missing pin")
+            net = data.get("net_name", "")
+            if not net:
+                raise SchematicError("ADD_PIN_LABEL: missing net_name")
+
+            # A pin NAME can sit on several pads; label EVERY one so no sibling
+            # pad is left dangling. A pin NUMBER resolves to a single pad.
+            pads = self._resolve_pins_for(ref, pin_token)
+            if pads is None:
+                # No pin geometry available headless — validated no-op.
+                self._bump(token)
+                return []
+            ids: List[str] = []
+            for pad in pads:
+                self._check_coords(pad.x, pad.y)
+                la = Label(
+                    id=f"L{next(self._next_id)}",
+                    name=net, x=pad.x, y=pad.y, label_type="global",
+                )
+                batch["labels"].append(la)
+                ids.append(la.id)
+            self._bump(token)
+            return ids
+
+    def add_no_connect(self, token: CommitToken, data: Dict[str, Any]) -> List[str]:
+        with self._lock:
+            batch = self._check_token(token)
+            self._maybe_fail(token, "add_no_connect")
+
+            ref = data.get("reference", "")
+            if not ref:
+                raise SchematicError("ADD_NO_CONNECT: missing reference")
+            pin_token = data.get("pin", "")
+            if not pin_token:
+                raise SchematicError("ADD_NO_CONNECT: missing pin")
+
+            # Same multi-pad semantics as ADD_PIN_LABEL: one NC per pad.
+            pads = self._resolve_pins_for(ref, pin_token)
+            if pads is None:
+                self._bump(token)
+                return []
+            ids: List[str] = []
+            for pad in pads:
+                self._check_coords(pad.x, pad.y)
+                nc = NoConnect(id=f"N{next(self._next_id)}", x=pad.x, y=pad.y)
+                batch["no_connects"].append(nc)
+                ids.append(nc.id)
+            self._bump(token)
+            return ids
+
     # ── queries ──
 
     def list_symbols(self) -> List[Symbol]:
@@ -519,16 +705,21 @@ class FakeSchematicApi(SchematicApi):
         with self._lock:
             return sorted(self._junctions.values(), key=lambda j: j.id)
 
+    def list_no_connects(self) -> List[NoConnect]:
+        with self._lock:
+            return sorted(self._no_connects.values(), key=lambda nc: nc.id)
+
     def serialize(self) -> bytes:
-        """Deterministic JSON over (symbols, wires, labels, junctions),
-        sorted by id. Excludes the undo stack — only the visible state
-        matters for rollback tests."""
+        """Deterministic JSON over (symbols, wires, labels, junctions,
+        no_connects), sorted by id. Excludes the undo stack — only the visible
+        state matters for rollback tests."""
         with self._lock:
             state = {
                 "symbols": [s.to_dict() for s in self.list_symbols()],
                 "wires": [w.to_dict() for w in self.list_wires()],
                 "labels": [la.to_dict() for la in self.list_labels()],
                 "junctions": [j.to_dict() for j in self.list_junctions()],
+                "no_connects": [nc.to_dict() for nc in self.list_no_connects()],
             }
             return json.dumps(state, sort_keys=True, separators=(",", ":")).encode(
                 "utf-8"

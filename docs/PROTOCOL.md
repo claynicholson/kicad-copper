@@ -98,6 +98,7 @@ HTTP 200 + `Content-Type: application/json`:
       { "severity": "warning", "code": "no_decoupling", "text": "...", "refs": ["U1"] }
     ]
   },
+  "design_summary": { ... },  // optional; see §design_summary
   "error": ""                 // empty on success
 }
 ```
@@ -120,6 +121,43 @@ The plugin treats any of these as failure:
 - `success == false`.
 - JSON parse error.
 - Response missing `protocol_version` or with `protocol_version > 1`.
+
+### `design_summary` (optional, additive)
+
+An optional object on any `CopperResponse` (the `/generate` `done` payload and
+the non-streaming responses). **Additive — `protocol_version` stays `1`.** It
+MAY be absent or `null` (older backends and the module-IR path emit neither);
+clients MUST handle its absence gracefully and MUST NOT reject a response that
+lacks it. Conversely, a client that does not understand it ignores it (top-level
+unknown fields are forward-compat hints per §Soft warnings). It is read-only
+narration of the generated design — it never drives apply.
+
+```jsonc
+"design_summary": {
+  "board":    { "name": "string", "description": "string" },
+  "overview": "string — one-paragraph description of the design",
+  "sections": [
+    { "group": "Power", "purpose": "5V → 3V3 regulation", "references": ["U2", "C1"] }
+  ],
+  "power": [
+    { "rail": "3V3", "voltage": "3.3V", "source": "U2 LDO", "est_current": "300mA" }
+  ],
+  "pin_map": [
+    { "ref": "U1", "pin": "GP0", "signal": "UART_TX" }
+  ],
+  "bom": [
+    { "references": ["C1", "C2"], "quantity": 2, "value": "100nF",
+      "lib_id": "Device:C", "footprint": "Capacitor_SMD:C_0402" }
+  ],
+  "stats": { "parts": 4, "unique_parts": 3, "nets": 12, "no_connects": 2 },
+  "notes": "string — free-form caveats / suggestions"
+}
+```
+
+Every field is optional and parsed tolerantly: a partial or evolving shape never
+fails validation. The plugin renders this as a compact, read-only "design
+summary card" (overview, per-section list, power tree, BOM table, stats line)
+after a successful apply.
 
 ## Response — streaming (`/generate`)
 
@@ -266,9 +304,14 @@ exactly on the pin's real position.
 - `reference`: required. Must match a `PLACE_COMPONENT` in the same plan or a
   symbol on the current sheet.
 - `pin`: required. Matched against the library symbol's pins in order: exact
-  name, exact number, decoration-stripped name (`~{WP}(IO2)` → `WP`), any
+  **number**, exact name, decoration-stripped name (`~{WP}(IO2)` → `WP`), any
   `/`-separated alias segment (`SDA/SDI/SDO` matches `SDI`). Single-pin
-  symbols match any token.
+  symbols match any token. **Multi-pad resolution:** a pin **number** is a
+  single physical pad, so an exact-number match anchors exactly that one pad.
+  A pin **name** may repeat across pads (a USB-C receptacle carries `D+` on
+  both pad `A6` and pad `B6`; `GND`/`VBUS` likewise), so a name match resolves
+  to **every** pad with that name and the plugin emits one label per pad —
+  leaving a sibling pad dangling would ERC-fail as "Pin not connected".
 - `net_name`: required, non-empty.
 - `style`: `global` (default) → global label at the pin; `power` → instance
   of `power:<net_name>` placed pin-on-pin (rotated away from the host pin).
@@ -287,7 +330,8 @@ global by name; no `ADD_WIRE` ops are needed for connectivity.
 ```
 
 Pin-anchored no-connect flag. The plugin resolves the real pin position
-(same matching rules as `ADD_PIN_LABEL`) and drops an NC cross on it. The
+(same matching rules as `ADD_PIN_LABEL`, including multi-pad name resolution:
+a name on N pads gets N no-connects) and drops an NC cross on each. The
 backend emits one for every symbol pin that belongs to no net — clean ERC
 demands an explicit NC on every dangling pin. Fail-closed at apply time
 like `ADD_PIN_LABEL`.

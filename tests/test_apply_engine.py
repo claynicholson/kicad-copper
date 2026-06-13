@@ -17,6 +17,7 @@ from copper_integration.apply_engine import ApplyEngine, ApplyError, ApplyResult
 from copper_integration.backend_client import BackendClient
 from copper_integration.schematic_api import (
     FakeSchematicApi,
+    Pin,
     SchematicError,
 )
 from copper_integration.settings import Settings
@@ -88,6 +89,16 @@ def _power(net, x, y):
     return {"type": "ADD_POWER_SYMBOL", "data": {
         "net_name": net, "x": x, "y": y
     }}
+
+
+def _pin_label(ref, pin, net, style="global"):
+    return {"type": "ADD_PIN_LABEL", "data": {
+        "reference": ref, "pin": pin, "net_name": net, "style": style,
+    }}
+
+
+def _no_connect(ref, pin):
+    return {"type": "ADD_NO_CONNECT", "data": {"reference": ref, "pin": pin}}
 
 
 # ── Check 5: apply correctness ────────────────────────────────────────────
@@ -222,6 +233,95 @@ class ApplyCorrectnessTest(unittest.TestCase):
         with self.assertRaises(ApplyError) as cm:
             engine.apply_response(api, raw)
         self.assertEqual(cm.exception.code, "response_invalid")
+
+    # ── multi-pad pin-label / no-connect resolution (BUG FIX) ──
+    #
+    # On a USB-C connector the pin NAME "D+" sits on TWO pads (A6 and B6).
+    # A name token must label/NC EVERY matching pad — leaving a sibling pad
+    # dangling is what ERC-failed in the field. A pin NUMBER token resolves
+    # to exactly one pad.
+
+    def _usb_c_api(self):
+        api = FakeSchematicApi()
+        # D+ repeats across A6/B6, GND across A1/B1 — classic USB-C duplication.
+        api.register_pins("J1", [
+            Pin(number="A1", name="GND", x=0, y=0),
+            Pin(number="A6", name="D+", x=100, y=0),
+            Pin(number="A7", name="D-", x=200, y=0),
+            Pin(number="B1", name="GND", x=0, y=300),
+            Pin(number="B6", name="D+", x=100, y=300),
+            Pin(number="B7", name="D-", x=200, y=300),
+        ])
+        return api
+
+    def test_pin_label_by_name_hits_every_matching_pad(self):
+        api = self._usb_c_api()
+        engine = ApplyEngine()
+        resp = _mk_response([
+            _place("J1", -1000, -1000, lib="Connector:USB_C_Receptacle"),
+            _pin_label("J1", "D+", "USB_DP"),
+        ])
+        result = engine.apply_validated(api, resp)
+        self.assertTrue(result.ok)
+        # D+ is on A6 AND B6 → two labels, both named USB_DP.
+        labels = [la for la in api.list_labels() if la.name == "USB_DP"]
+        self.assertEqual(len(labels), 2)
+        self.assertEqual({(la.x, la.y) for la in labels}, {(100, 0), (100, 300)})
+
+    def test_no_connect_by_name_hits_every_matching_pad(self):
+        api = self._usb_c_api()
+        engine = ApplyEngine()
+        resp = _mk_response([
+            _place("J1", -1000, -1000, lib="Connector:USB_C_Receptacle"),
+            _no_connect("J1", "D+"),
+        ])
+        result = engine.apply_validated(api, resp)
+        self.assertTrue(result.ok)
+        # Two pads named D+ → two no-connects.
+        ncs = api.list_no_connects()
+        self.assertEqual(len(ncs), 2)
+        self.assertEqual({(nc.x, nc.y) for nc in ncs}, {(100, 0), (100, 300)})
+
+    def test_pin_label_by_number_hits_exactly_one_pad(self):
+        # The backend emits per-NUMBER normally; a number must anchor one pad.
+        api = self._usb_c_api()
+        engine = ApplyEngine()
+        resp = _mk_response([
+            _place("J1", -1000, -1000, lib="Connector:USB_C_Receptacle"),
+            _pin_label("J1", "B6", "USB_DP"),
+        ])
+        result = engine.apply_validated(api, resp)
+        self.assertTrue(result.ok)
+        labels = [la for la in api.list_labels() if la.name == "USB_DP"]
+        self.assertEqual(len(labels), 1)
+        self.assertEqual((labels[0].x, labels[0].y), (100, 300))
+
+    def test_no_connect_by_number_hits_exactly_one_pad(self):
+        api = self._usb_c_api()
+        engine = ApplyEngine()
+        resp = _mk_response([
+            _place("J1", -1000, -1000, lib="Connector:USB_C_Receptacle"),
+            _no_connect("J1", "A6"),
+        ])
+        result = engine.apply_validated(api, resp)
+        self.assertTrue(result.ok)
+        ncs = api.list_no_connects()
+        self.assertEqual(len(ncs), 1)
+        self.assertEqual((ncs[0].x, ncs[0].y), (100, 0))
+
+    def test_unresolved_pin_fails_closed(self):
+        api = self._usb_c_api()
+        engine = ApplyEngine()
+        before = api.serialize()
+        resp = _mk_response([
+            _place("J1", -1000, -1000, lib="Connector:USB_C_Receptacle"),
+            _pin_label("J1", "NOPE", "USB_DP"),
+        ])
+        with self.assertRaises(ApplyError) as cm:
+            engine.apply_validated(api, resp)
+        self.assertEqual(cm.exception.code, "op_failed")
+        # Atomic: nothing applied.
+        self.assertEqual(api.serialize(), before)
 
     def test_happy_fixture_footprints_land_on_symbols(self):
         # generate_happy.sse carries footprints for U1/U2 and none for the

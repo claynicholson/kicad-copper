@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <optional>
 #include <nlohmann/json.hpp>
 #include <math/vector2d.h>
 
@@ -149,15 +150,173 @@ struct PlanCard
     }
 };
 
+/// One named functional block in the design summary
+struct DesignSection
+{
+    std::string              group;
+    std::string              purpose;
+    std::vector<std::string> references;
+
+    static DesignSection fromJson( const nlohmann::json& j )
+    {
+        DesignSection s;
+        s.group = j.value( "group", "" );
+        s.purpose = j.value( "purpose", "" );
+
+        if( j.contains( "references" ) && j["references"].is_array() )
+        {
+            for( const auto& r : j["references"] )
+            {
+                if( r.is_string() )
+                    s.references.push_back( r.get<std::string>() );
+            }
+        }
+
+        return s;
+    }
+};
+
+/// One rail in the power tree
+struct DesignPowerRail
+{
+    std::string rail;
+    std::string voltage;
+    std::string source;
+    std::string est_current;
+
+    static DesignPowerRail fromJson( const nlohmann::json& j )
+    {
+        DesignPowerRail p;
+        p.rail = j.value( "rail", "" );
+        p.voltage = j.value( "voltage", "" );
+        p.source = j.value( "source", "" );
+        p.est_current = j.value( "est_current", "" );
+        return p;
+    }
+};
+
+/// One row of the bill of materials
+struct DesignBomRow
+{
+    std::vector<std::string> references;
+    int                      quantity = 0;
+    std::string              value;
+    std::string              lib_id;
+    std::string              footprint;
+
+    static DesignBomRow fromJson( const nlohmann::json& j )
+    {
+        DesignBomRow b;
+
+        if( j.contains( "references" ) && j["references"].is_array() )
+        {
+            for( const auto& r : j["references"] )
+            {
+                if( r.is_string() )
+                    b.references.push_back( r.get<std::string>() );
+            }
+        }
+
+        b.quantity = j.value( "quantity", 0 );
+        b.value = j.value( "value", "" );
+        b.lib_id = j.value( "lib_id", "" );
+        b.footprint = j.value( "footprint", "" );
+        return b;
+    }
+};
+
+/// Headline counts for the design
+struct DesignStats
+{
+    int parts = 0;
+    int unique_parts = 0;
+    int nets = 0;
+    int no_connects = 0;
+
+    static DesignStats fromJson( const nlohmann::json& j )
+    {
+        DesignStats s;
+        s.parts = j.value( "parts", 0 );
+        s.unique_parts = j.value( "unique_parts", 0 );
+        s.nets = j.value( "nets", 0 );
+        s.no_connects = j.value( "no_connects", 0 );
+        return s;
+    }
+};
+
+/// Optional, additive human-readable design narration (PROTOCOL.md
+/// §design_summary). Present on newer backends' generate `done` payload;
+/// absent on older backends / the module-IR path. Parsed tolerantly — every
+/// field defaults — so a partial or evolving shape never breaks parsing.
+struct DesignSummary
+{
+    std::string                  board_name;
+    std::string                  board_description;
+    std::string                  overview;
+    std::vector<DesignSection>   sections;
+    std::vector<DesignPowerRail> power;
+    std::vector<DesignBomRow>    bom;
+    DesignStats                  stats;
+    std::string                  notes;
+
+    static DesignSummary fromJson( const nlohmann::json& j )
+    {
+        DesignSummary d;
+
+        if( j.contains( "board" ) && j["board"].is_object() )
+        {
+            d.board_name = j["board"].value( "name", "" );
+            d.board_description = j["board"].value( "description", "" );
+        }
+
+        d.overview = j.value( "overview", "" );
+        d.notes = j.value( "notes", "" );
+
+        if( j.contains( "sections" ) && j["sections"].is_array() )
+        {
+            for( const auto& s : j["sections"] )
+            {
+                if( s.is_object() )
+                    d.sections.push_back( DesignSection::fromJson( s ) );
+            }
+        }
+
+        if( j.contains( "power" ) && j["power"].is_array() )
+        {
+            for( const auto& p : j["power"] )
+            {
+                if( p.is_object() )
+                    d.power.push_back( DesignPowerRail::fromJson( p ) );
+            }
+        }
+
+        if( j.contains( "bom" ) && j["bom"].is_array() )
+        {
+            for( const auto& b : j["bom"] )
+            {
+                if( b.is_object() )
+                    d.bom.push_back( DesignBomRow::fromJson( b ) );
+            }
+        }
+
+        if( j.contains( "stats" ) && j["stats"].is_object() )
+            d.stats = DesignStats::fromJson( j["stats"] );
+
+        return d;
+    }
+};
+
 /// Full response from the Copper cloud API
 struct CopperResponse
 {
-    std::string              message;
-    std::vector<Operation>   operations;
-    PlanCard                 plan;
-    std::string              intent;  // "generate", "recommend", "chat"
-    bool                     success = true;
-    std::string              error;
+    std::string                  message;
+    std::vector<Operation>       operations;
+    PlanCard                     plan;
+    std::string                  intent;  // "generate", "recommend", "chat"
+    bool                         success = true;
+    std::string                  error;
+    // Optional, additive (PROTOCOL.md §design_summary). Empty when absent.
+    std::optional<DesignSummary> design_summary;
 
     static CopperResponse fromJson( const nlohmann::json& j )
     {
@@ -175,6 +334,10 @@ struct CopperResponse
 
         if( j.contains( "plan" ) && j["plan"].is_object() )
             r.plan = PlanCard::fromJson( j["plan"] );
+
+        // Tolerate missing/null: only parse when it's a real object.
+        if( j.contains( "design_summary" ) && j["design_summary"].is_object() )
+            r.design_summary = DesignSummary::fromJson( j["design_summary"] );
 
         return r;
     }

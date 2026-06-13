@@ -29,6 +29,7 @@
 #include <wx/stattext.h>
 
 #include <memory>
+#include <optional>
 #include <vector>
 #include <string>
 
@@ -47,6 +48,7 @@ namespace COPPER
     struct SSEEvent;
     struct SchematicContext;
     struct Operation;
+    struct DesignSummary;
 }
 
 
@@ -117,6 +119,11 @@ private:
     int runErcAutoFix();
 
     void addPlanCard( const COPPER::CopperResponse& aResponse );
+
+    /// Render the optional read-only design-summary card (PROTOCOL.md
+    /// §design_summary) after a successful apply. No-op if absent.
+    void addDesignSummaryCard( const COPPER::DesignSummary& aSummary );
+
     void showStages( const std::vector<std::pair<wxString, int>>& aStages );
     void updateStage( const wxString& aName, int aState );
     void scrollToBottom();
@@ -200,6 +207,11 @@ private:
     // Cleared after ExecuteOperations or Cancel. See docs/INTEGRATION_V1_AUDIT.md
     // gap B1 / G-APPROVE.
     std::vector<COPPER::Operation>      m_pendingOps;
+
+    // Optional design narration from the final response (PROTOCOL.md
+    // §design_summary). Rendered as a read-only card after a successful apply.
+    // Absent on older backends / the module-IR path.
+    std::optional<COPPER::DesignSummary> m_pendingSummary;
 };
 
 

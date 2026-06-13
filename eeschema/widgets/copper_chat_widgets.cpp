@@ -308,6 +308,162 @@ void COPPER_PLAN_CARD::DisableActions()
 
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  COPPER_DESIGN_SUMMARY_CARD
+// ═══════════════════════════════════════════════════════════════════════════
+
+wxBEGIN_EVENT_TABLE( COPPER_DESIGN_SUMMARY_CARD, wxPanel )
+    EVT_PAINT( COPPER_DESIGN_SUMMARY_CARD::OnPaint )
+wxEND_EVENT_TABLE()
+
+
+COPPER_DESIGN_SUMMARY_CARD::COPPER_DESIGN_SUMMARY_CARD( wxWindow* aParent,
+                                                        const Data& aData ) :
+        wxPanel( aParent, wxID_ANY )
+{
+    SetBackgroundStyle( wxBG_STYLE_PAINT );
+    SetBackgroundColour( COPPER_COLORS::PLAN_BG );
+
+    const int wrapWidth = aParent->GetClientSize().GetWidth() - FromDIP( 80 );
+
+    auto addLabel = [&]( wxBoxSizer* sizer, const wxString& text,
+                         const wxColour& color, bool bold, bool italic,
+                         int indent ) -> wxStaticText*
+    {
+        wxStaticText* t = new wxStaticText( this, wxID_ANY, text );
+        t->SetForegroundColour( color );
+
+        wxFont font = t->GetFont();
+
+        if( bold )
+            font = font.Bold();
+
+        if( italic )
+            font = font.Italic();
+
+        t->SetFont( font );
+
+        if( wrapWidth > FromDIP( 40 ) )
+            t->Wrap( wrapWidth - indent );
+
+        sizer->Add( t, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 8 ) + indent );
+        return t;
+    };
+
+    wxBoxSizer* mainSizer = new wxBoxSizer( wxVERTICAL );
+
+    // Header — board name when present, else generic.
+    wxString headerText = aData.boardName.IsEmpty()
+                                  ? wxT( "DESIGN SUMMARY" )
+                                  : wxString::Format( wxT( "DESIGN SUMMARY — %s" ),
+                                                      aData.boardName );
+    wxStaticText* header = new wxStaticText( this, wxID_ANY, headerText );
+    header->SetForegroundColour( COPPER_COLORS::PLAN_BORDER );
+    header->SetFont( header->GetFont().Bold() );
+    mainSizer->Add( header, 0, wxALL, FromDIP( 8 ) );
+
+    if( !aData.boardDescription.IsEmpty() )
+        addLabel( mainSizer, aData.boardDescription, COPPER_COLORS::TEXT_SECONDARY,
+                  false, true, 0 );
+
+    // Overview.
+    if( !aData.overview.IsEmpty() )
+        addLabel( mainSizer, aData.overview, COPPER_COLORS::TEXT_PRIMARY,
+                  false, false, 0 );
+
+    // Sections: group → purpose → refs.
+    if( !aData.sections.empty() )
+    {
+        addLabel( mainSizer, wxT( "Sections" ), COPPER_COLORS::ACCENT, true, false, 0 );
+
+        for( const auto& s : aData.sections )
+        {
+            addLabel( mainSizer, wxString::Format( wxT( "• %s — %s" ), s.group,
+                                                   s.purpose ),
+                      COPPER_COLORS::TEXT_PRIMARY, false, false, FromDIP( 8 ) );
+
+            if( !s.references.IsEmpty() )
+                addLabel( mainSizer, s.references, COPPER_COLORS::TEXT_MUTED,
+                          false, false, FromDIP( 20 ) );
+        }
+    }
+
+    // Power tree.
+    if( !aData.power.empty() )
+    {
+        addLabel( mainSizer, wxT( "Power" ), COPPER_COLORS::ACCENT, true, false, 0 );
+
+        for( const auto& p : aData.power )
+        {
+            wxString line = wxString::Format( wxT( "• %s  %s" ), p.rail, p.voltage );
+
+            if( !p.source.IsEmpty() )
+                line += wxString::Format( wxT( "  ← %s" ), p.source );
+
+            if( !p.estCurrent.IsEmpty() )
+                line += wxString::Format( wxT( "  (%s)" ), p.estCurrent );
+
+            addLabel( mainSizer, line, COPPER_COLORS::TEXT_PRIMARY, false, false,
+                      FromDIP( 8 ) );
+        }
+    }
+
+    // BOM table.
+    if( !aData.bom.empty() )
+    {
+        addLabel( mainSizer, wxT( "Bill of materials" ), COPPER_COLORS::ACCENT,
+                  true, false, 0 );
+
+        for( const auto& b : aData.bom )
+        {
+            wxString line = wxString::Format( wxT( "%d× %s  [%s]" ), b.quantity,
+                                              b.value, b.references );
+            addLabel( mainSizer, line, COPPER_COLORS::TEXT_PRIMARY, false, false,
+                      FromDIP( 8 ) );
+
+            wxString detail;
+
+            if( !b.libId.IsEmpty() )
+                detail = b.libId;
+
+            if( !b.footprint.IsEmpty() )
+                detail += ( detail.IsEmpty() ? wxString() : wxT( "  ·  " ) )
+                          + b.footprint;
+
+            if( !detail.IsEmpty() )
+                addLabel( mainSizer, detail, COPPER_COLORS::TEXT_MUTED, false,
+                          false, FromDIP( 20 ) );
+        }
+    }
+
+    // Stats footer.
+    if( !aData.stats.IsEmpty() )
+        addLabel( mainSizer, aData.stats, COPPER_COLORS::TEXT_SECONDARY, false,
+                  false, 0 );
+
+    // Notes.
+    if( !aData.notes.IsEmpty() )
+        addLabel( mainSizer, aData.notes, COPPER_COLORS::TEXT_MUTED, false, true,
+                  0 );
+
+    SetSizer( mainSizer );
+    mainSizer->Fit( this );
+}
+
+
+void COPPER_DESIGN_SUMMARY_CARD::OnPaint( wxPaintEvent& aEvent )
+{
+    wxAutoBufferedPaintDC dc( this );
+    wxSize size = GetClientSize();
+    int radius = FromDIP( 8 );
+    int border = FromDIP( 1 );
+
+    dc.SetBrush( wxBrush( COPPER_COLORS::PLAN_BG ) );
+    dc.SetPen( wxPen( COPPER_COLORS::PLAN_BORDER, border ) );
+    dc.DrawRoundedRectangle( 0, 0, size.x, size.y, radius );
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  COPPER_STAGE_INDICATOR
 // ═══════════════════════════════════════════════════════════════════════════
 

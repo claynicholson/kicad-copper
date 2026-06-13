@@ -75,6 +75,57 @@ class ValidatedOperation:
 
 
 @dataclass
+class DesignSummary:
+    """Optional, additive human-readable narration of the generated design
+    (PROTOCOL.md §design_summary). Present on newer backends' /generate `done`
+    payload; absent on older backends and the module-IR path. We parse it
+    tolerantly — every field defaults — so a partial or evolving shape never
+    fails validation. protocol_version stays 1; this is forward-compat only."""
+
+    board: Dict[str, Any]
+    overview: str
+    sections: List[Dict[str, Any]]
+    power: List[Dict[str, Any]]
+    pin_map: List[Dict[str, Any]]
+    bom: List[Dict[str, Any]]
+    stats: Dict[str, Any]
+    notes: str
+    raw: Dict[str, Any]
+
+
+def _parse_design_summary(obj: Any) -> Optional[DesignSummary]:
+    """Best-effort parse of the optional `design_summary` field. Returns None
+    when absent/null; tolerates missing sub-fields and wrong types by falling
+    back to empties (never raises — it's additive narration, not a hard gate)."""
+    if not isinstance(obj, dict):
+        return None
+
+    def _list(key: str) -> List[Dict[str, Any]]:
+        v = obj.get(key)
+        return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
+
+    def _str(key: str) -> str:
+        v = obj.get(key)
+        return v if isinstance(v, str) else ""
+
+    def _dict(key: str) -> Dict[str, Any]:
+        v = obj.get(key)
+        return v if isinstance(v, dict) else {}
+
+    return DesignSummary(
+        board=_dict("board"),
+        overview=_str("overview"),
+        sections=_list("sections"),
+        power=_list("power"),
+        pin_map=_list("pin_map"),
+        bom=_list("bom"),
+        stats=_dict("stats"),
+        notes=_str("notes"),
+        raw=obj,
+    )
+
+
+@dataclass
 class ValidatedResponse:
     """Same shape the legacy harness exposed — drives ApplyEngine and tests."""
     protocol_version: int
@@ -87,6 +138,8 @@ class ValidatedResponse:
     error: str
     erc: Optional[Dict[str, Any]]
     raw: Dict[str, Any]
+    # Optional, additive (PROTOCOL.md §design_summary). None when absent.
+    design_summary: Optional[DesignSummary] = None
 
 
 # ── op-type → Pydantic model for single-op validation ──────────────────────
@@ -353,6 +406,7 @@ def validate_response(obj: Any) -> ValidatedResponse:
         error=full.error,
         erc=erc,
         raw=obj,
+        design_summary=_parse_design_summary(obj.get("design_summary")),
     )
 
 

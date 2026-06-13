@@ -443,6 +443,7 @@ void COPPER_CHAT_PANEL::onPlanApproved( wxCommandEvent& aEvent )
 void COPPER_CHAT_PANEL::onPlanDismissed( wxCommandEvent& aEvent )
 {
     m_pendingOps.clear();
+    m_pendingSummary.reset();
     addAIMessage( wxT( "Plan dismissed. Nothing was applied." ) );
 }
 
@@ -554,6 +555,73 @@ void COPPER_CHAT_PANEL::addPlanCard( const COPPER::CopperResponse& aResponse )
     card->Bind( COPPER_EVT_PLAN_EDITED, &COPPER_CHAT_PANEL::onPlanEdited, this );
     card->Bind( COPPER_EVT_PLAN_DISMISSED, &COPPER_CHAT_PANEL::onPlanDismissed, this );
 
+    m_messageSizer->Add( card, 0, wxEXPAND | wxALL, FromDIP( 8 ) );
+    bumpThinkingToBottom();
+    scrollToBottom();
+}
+
+
+void COPPER_CHAT_PANEL::addDesignSummaryCard( const COPPER::DesignSummary& aSummary )
+{
+    clearEmptyState();
+
+    auto joinRefs = []( const std::vector<std::string>& refs ) -> wxString
+    {
+        wxString out;
+
+        for( size_t i = 0; i < refs.size(); ++i )
+        {
+            if( i )
+                out += wxT( ", " );
+
+            out += wxString::FromUTF8( refs[i] );
+        }
+
+        return out;
+    };
+
+    COPPER_DESIGN_SUMMARY_CARD::Data data;
+    data.boardName = wxString::FromUTF8( aSummary.board_name );
+    data.boardDescription = wxString::FromUTF8( aSummary.board_description );
+    data.overview = wxString::FromUTF8( aSummary.overview );
+    data.notes = wxString::FromUTF8( aSummary.notes );
+
+    for( const auto& s : aSummary.sections )
+    {
+        COPPER_DESIGN_SUMMARY_CARD::Section sec;
+        sec.group = wxString::FromUTF8( s.group );
+        sec.purpose = wxString::FromUTF8( s.purpose );
+        sec.references = joinRefs( s.references );
+        data.sections.push_back( sec );
+    }
+
+    for( const auto& p : aSummary.power )
+    {
+        COPPER_DESIGN_SUMMARY_CARD::PowerRail rail;
+        rail.rail = wxString::FromUTF8( p.rail );
+        rail.voltage = wxString::FromUTF8( p.voltage );
+        rail.source = wxString::FromUTF8( p.source );
+        rail.estCurrent = wxString::FromUTF8( p.est_current );
+        data.power.push_back( rail );
+    }
+
+    for( const auto& b : aSummary.bom )
+    {
+        COPPER_DESIGN_SUMMARY_CARD::BomRow row;
+        row.references = joinRefs( b.references );
+        row.quantity = b.quantity;
+        row.value = wxString::FromUTF8( b.value );
+        row.libId = wxString::FromUTF8( b.lib_id );
+        row.footprint = wxString::FromUTF8( b.footprint );
+        data.bom.push_back( row );
+    }
+
+    const COPPER::DesignStats& st = aSummary.stats;
+    data.stats = wxString::Format(
+            wxT( "%d parts (%d unique) · %d nets · %d no-connects" ),
+            st.parts, st.unique_parts, st.nets, st.no_connects );
+
+    auto* card = new COPPER_DESIGN_SUMMARY_CARD( m_scrollArea, data );
     m_messageSizer->Add( card, 0, wxEXPAND | wxALL, FromDIP( 8 ) );
     bumpThinkingToBottom();
     scrollToBottom();
@@ -806,6 +874,7 @@ void COPPER_CHAT_PANEL::handleResponse( const COPPER::CopperResponse& aResponse 
         addAIMessage( wxString::Format( wxT( "Error: %s" ),
                                         wxString::FromUTF8( aResponse.error ) ) );
         m_pendingOps.clear();
+        m_pendingSummary.reset();
         return;
     }
 
@@ -825,6 +894,11 @@ void COPPER_CHAT_PANEL::handleResponse( const COPPER::CopperResponse& aResponse 
     // Stash operations from the final response so onPlanApproved can apply them.
     // See docs/INTEGRATION_V1_AUDIT.md gap B1 / G-APPROVE.
     m_pendingOps = aResponse.operations;
+
+    // Stash the optional design summary (PROTOCOL.md §design_summary) so the
+    // read-only card renders after a successful apply. Absent on older
+    // backends / the module-IR path.
+    m_pendingSummary = aResponse.design_summary;
 
     if( m_planCardShown )
     {
@@ -1281,25 +1355,45 @@ static wxString normalizePinName( const wxString& aName )
 }
 
 
-// Match a backend pin token against a symbol's pins: exact name, exact
-// number, normalized name, then any '/'-separated alias segment
-// ("SDA/SDI/SDO" matches "SDI").
-static SCH_PIN* findSymbolPin( SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aSheet,
-                               const wxString& aToken )
+// Match a backend pin token against a symbol's pins and return EVERY pad it
+// resolves to. A pin NUMBER is a physical pad, so an exact-number match
+// anchors exactly that one pad. A pin NAME can repeat across pads (USB-C
+// "D+"/"GND"/"VBUS" each sit on two pads), so a name match returns ALL pads
+// carrying that name — one label / one no-connect per pad. Resolution order:
+// exact number, exact name, normalized name, '/'-separated alias segment
+// ("SDA/SDI/SDO" matches "SDI"), then single-pin-any-token fallback.
+static std::vector<SCH_PIN*> findSymbolPins( SCH_SYMBOL* aSymbol,
+                                             const SCH_SHEET_PATH& aSheet,
+                                             const wxString& aToken )
 {
     std::vector<SCH_PIN*> pins = aSymbol->GetPins( &aSheet );
+    std::vector<SCH_PIN*> matches;
 
+    // Pin numbers are unique per pad: an exact hit is a single physical pad.
     for( SCH_PIN* pin : pins )
     {
-        if( pin->GetName() == aToken || pin->GetNumber() == aToken )
-            return pin;
+        if( pin->GetNumber() == aToken )
+            return { pin };
     }
+
+    // Names can repeat: gather every pad whose name equals the token.
+    for( SCH_PIN* pin : pins )
+    {
+        if( pin->GetName() == aToken )
+            matches.push_back( pin );
+    }
+
+    if( !matches.empty() )
+        return matches;
 
     for( SCH_PIN* pin : pins )
     {
         if( normalizePinName( pin->GetName() ) == aToken )
-            return pin;
+            matches.push_back( pin );
     }
+
+    if( !matches.empty() )
+        return matches;
 
     for( SCH_PIN* pin : pins )
     {
@@ -1308,16 +1402,22 @@ static SCH_PIN* findSymbolPin( SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aSheet
         while( tok.HasMoreTokens() )
         {
             if( normalizePinName( tok.GetNextToken() ) == aToken )
-                return pin;
+            {
+                matches.push_back( pin );
+                break;
+            }
         }
     }
+
+    if( !matches.empty() )
+        return matches;
 
     // Single-pin symbols (power symbols, PWR_FLAG) are unambiguous no
     // matter what the backend calls the pin.
     if( pins.size() == 1 )
-        return pins[0];
+        return { pins[0] };
 
-    return nullptr;
+    return {};
 }
 
 
@@ -1708,9 +1808,12 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
                 return;
             }
 
-            SCH_PIN* pin = findSymbolPin( host, sheet, pinTok );
+            // A pin NAME ("D+") can sit on several pads; label EVERY one so
+            // no sibling pad is left dangling. A pin NUMBER resolves to a
+            // single pad (see findSymbolPins).
+            std::vector<SCH_PIN*> targetPins = findSymbolPins( host, sheet, pinTok );
 
-            if( !pin )
+            if( targetPins.empty() )
             {
                 if( COPPER::DebugEnabled() )
                     COPPER::DebugLog( "ExecuteOperations: ADD_PIN_LABEL pin '"
@@ -1724,86 +1827,89 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
                 return;
             }
 
-            VECTOR2I pinPos = pin->GetPosition();
-
-            if( style == "power" )
+            for( SCH_PIN* pin : targetPins )
             {
-                LIB_ID powerId;
-                powerId.Parse( wxString::Format( wxT( "power:%s" ),
-                                                 wxString::FromUTF8( netName ) ) );
+                VECTOR2I pinPos = pin->GetPosition();
 
-                LIB_SYMBOL* libSym = resolveLibSymbol( powerId );
-
-                if( !libSym )
+                if( style == "power" )
                 {
-                    addAIMessage( wxString::Format(
-                        wxT( "Symbol not found in libraries: power:%s. "
-                             "Nothing applied." ),
-                        wxString::FromUTF8( netName ) ) );
-                    return;
+                    LIB_ID powerId;
+                    powerId.Parse( wxString::Format( wxT( "power:%s" ),
+                                                     wxString::FromUTF8( netName ) ) );
+
+                    LIB_SYMBOL* libSym = resolveLibSymbol( powerId );
+
+                    if( !libSym )
+                    {
+                        addAIMessage( wxString::Format(
+                            wxT( "Symbol not found in libraries: power:%s. "
+                                 "Nothing applied." ),
+                            wxString::FromUTF8( netName ) ) );
+                        return;
+                    }
+
+                    // Route a short wire stub away from the pin and hang the
+                    // power symbol off its end, so the symbol never sits on top
+                    // of the host body. GND-ish nets drop below; rails rise.
+                    constexpr int GRID_IU = 25400; // 2.54 mm in eeschema IU
+
+                    VECTOR2I out( 0, 0 );
+
+                    switch( pin->GetOrientation() )
+                    {
+                    case PIN_ORIENTATION::PIN_RIGHT: out = { -1, 0 }; break;
+                    case PIN_ORIENTATION::PIN_LEFT:  out = { 1, 0 };  break;
+                    case PIN_ORIENTATION::PIN_UP:    out = { 0, 1 };  break;
+                    case PIN_ORIENTATION::PIN_DOWN:  out = { 0, -1 }; break;
+                    default: break;
+                    }
+
+                    wxString netUpper = wxString::FromUTF8( netName ).Upper();
+                    int ty = netUpper.Contains( wxT( "GND" ) ) ? 1 : -1;
+
+                    VECTOR2I end = pinPos;
+
+                    if( out.x != 0 )
+                        end = pinPos + VECTOR2I( out.x * 2 * GRID_IU, 0 );
+                    else if( out.y == ty )
+                        end = pinPos + VECTOR2I( 0, ty * 2 * GRID_IU );
+
+                    // (vertical pin pointing away from the net's natural
+                    // direction: keep the symbol directly on the pin)
+
+                    if( end != pinPos )
+                    {
+                        SCH_LINE* wire = new SCH_LINE( pinPos, LAYER_WIRE );
+                        wire->SetEndPoint( end );
+                        commit.Add( wire, screen );
+                    }
+
+                    SCH_SYMBOL* powerSym = new SCH_SYMBOL( *libSym, powerId, &sheet, 0 );
+                    powerSym->SetPosition( end );
+
+                    // NEVER rotate power symbols: the library defaults already
+                    // encode the human convention (GND hangs down, +rails point
+                    // up). The symbol's own pin sits at its origin, so the
+                    // connection point stays exactly on the stub end regardless.
+                    commit.Add( powerSym, screen );
                 }
-
-                // Route a short wire stub away from the pin and hang the
-                // power symbol off its end, so the symbol never sits on top
-                // of the host body. GND-ish nets drop below; rails rise.
-                constexpr int GRID_IU = 25400; // 2.54 mm in eeschema IU
-
-                VECTOR2I out( 0, 0 );
-
-                switch( pin->GetOrientation() )
+                else
                 {
-                case PIN_ORIENTATION::PIN_RIGHT: out = { -1, 0 }; break;
-                case PIN_ORIENTATION::PIN_LEFT:  out = { 1, 0 };  break;
-                case PIN_ORIENTATION::PIN_UP:    out = { 0, 1 };  break;
-                case PIN_ORIENTATION::PIN_DOWN:  out = { 0, -1 }; break;
-                default: break;
+                    SCH_GLOBALLABEL* label = new SCH_GLOBALLABEL( pinPos,
+                                                                  wxString::FromUTF8( netName ) );
+
+                    // Text extends away from the symbol body.
+                    switch( pin->GetOrientation() )
+                    {
+                    case PIN_ORIENTATION::PIN_RIGHT: label->SetSpinStyle( SPIN_STYLE::LEFT );   break;
+                    case PIN_ORIENTATION::PIN_LEFT:  label->SetSpinStyle( SPIN_STYLE::RIGHT );  break;
+                    case PIN_ORIENTATION::PIN_UP:    label->SetSpinStyle( SPIN_STYLE::BOTTOM ); break;
+                    case PIN_ORIENTATION::PIN_DOWN:  label->SetSpinStyle( SPIN_STYLE::UP );     break;
+                    default:                         label->SetSpinStyle( SPIN_STYLE::LEFT );   break;
+                    }
+
+                    commit.Add( label, screen );
                 }
-
-                wxString netUpper = wxString::FromUTF8( netName ).Upper();
-                int ty = netUpper.Contains( wxT( "GND" ) ) ? 1 : -1;
-
-                VECTOR2I end = pinPos;
-
-                if( out.x != 0 )
-                    end = pinPos + VECTOR2I( out.x * 2 * GRID_IU, 0 );
-                else if( out.y == ty )
-                    end = pinPos + VECTOR2I( 0, ty * 2 * GRID_IU );
-
-                // (vertical pin pointing away from the net's natural
-                // direction: keep the symbol directly on the pin)
-
-                if( end != pinPos )
-                {
-                    SCH_LINE* wire = new SCH_LINE( pinPos, LAYER_WIRE );
-                    wire->SetEndPoint( end );
-                    commit.Add( wire, screen );
-                }
-
-                SCH_SYMBOL* powerSym = new SCH_SYMBOL( *libSym, powerId, &sheet, 0 );
-                powerSym->SetPosition( end );
-
-                // NEVER rotate power symbols: the library defaults already
-                // encode the human convention (GND hangs down, +rails point
-                // up). The symbol's own pin sits at its origin, so the
-                // connection point stays exactly on the stub end regardless.
-                commit.Add( powerSym, screen );
-            }
-            else
-            {
-                SCH_GLOBALLABEL* label = new SCH_GLOBALLABEL( pinPos,
-                                                              wxString::FromUTF8( netName ) );
-
-                // Text extends away from the symbol body.
-                switch( pin->GetOrientation() )
-                {
-                case PIN_ORIENTATION::PIN_RIGHT: label->SetSpinStyle( SPIN_STYLE::LEFT );   break;
-                case PIN_ORIENTATION::PIN_LEFT:  label->SetSpinStyle( SPIN_STYLE::RIGHT );  break;
-                case PIN_ORIENTATION::PIN_UP:    label->SetSpinStyle( SPIN_STYLE::BOTTOM ); break;
-                case PIN_ORIENTATION::PIN_DOWN:  label->SetSpinStyle( SPIN_STYLE::UP );     break;
-                default:                         label->SetSpinStyle( SPIN_STYLE::LEFT );   break;
-                }
-
-                commit.Add( label, screen );
             }
         }
         else if( op.type == "ADD_NO_CONNECT" )
@@ -1841,9 +1947,11 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
                 return;
             }
 
-            SCH_PIN* pin = findSymbolPin( host, sheet, pinTok );
+            // Same multi-pad semantics as ADD_PIN_LABEL: a name that maps to
+            // several pads gets one no-connect per pad; a number hits one pad.
+            std::vector<SCH_PIN*> targetPins = findSymbolPins( host, sheet, pinTok );
 
-            if( !pin )
+            if( targetPins.empty() )
             {
                 addAIMessage( wxString::Format(
                     wxT( "Plan failed: pin '%s' not found on %s for "
@@ -1851,7 +1959,8 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
                 return;
             }
 
-            commit.Add( new SCH_NO_CONNECT( pin->GetPosition() ), screen );
+            for( SCH_PIN* pin : targetPins )
+                commit.Add( new SCH_NO_CONNECT( pin->GetPosition() ), screen );
         }
         else if( op.type == "ADD_WIRE" )
         {
@@ -1996,6 +2105,14 @@ void COPPER_CHAT_PANEL::ExecuteOperations(
                                              "above and the markers on the "
                                              "schematic. Press Ctrl-Z to undo." ),
                                         aOperations.size(), remainingErrors ) );
+    }
+
+    // Render the optional design-summary card (read-only) once the apply
+    // succeeded. Consume it so re-applies don't re-render a stale summary.
+    if( m_pendingSummary.has_value() )
+    {
+        addDesignSummaryCard( *m_pendingSummary );
+        m_pendingSummary.reset();
     }
 }
 
