@@ -119,6 +119,11 @@ if (-not (Test-Path $msysShell))    { throw "MSYS2 not found at $msys2" }
 if (-not (Test-Path $pythonStdlib)) { throw "Python stdlib not found at $pythonStdlib (pacman -S mingw-w64-ucrt-x86_64-python)" }
 Sub "OK  MSYS2 + Python stdlib present"
 
+# 0b. Vendor bundled plugins into resources/copper/plugins/ so cmake --install
+#     stages them into share/kicad/plugins/. No-op-safe to re-run.
+Step "Fetch bundled plugins (resources/copper/plugins)"
+Run { & $PSScriptRoot\fetch-bundled-plugins.ps1 } "fetch-bundled-plugins.ps1"
+
 # 1. Clean (optional)
 if ($Clean) {
     Step "Clean build dir"

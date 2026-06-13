@@ -52,6 +52,7 @@ namespace COPPER_COLORS
     const wxColour STAGE_ACTIVE( 80, 160, 220 );
     const wxColour STAGE_COMPLETE( 60, 180, 100 );
     const wxColour STAGE_PENDING( 80, 80, 90 );
+    const wxColour STAGE_FAILED( 200, 60, 60 );
     const wxColour CHIP_BG( 40, 42, 50 );
     const wxColour CHIP_BORDER( 70, 72, 85 );
     const wxColour INPUT_BG( 35, 35, 42 );

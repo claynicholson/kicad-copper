@@ -523,7 +523,7 @@ void COPPER_CHAT_PANEL::addLogMessage( const wxString& aText )
     font.SetFamily( wxFONTFAMILY_TELETYPE );
     font.SetPointSize( std::max( 7, font.GetPointSize() - 1 ) );
     line->SetFont( font );
-    line->SetForegroundColour( wxColour( 140, 140, 140 ) );
+    line->SetForegroundColour( COPPER_COLORS::TEXT_SECONDARY );
 
     m_messageSizer->Add( line, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP( 14 ) );
 

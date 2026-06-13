@@ -279,8 +279,11 @@ APP_SETTINGS_BASE::APP_SETTINGS_BASE( const std::string& aFilename, int aSchemaV
             },
             nlohmann::json::array() ) );
 
+    // kicad-copper: default first-run color theme is the dark Copper brand theme.
+    // This is a DEFAULT only -- it is applied when no user config exists. A user's
+    // saved appearance.color_theme on upgrade is loaded over this and wins.
     m_params.emplace_back( new PARAM<wxString>( "appearance.color_theme",
-            &m_ColorTheme, COLOR_SETTINGS::COLOR_BUILTIN_DEFAULT ) );
+            &m_ColorTheme, COLOR_SETTINGS::COLOR_BUILTIN_COPPER_DARK ) );
 
     m_params.emplace_back( new PARAM<bool>( "appearance.custom_toolbars",
                 &m_CustomToolbars, false ) );

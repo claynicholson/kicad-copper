@@ -793,6 +793,40 @@ mark_as_advanced( KICAD_BIN
     KICAD_DEMOS
     KICAD_TEMPLATE )
 
+#================================================
+# kicad-copper: bundle vendored third-party plugins.
+#
+# The fetch script (scripts/fetch-bundled-plugins.{py,ps1}) vendors each plugin
+# into resources/copper/plugins/<name>/. We install that tree into ${KICAD_PLUGINS}
+# (share/kicad/plugins) so CPack/NSIS picks it up. Guarded: if the staging dir is
+# absent or contains only the manifest (no plugin subdirs vendored yet), we skip
+# the install() so configure never fails -- the release build must run the fetch
+# script first (see docs/DISTRIBUTION.md).
+#================================================
+set( COPPER_BUNDLED_PLUGINS_DIR "${CMAKE_SOURCE_DIR}/resources/copper/plugins" )
+
+file( GLOB COPPER_BUNDLED_PLUGIN_DIRS LIST_DIRECTORIES true
+      "${COPPER_BUNDLED_PLUGINS_DIR}/*" )
+
+set( COPPER_HAVE_BUNDLED_PLUGINS FALSE )
+foreach( _copper_plugin ${COPPER_BUNDLED_PLUGIN_DIRS} )
+    if( IS_DIRECTORY "${_copper_plugin}" )
+        set( COPPER_HAVE_BUNDLED_PLUGINS TRUE )
+    endif()
+endforeach()
+
+if( COPPER_HAVE_BUNDLED_PLUGINS )
+    message( STATUS "kicad-copper: bundling plugins from ${COPPER_BUNDLED_PLUGINS_DIR}" )
+    install( DIRECTORY "${COPPER_BUNDLED_PLUGINS_DIR}/"
+             DESTINATION "${KICAD_PLUGINS}"
+             COMPONENT bundled_plugins
+             PATTERN ".git" EXCLUDE
+             PATTERN "README.placeholder.md" EXCLUDE )
+else()
+    message( STATUS "kicad-copper: no vendored plugins found in "
+             "${COPPER_BUNDLED_PLUGINS_DIR}; run scripts/fetch-bundled-plugins before packaging" )
+endif()
+
 include( Functions )
 
 include( ExternalProject )

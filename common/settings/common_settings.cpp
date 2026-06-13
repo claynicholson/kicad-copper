@@ -67,18 +67,22 @@ COMMON_SETTINGS::COMMON_SETTINGS() :
     /*
      * Automatic dark mode detection works fine on Mac.
      */
+    // kicad-copper: default to a DARK icon + app theme on first run to match the
+    // default Copper Dark color theme. These are DEFAULT values only -- a user's
+    // saved appearance.icon_theme / appearance.app_theme is loaded over them on
+    // upgrade and wins, so existing installs are not forced dark.
 #if defined( __WXGTK__ ) || defined( __WXMSW__ )
     m_params.emplace_back( new PARAM_ENUM<ICON_THEME>( "appearance.icon_theme",
-            &m_Appearance.icon_theme, ICON_THEME::AUTO, ICON_THEME::LIGHT, ICON_THEME::AUTO ) );
+            &m_Appearance.icon_theme, ICON_THEME::DARK, ICON_THEME::LIGHT, ICON_THEME::AUTO ) );
 #else
-    m_Appearance.icon_theme = ICON_THEME::AUTO;
+    m_Appearance.icon_theme = ICON_THEME::DARK;
 #endif
 
 #if defined( __WXMSW__ )
     m_params.emplace_back( new PARAM_ENUM<APP_THEME>( "appearance.app_theme", &m_Appearance.app_theme,
-                                                       APP_THEME::AUTO, APP_THEME::LIGHT, APP_THEME::AUTO ) );
+                                                       APP_THEME::DARK, APP_THEME::LIGHT, APP_THEME::AUTO ) );
 #else
-    m_Appearance.app_theme = APP_THEME::AUTO;
+    m_Appearance.app_theme = APP_THEME::DARK;
 #endif
 
     /*

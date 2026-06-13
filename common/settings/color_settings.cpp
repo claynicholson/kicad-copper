@@ -33,6 +33,7 @@
 const int colorsSchemaVersion = 6;
 const wxString COLOR_SETTINGS::COLOR_BUILTIN_DEFAULT = "_builtin_default";
 const wxString COLOR_SETTINGS::COLOR_BUILTIN_CLASSIC = "_builtin_classic";
+const wxString COLOR_SETTINGS::COLOR_BUILTIN_COPPER_DARK = "_builtin_copper_dark";
 
 
 COLOR_SETTINGS::COLOR_SETTINGS( const wxString& aFilename, bool aAbsolutePath ) :
@@ -467,10 +468,25 @@ std::vector<COLOR_SETTINGS*> COLOR_SETTINGS::CreateBuiltinColorSettings()
     for( const std::pair<int, COLOR4D> entry : s_classicTheme )
         classicTheme->m_colors[entry.first] = entry.second;
 
+    // kicad-copper: built-in "Copper Dark" theme. Same approach as classic --
+    // disable param load/store and inject the recolored palette directly.
+    COLOR_SETTINGS* copperDarkTheme = new COLOR_SETTINGS( COLOR_BUILTIN_COPPER_DARK );
+    copperDarkTheme->SetName( _( "Copper Dark" ) );
+    copperDarkTheme->m_writeFile = false;
+
+    for( PARAM_BASE* param : copperDarkTheme->m_params )
+        delete param;
+
+    copperDarkTheme->m_params.clear(); // Disable load/store
+
+    for( const std::pair<int, COLOR4D> entry : s_copperDarkTheme )
+        copperDarkTheme->m_colors[entry.first] = entry.second;
+
     std::vector<COLOR_SETTINGS*> ret;
 
     ret.push_back( defaultTheme );
     ret.push_back( classicTheme );
+    ret.push_back( copperDarkTheme );
 
     return ret;
 }
