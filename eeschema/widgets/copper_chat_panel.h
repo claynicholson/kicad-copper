@@ -33,6 +33,11 @@
 #include <vector>
 #include <string>
 
+// Full definitions needed here: m_pendingSummary / m_pendingPage are
+// std::optional<> members, which require COPPER::DesignSummary and
+// COPPER::PageHint to be complete types at the point of declaration.
+#include <copper/copper_types.h>
+
 class SCH_EDIT_FRAME;
 class LIB_ID;
 class LIB_SYMBOL;
