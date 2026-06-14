@@ -35,29 +35,48 @@
 
 namespace COPPER_COLORS
 {
-    const wxColour BG_PRIMARY( 22, 22, 26 );
-    const wxColour BG_SECONDARY( 30, 30, 36 );
-    const wxColour BG_TERTIARY( 40, 40, 48 );
-    const wxColour USER_BUBBLE( 55, 55, 68 );
-    const wxColour AI_BUBBLE( 35, 38, 45 );
-    const wxColour PLAN_BG( 28, 35, 45 );
-    const wxColour PLAN_BORDER( 60, 100, 160 );
-    const wxColour TEXT_PRIMARY( 220, 220, 225 );
-    const wxColour TEXT_SECONDARY( 150, 150, 158 );
-    const wxColour TEXT_MUTED( 100, 100, 110 );
-    const wxColour ACCENT( 200, 120, 60 );       // Copper brand
+    // ── Surfaces (dark → raised) ──────────────────────────────────────────
+    const wxColour BG_PRIMARY( 22, 22, 26 );        // app / message-list canvas
+    const wxColour BG_SECONDARY( 28, 28, 34 );       // header / input chrome
+    const wxColour BG_TERTIARY( 40, 40, 48 );        // pressed / secondary buttons
+    const wxColour SURFACE_RAISED( 33, 34, 40 );     // elevated cards & AI bubbles
+
+    // ── Message bubbles ───────────────────────────────────────────────────
+    const wxColour USER_BUBBLE( 52, 53, 64 );        // user, slightly lighter surface
+    const wxColour AI_BUBBLE( 33, 34, 40 );           // AI, flat raised surface
+
+    // ── Cards (plan / summary / form) ─────────────────────────────────────
+    const wxColour PLAN_BG( 30, 32, 40 );
+    const wxColour PLAN_BORDER( 86, 116, 166 );       // calmer steel-blue accent
+
+    // ── Text ──────────────────────────────────────────────────────────────
+    const wxColour TEXT_PRIMARY( 226, 227, 232 );     // body
+    const wxColour TEXT_SECONDARY( 158, 162, 172 );   // captions / metadata (WCAG-ish)
+    const wxColour TEXT_MUTED( 120, 124, 134 );        // de-emphasized detail
+
+    // ── Brand accent ──────────────────────────────────────────────────────
+    const wxColour ACCENT( 200, 120, 60 );            // Copper brand
     const wxColour ACCENT_HOVER( 220, 140, 80 );
-    const wxColour APPROVE_BG( 40, 80, 50 );
-    const wxColour APPROVE_BORDER( 60, 140, 80 );
-    const wxColour STAGE_ACTIVE( 80, 160, 220 );
-    const wxColour STAGE_COMPLETE( 60, 180, 100 );
-    const wxColour STAGE_PENDING( 80, 80, 90 );
-    const wxColour STAGE_FAILED( 200, 60, 60 );
-    const wxColour CHIP_BG( 40, 42, 50 );
-    const wxColour CHIP_BORDER( 70, 72, 85 );
-    const wxColour INPUT_BG( 35, 35, 42 );
-    const wxColour INPUT_BORDER( 60, 60, 72 );
-    const wxColour SEPARATOR( 45, 45, 55 );
+    const wxColour ACCENT_PRESSED( 178, 104, 50 );    // active/pressed copper
+    const wxColour FOCUS_RING( 200, 120, 60 );        // input focus emphasis
+
+    // ── Action button (approve) ───────────────────────────────────────────
+    const wxColour APPROVE_BG( 42, 84, 54 );
+    const wxColour APPROVE_BORDER( 64, 146, 86 );
+
+    // ── Stage states ──────────────────────────────────────────────────────
+    const wxColour STAGE_ACTIVE( 92, 166, 224 );
+    const wxColour STAGE_COMPLETE( 78, 188, 118 );
+    const wxColour STAGE_PENDING( 92, 96, 108 );
+    const wxColour STAGE_FAILED( 214, 84, 84 );
+
+    // ── Chips / inputs / borders ──────────────────────────────────────────
+    const wxColour CHIP_BG( 38, 40, 48 );
+    const wxColour CHIP_BORDER( 64, 67, 80 );
+    const wxColour INPUT_BG( 33, 34, 41 );
+    const wxColour INPUT_BORDER( 58, 60, 72 );
+    const wxColour BORDER_SUBTLE( 48, 50, 60 );       // low-contrast 1px hairlines
+    const wxColour SEPARATOR( 40, 42, 51 );
 }
 
 
@@ -84,6 +103,7 @@ private:
     Sender   m_sender;
     int      m_cornerRadius;
     int      m_padding;
+    int      m_lineGap;     // extra leading added to each line for breathing room
 
     wxDECLARE_EVENT_TABLE();
 };

@@ -56,8 +56,9 @@ COPPER_MESSAGE_BUBBLE::COPPER_MESSAGE_BUBBLE( wxWindow* aParent, const wxString&
         wxPanel( aParent, wxID_ANY ),
         m_text( aText ),
         m_sender( aSender ),
-        m_cornerRadius( 10 ),
-        m_padding( 12 )
+        m_cornerRadius( 12 ),
+        m_padding( 14 ),
+        m_lineGap( 4 )
 {
     SetBackgroundStyle( wxBG_STYLE_PAINT );
 
@@ -82,30 +83,25 @@ void COPPER_MESSAGE_BUBBLE::OnPaint( wxPaintEvent& aEvent )
     wxSize size = GetClientSize();
     int pad = FromDIP( m_padding );
     int radius = FromDIP( m_cornerRadius );
+    int gap = FromDIP( m_lineGap );
 
-    // Background (parent color)
+    const bool isUser = ( m_sender == Sender::USER );
+
+    // Canvas background (matches the message list).
     dc.SetBrush( wxBrush( COPPER_COLORS::BG_PRIMARY ) );
     dc.SetPen( *wxTRANSPARENT_PEN );
     dc.DrawRectangle( 0, 0, size.x, size.y );
 
-    // Bubble
-    wxColour bubbleColor = ( m_sender == Sender::USER ) ? COPPER_COLORS::USER_BUBBLE
-                                                        : COPPER_COLORS::AI_BUBBLE;
-    dc.SetBrush( wxBrush( bubbleColor ) );
-
-    // Compute bubble rect based on alignment
-    int maxBubbleWidth = size.x - FromDIP( 40 );
     dc.SetFont( GetFont() );
 
+    // Word wrap into lines and measure.
+    int maxBubbleWidth = size.x - FromDIP( 44 );
     wxArrayString lines;
-    int lineHeight = dc.GetCharHeight();
+    int lineHeight = dc.GetCharHeight() + gap;
     int textWidth = 0;
 
-    // Word wrap
-    wxString remaining = m_text;
-
-    while( !remaining.IsEmpty() )
     {
+        wxString remaining = m_text;
         wxString line;
         wxString word;
 
@@ -147,29 +143,56 @@ void COPPER_MESSAGE_BUBBLE::OnPaint( wxPaintEvent& aEvent )
             lines.Add( line );
             textWidth = std::max( textWidth, dc.GetTextExtent( line ).GetWidth() );
         }
-
-        break;
     }
 
-    int bubbleW = textWidth + pad * 2;
-    int bubbleH = (int)lines.GetCount() * lineHeight + pad * 2;
-    int bubbleX = ( m_sender == Sender::USER ) ? size.x - bubbleW - FromDIP( 8 ) : FromDIP( 8 );
-    int bubbleY = FromDIP( 4 );
+    // AI text is inset past the copper marker; reserve that width so the bubble
+    // grows to contain the longest line instead of clipping it.
+    int textInset = isUser ? 0 : FromDIP( 8 );
+    int textH = (int) lines.GetCount() * lineHeight - gap;  // trim trailing leading
+    int bubbleW = textWidth + pad * 2 + textInset;
+    int bubbleH = textH + pad * 2;
+    int edge = FromDIP( 8 );
+    int bubbleX = isUser ? size.x - bubbleW - edge : edge;
+    int bubbleY = FromDIP( 2 );
 
-    dc.DrawRoundedRectangle( bubbleX, bubbleY, bubbleW, bubbleH, radius );
-
-    // Text
-    dc.SetTextForeground( COPPER_COLORS::TEXT_PRIMARY );
-    int y = bubbleY + pad;
-
-    for( const wxString& line : lines )
+    // Anti-aliased rounded surface with a subtle hairline border for elevation.
+    if( wxGraphicsContext* gc = wxGraphicsContext::Create( dc ) )
     {
-        dc.DrawText( line, bubbleX + pad, y );
-        y += lineHeight;
+        wxColour surface = isUser ? COPPER_COLORS::USER_BUBBLE : COPPER_COLORS::AI_BUBBLE;
+        wxColour border  = COPPER_COLORS::BORDER_SUBTLE;
+
+        gc->SetBrush( wxBrush( surface ) );
+        gc->SetPen( wxPen( border, 1 ) );
+        gc->DrawRoundedRectangle( bubbleX + 0.5, bubbleY + 0.5,
+                                  bubbleW - 1.0, bubbleH - 1.0, radius );
+
+        // AI marker: a slim copper accent bar at the bubble's left edge.
+        if( !isUser )
+        {
+            int markW = FromDIP( 3 );
+            int inset = FromDIP( 6 );
+            gc->SetPen( *wxTRANSPARENT_PEN );
+            gc->SetBrush( wxBrush( COPPER_COLORS::ACCENT ) );
+            gc->DrawRoundedRectangle( bubbleX + inset, bubbleY + inset,
+                                      markW, bubbleH - 2 * inset, markW / 2.0 );
+        }
+
+        gc->SetFont( GetFont(), COPPER_COLORS::TEXT_PRIMARY );
+
+        double tx = bubbleX + pad + textInset;
+        double y = bubbleY + pad;
+
+        for( const wxString& line : lines )
+        {
+            gc->DrawText( line, tx, y );
+            y += lineHeight;
+        }
+
+        delete gc;
     }
 
-    // Update size to fit content
-    int totalHeight = bubbleH + FromDIP( 8 );
+    // Grow the panel to fit content (height only; width tracks the list).
+    int totalHeight = bubbleH + FromDIP( 6 );
 
     if( GetMinSize().GetHeight() != totalHeight )
     {
@@ -204,32 +227,45 @@ COPPER_PLAN_CARD::COPPER_PLAN_CARD( wxWindow* aParent, const std::vector<PlanSte
     SetBackgroundStyle( wxBG_STYLE_PAINT );
     SetBackgroundColour( COPPER_COLORS::PLAN_BG );
 
-    wxBoxSizer* mainSizer = new wxBoxSizer( wxVERTICAL );
+    const int pad = FromDIP( 16 );
+    const int gap = FromDIP( 8 );
 
-    // Header
-    wxStaticText* header = new wxStaticText( this, wxID_ANY, wxT( "PLAN" ) );
+    wxBoxSizer* mainSizer = new wxBoxSizer( wxVERTICAL );
+    mainSizer->AddSpacer( pad );
+
+    // Header — semibold title with the steel-blue accent.
+    wxStaticText* header = new wxStaticText( this, wxID_ANY, wxT( "Plan" ) );
     header->SetForegroundColour( COPPER_COLORS::PLAN_BORDER );
-    header->SetFont( header->GetFont().Bold() );
-    mainSizer->Add( header, 0, wxALL, FromDIP( 8 ) );
+    header->SetFont( header->GetFont().Bold().Larger() );
+    mainSizer->Add( header, 0, wxLEFT | wxRIGHT, pad );
+    mainSizer->AddSpacer( FromDIP( 4 ) );
+
+    // Subtle divider under the header.
+    wxPanel* divider = new wxPanel( this, wxID_ANY, wxDefaultPosition, FromDIP( wxSize( -1, 1 ) ) );
+    divider->SetBackgroundColour( COPPER_COLORS::BORDER_SUBTLE );
+    mainSizer->Add( divider, 0, wxEXPAND | wxLEFT | wxRIGHT, pad );
+    mainSizer->AddSpacer( FromDIP( 12 ) );
 
     // Steps
     for( const auto& step : m_steps )
     {
-        wxString label = wxString::Format( wxT( "%d. %s" ), step.index, step.description );
+        wxString label = wxString::Format( wxT( "%d.  %s" ), step.index, step.description );
         wxStaticText* stepText = new wxStaticText( this, wxID_ANY, label );
         stepText->SetForegroundColour( COPPER_COLORS::TEXT_PRIMARY );
-        stepText->Wrap( aParent->GetClientSize().GetWidth() - FromDIP( 80 ) );
-        mainSizer->Add( stepText, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 8 ) );
+        stepText->Wrap( aParent->GetClientSize().GetWidth() - FromDIP( 88 ) );
+        mainSizer->Add( stepText, 0, wxLEFT | wxRIGHT | wxBOTTOM, pad );
     }
 
     // Placement info
     if( !m_placementInfo.IsEmpty() )
     {
         wxStaticText* placementText = new wxStaticText( this, wxID_ANY, m_placementInfo );
-        placementText->SetForegroundColour( COPPER_COLORS::TEXT_MUTED );
+        placementText->SetForegroundColour( COPPER_COLORS::TEXT_SECONDARY );
         placementText->SetFont( placementText->GetFont().Italic() );
-        mainSizer->Add( placementText, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 8 ) );
+        mainSizer->Add( placementText, 0, wxLEFT | wxRIGHT | wxBOTTOM, pad );
     }
+
+    mainSizer->AddSpacer( FromDIP( 4 ) );
 
     // Buttons
     wxBoxSizer* btnSizer = new wxBoxSizer( wxHORIZONTAL );
@@ -249,10 +285,11 @@ COPPER_PLAN_CARD::COPPER_PLAN_CARD( wxWindow* aParent, const std::vector<PlanSte
     m_dismissBtn->SetForegroundColour( COPPER_COLORS::TEXT_MUTED );
     m_dismissBtn->Bind( wxEVT_BUTTON, &COPPER_PLAN_CARD::OnDismiss, this );
 
-    btnSizer->Add( m_approveBtn, 0, wxRIGHT, FromDIP( 8 ) );
-    btnSizer->Add( m_editBtn, 0, wxRIGHT, FromDIP( 8 ) );
+    btnSizer->Add( m_approveBtn, 0, wxRIGHT, gap );
+    btnSizer->Add( m_editBtn, 0, wxRIGHT, gap );
     btnSizer->Add( m_dismissBtn, 0 );
-    mainSizer->Add( btnSizer, 0, wxALL, FromDIP( 8 ) );
+    mainSizer->Add( btnSizer, 0, wxLEFT | wxRIGHT, pad );
+    mainSizer->AddSpacer( pad );
 
     SetSizer( mainSizer );
     mainSizer->Fit( this );
@@ -263,13 +300,15 @@ void COPPER_PLAN_CARD::OnPaint( wxPaintEvent& aEvent )
 {
     wxAutoBufferedPaintDC dc( this );
     wxSize size = GetClientSize();
-    int radius = FromDIP( 8 );
-    int border = FromDIP( 1 );
+    double radius = FromDIP( 12 );
 
-    // Background
-    dc.SetBrush( wxBrush( COPPER_COLORS::PLAN_BG ) );
-    dc.SetPen( wxPen( COPPER_COLORS::PLAN_BORDER, border ) );
-    dc.DrawRoundedRectangle( 0, 0, size.x, size.y, radius );
+    if( wxGraphicsContext* gc = wxGraphicsContext::Create( dc ) )
+    {
+        gc->SetBrush( wxBrush( COPPER_COLORS::PLAN_BG ) );
+        gc->SetPen( wxPen( COPPER_COLORS::PLAN_BORDER, 1 ) );
+        gc->DrawRoundedRectangle( 0.5, 0.5, size.x - 1.0, size.y - 1.0, radius );
+        delete gc;
+    }
 }
 
 
@@ -323,11 +362,13 @@ COPPER_DESIGN_SUMMARY_CARD::COPPER_DESIGN_SUMMARY_CARD( wxWindow* aParent,
     SetBackgroundStyle( wxBG_STYLE_PAINT );
     SetBackgroundColour( COPPER_COLORS::PLAN_BG );
 
-    const int wrapWidth = aParent->GetClientSize().GetWidth() - FromDIP( 80 );
+    const int pad = FromDIP( 16 );
+    const int wrapWidth = aParent->GetClientSize().GetWidth() - FromDIP( 88 );
 
+    // text row: color, weight, italic, left indent, bottom gap
     auto addLabel = [&]( wxBoxSizer* sizer, const wxString& text,
                          const wxColour& color, bool bold, bool italic,
-                         int indent ) -> wxStaticText*
+                         int indent, int bottom ) -> wxStaticText*
     {
         wxStaticText* t = new wxStaticText( this, wxID_ANY, text );
         t->SetForegroundColour( color );
@@ -345,80 +386,112 @@ COPPER_DESIGN_SUMMARY_CARD::COPPER_DESIGN_SUMMARY_CARD( wxWindow* aParent,
         if( wrapWidth > FromDIP( 40 ) )
             t->Wrap( wrapWidth - indent );
 
-        sizer->Add( t, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 8 ) + indent );
+        sizer->Add( t, 0, wxLEFT | wxRIGHT | wxBOTTOM, pad + indent );
+
+        if( bottom )
+            sizer->AddSpacer( bottom );
+
         return t;
     };
 
+    // A section header: accent, semibold, with breathing room above.
+    auto addSection = [&]( wxBoxSizer* sizer, const wxString& title )
+    {
+        sizer->AddSpacer( FromDIP( 8 ) );
+        wxStaticText* t = new wxStaticText( this, wxID_ANY, title.Upper() );
+        t->SetForegroundColour( COPPER_COLORS::ACCENT );
+        wxFont f = t->GetFont().Bold();
+        f.SetPointSize( std::max( 7, f.GetPointSize() - 1 ) );
+        t->SetFont( f );
+        sizer->Add( t, 0, wxLEFT | wxRIGHT | wxBOTTOM, pad );
+        sizer->AddSpacer( FromDIP( 2 ) );
+    };
+
     wxBoxSizer* mainSizer = new wxBoxSizer( wxVERTICAL );
+    mainSizer->AddSpacer( pad );
 
     // Header — board name when present, else generic.
-    wxString headerText = aData.boardName.IsEmpty()
-                                  ? wxT( "DESIGN SUMMARY" )
-                                  : wxString::Format( wxT( "DESIGN SUMMARY — %s" ),
-                                                      aData.boardName );
+    wxString headerText = aData.boardName.IsEmpty() ? wxT( "Design Summary" )
+                                                    : aData.boardName;
     wxStaticText* header = new wxStaticText( this, wxID_ANY, headerText );
-    header->SetForegroundColour( COPPER_COLORS::PLAN_BORDER );
-    header->SetFont( header->GetFont().Bold() );
-    mainSizer->Add( header, 0, wxALL, FromDIP( 8 ) );
+    header->SetForegroundColour( COPPER_COLORS::TEXT_PRIMARY );
+    header->SetFont( header->GetFont().Bold().Larger() );
+    mainSizer->Add( header, 0, wxLEFT | wxRIGHT, pad );
+
+    if( !aData.boardName.IsEmpty() )
+    {
+        wxStaticText* kicker = new wxStaticText( this, wxID_ANY, wxT( "DESIGN SUMMARY" ) );
+        kicker->SetForegroundColour( COPPER_COLORS::TEXT_MUTED );
+        wxFont kf = kicker->GetFont();
+        kf.SetPointSize( std::max( 7, kf.GetPointSize() - 1 ) );
+        kicker->SetFont( kf );
+        mainSizer->Insert( mainSizer->GetItemCount() - 1, kicker, 0,
+                           wxLEFT | wxRIGHT | wxBOTTOM, pad );
+    }
+
+    mainSizer->AddSpacer( FromDIP( 8 ) );
+    wxPanel* divider = new wxPanel( this, wxID_ANY, wxDefaultPosition, FromDIP( wxSize( -1, 1 ) ) );
+    divider->SetBackgroundColour( COPPER_COLORS::BORDER_SUBTLE );
+    mainSizer->Add( divider, 0, wxEXPAND | wxLEFT | wxRIGHT, pad );
+    mainSizer->AddSpacer( FromDIP( 12 ) );
 
     if( !aData.boardDescription.IsEmpty() )
         addLabel( mainSizer, aData.boardDescription, COPPER_COLORS::TEXT_SECONDARY,
-                  false, true, 0 );
+                  false, true, 0, FromDIP( 2 ) );
 
     // Overview.
     if( !aData.overview.IsEmpty() )
         addLabel( mainSizer, aData.overview, COPPER_COLORS::TEXT_PRIMARY,
-                  false, false, 0 );
+                  false, false, 0, FromDIP( 2 ) );
 
     // Sections: group → purpose → refs.
     if( !aData.sections.empty() )
     {
-        addLabel( mainSizer, wxT( "Sections" ), COPPER_COLORS::ACCENT, true, false, 0 );
+        addSection( mainSizer, wxT( "Sections" ) );
 
         for( const auto& s : aData.sections )
         {
-            addLabel( mainSizer, wxString::Format( wxT( "• %s — %s" ), s.group,
+            addLabel( mainSizer, wxString::Format( wxT( "%s — %s" ), s.group,
                                                    s.purpose ),
-                      COPPER_COLORS::TEXT_PRIMARY, false, false, FromDIP( 8 ) );
+                      COPPER_COLORS::TEXT_PRIMARY, false, false, FromDIP( 8 ), 0 );
 
             if( !s.references.IsEmpty() )
                 addLabel( mainSizer, s.references, COPPER_COLORS::TEXT_MUTED,
-                          false, false, FromDIP( 20 ) );
+                          false, false, FromDIP( 20 ), FromDIP( 2 ) );
         }
     }
 
     // Power tree.
     if( !aData.power.empty() )
     {
-        addLabel( mainSizer, wxT( "Power" ), COPPER_COLORS::ACCENT, true, false, 0 );
+        addSection( mainSizer, wxT( "Power" ) );
 
         for( const auto& p : aData.power )
         {
-            wxString line = wxString::Format( wxT( "• %s  %s" ), p.rail, p.voltage );
+            wxString line = wxString::Format( wxT( "%s  %s" ), p.rail, p.voltage );
 
             if( !p.source.IsEmpty() )
-                line += wxString::Format( wxT( "  ← %s" ), p.source );
+                line += wxString::Format( wxT( "  \xe2\x86\x90 %s" ), p.source );
 
             if( !p.estCurrent.IsEmpty() )
                 line += wxString::Format( wxT( "  (%s)" ), p.estCurrent );
 
             addLabel( mainSizer, line, COPPER_COLORS::TEXT_PRIMARY, false, false,
-                      FromDIP( 8 ) );
+                      FromDIP( 8 ), FromDIP( 2 ) );
         }
     }
 
     // BOM table.
     if( !aData.bom.empty() )
     {
-        addLabel( mainSizer, wxT( "Bill of materials" ), COPPER_COLORS::ACCENT,
-                  true, false, 0 );
+        addSection( mainSizer, wxT( "Bill of materials" ) );
 
         for( const auto& b : aData.bom )
         {
-            wxString line = wxString::Format( wxT( "%d× %s  [%s]" ), b.quantity,
+            wxString line = wxString::Format( wxT( "%d\xc3\x97  %s  [%s]" ), b.quantity,
                                               b.value, b.references );
             addLabel( mainSizer, line, COPPER_COLORS::TEXT_PRIMARY, false, false,
-                      FromDIP( 8 ) );
+                      FromDIP( 8 ), 0 );
 
             wxString detail;
 
@@ -426,24 +499,34 @@ COPPER_DESIGN_SUMMARY_CARD::COPPER_DESIGN_SUMMARY_CARD( wxWindow* aParent,
                 detail = b.libId;
 
             if( !b.footprint.IsEmpty() )
-                detail += ( detail.IsEmpty() ? wxString() : wxT( "  ·  " ) )
+                detail += ( detail.IsEmpty() ? wxString() : wxT( "  \xc2\xb7  " ) )
                           + b.footprint;
 
             if( !detail.IsEmpty() )
                 addLabel( mainSizer, detail, COPPER_COLORS::TEXT_MUTED, false,
-                          false, FromDIP( 20 ) );
+                          false, FromDIP( 20 ), FromDIP( 2 ) );
         }
     }
 
     // Stats footer.
     if( !aData.stats.IsEmpty() )
+    {
+        mainSizer->AddSpacer( FromDIP( 8 ) );
+        wxPanel* foot = new wxPanel( this, wxID_ANY, wxDefaultPosition,
+                                     FromDIP( wxSize( -1, 1 ) ) );
+        foot->SetBackgroundColour( COPPER_COLORS::BORDER_SUBTLE );
+        mainSizer->Add( foot, 0, wxEXPAND | wxLEFT | wxRIGHT, pad );
+        mainSizer->AddSpacer( FromDIP( 10 ) );
         addLabel( mainSizer, aData.stats, COPPER_COLORS::TEXT_SECONDARY, false,
-                  false, 0 );
+                  false, 0, 0 );
+    }
 
     // Notes.
     if( !aData.notes.IsEmpty() )
         addLabel( mainSizer, aData.notes, COPPER_COLORS::TEXT_MUTED, false, true,
-                  0 );
+                  0, 0 );
+
+    mainSizer->AddSpacer( pad );
 
     SetSizer( mainSizer );
     mainSizer->Fit( this );
@@ -454,12 +537,15 @@ void COPPER_DESIGN_SUMMARY_CARD::OnPaint( wxPaintEvent& aEvent )
 {
     wxAutoBufferedPaintDC dc( this );
     wxSize size = GetClientSize();
-    int radius = FromDIP( 8 );
-    int border = FromDIP( 1 );
+    double radius = FromDIP( 12 );
 
-    dc.SetBrush( wxBrush( COPPER_COLORS::PLAN_BG ) );
-    dc.SetPen( wxPen( COPPER_COLORS::PLAN_BORDER, border ) );
-    dc.DrawRoundedRectangle( 0, 0, size.x, size.y, radius );
+    if( wxGraphicsContext* gc = wxGraphicsContext::Create( dc ) )
+    {
+        gc->SetBrush( wxBrush( COPPER_COLORS::PLAN_BG ) );
+        gc->SetPen( wxPen( COPPER_COLORS::PLAN_BORDER, 1 ) );
+        gc->DrawRoundedRectangle( 0.5, 0.5, size.x - 1.0, size.y - 1.0, radius );
+        delete gc;
+    }
 }
 
 
@@ -479,7 +565,7 @@ COPPER_STAGE_INDICATOR::COPPER_STAGE_INDICATOR( wxWindow* aParent, const wxStrin
         m_state( aState )
 {
     SetBackgroundStyle( wxBG_STYLE_PAINT );
-    SetMinSize( FromDIP( wxSize( -1, 24 ) ) );
+    SetMinSize( FromDIP( wxSize( -1, 28 ) ) );
 }
 
 
@@ -499,39 +585,84 @@ void COPPER_STAGE_INDICATOR::OnPaint( wxPaintEvent& aEvent )
     dc.SetPen( *wxTRANSPARENT_PEN );
     dc.DrawRectangle( 0, 0, size.x, size.y );
 
-    // Icon
-    wxString icon;
     wxColour iconColor;
 
     switch( m_state )
     {
-    case State::PENDING:
-        icon = wxT( "[ ]" );
-        iconColor = COPPER_COLORS::STAGE_PENDING;
-        break;
-    case State::ACTIVE:
-        icon = wxT( "[\xe2\x96\xb6]" );   // [▶]
-        iconColor = COPPER_COLORS::STAGE_ACTIVE;
-        break;
-    case State::COMPLETE:
-        icon = wxT( "[\xe2\x9c\x93]" );   // [✓]
-        iconColor = COPPER_COLORS::STAGE_COMPLETE;
-        break;
-    case State::FAILED:
-        icon = wxT( "[\xe2\x9c\x97]" );   // [✗]
-        iconColor = COPPER_COLORS::STAGE_FAILED;
-        break;
+    case State::PENDING:  iconColor = COPPER_COLORS::STAGE_PENDING;  break;
+    case State::ACTIVE:   iconColor = COPPER_COLORS::STAGE_ACTIVE;   break;
+    case State::COMPLETE: iconColor = COPPER_COLORS::STAGE_COMPLETE; break;
+    case State::FAILED:   iconColor = COPPER_COLORS::STAGE_FAILED;   break;
     }
 
-    dc.SetFont( GetFont() );
-    dc.SetTextForeground( iconColor );
-    dc.DrawText( icon, FromDIP( 8 ), FromDIP( 3 ) );
+    const int cx = FromDIP( 14 );
+    const int cy = size.y / 2;
+    const double r = FromDIP( 5 );
+    const int textX = FromDIP( 30 );
+
+    if( wxGraphicsContext* gc = wxGraphicsContext::Create( dc ) )
+    {
+        wxGraphicsPath path = gc->CreatePath();
+        path.AddCircle( cx, cy, r );
+
+        switch( m_state )
+        {
+        case State::PENDING:
+            // Hollow ring.
+            gc->SetBrush( *wxTRANSPARENT_BRUSH );
+            gc->SetPen( wxPen( iconColor, FromDIP( 1.5 ) ) );
+            gc->DrawPath( path );
+            break;
+
+        case State::ACTIVE:
+            // Filled accent dot with a soft halo ring.
+            gc->SetPen( wxPen( wxColour( iconColor.Red(), iconColor.Green(),
+                                         iconColor.Blue(), 90 ), FromDIP( 3 ) ) );
+            gc->SetBrush( *wxTRANSPARENT_BRUSH );
+            gc->DrawPath( path );
+            gc->SetPen( *wxTRANSPARENT_PEN );
+            gc->SetBrush( wxBrush( iconColor ) );
+            {
+                wxGraphicsPath dot = gc->CreatePath();
+                dot.AddCircle( cx, cy, r - FromDIP( 1 ) );
+                gc->DrawPath( dot );
+            }
+            break;
+
+        case State::COMPLETE:
+        case State::FAILED:
+            gc->SetPen( *wxTRANSPARENT_PEN );
+            gc->SetBrush( wxBrush( iconColor ) );
+            gc->DrawPath( path );
+            break;
+        }
+
+        // Glyph for complete / failed, centered in the dot.
+        if( m_state == State::COMPLETE || m_state == State::FAILED )
+        {
+            wxString glyph = ( m_state == State::COMPLETE )
+                                     ? wxString::FromUTF8( "\xe2\x9c\x93" )   // ✓
+                                     : wxString::FromUTF8( "\xe2\x9c\x95" );  // ✕
+            wxFont gf = GetFont();
+            gf.SetPointSize( std::max( 6, gf.GetPointSize() - 2 ) );
+            gc->SetFont( gf, *wxWHITE );
+            double gw, gh, d, e;
+            gc->GetTextExtent( glyph, &gw, &gh, &d, &e );
+            gc->DrawText( glyph, cx - gw / 2, cy - gh / 2 );
+        }
+
+        delete gc;
+    }
 
     // Name
-    wxColour textColor = ( m_state == State::ACTIVE ) ? COPPER_COLORS::TEXT_PRIMARY
-                                                       : COPPER_COLORS::TEXT_SECONDARY;
+    wxColour textColor = ( m_state == State::ACTIVE )   ? COPPER_COLORS::TEXT_PRIMARY
+                         : ( m_state == State::PENDING ) ? COPPER_COLORS::TEXT_MUTED
+                                                         : COPPER_COLORS::TEXT_SECONDARY;
+    dc.SetFont( ( m_state == State::ACTIVE ) ? GetFont().Bold() : GetFont() );
     dc.SetTextForeground( textColor );
-    dc.DrawText( m_name, FromDIP( 36 ), FromDIP( 3 ) );
+
+    wxSize nameExt = dc.GetTextExtent( m_name );
+    dc.DrawText( m_name, textX, ( size.y - nameExt.y ) / 2 );
 }
 
 
@@ -558,7 +689,7 @@ COPPER_HINT_CHIP::COPPER_HINT_CHIP( wxWindow* aParent, const wxString& aText ) :
     wxClientDC dc( this );
     dc.SetFont( GetFont() );
     wxSize textSize = dc.GetTextExtent( m_text );
-    SetMinSize( wxSize( textSize.GetWidth() + FromDIP( 24 ), FromDIP( 32 ) ) );
+    SetMinSize( wxSize( textSize.GetWidth() + FromDIP( 28 ), FromDIP( 34 ) ) );
 }
 
 
@@ -566,23 +697,30 @@ void COPPER_HINT_CHIP::OnPaint( wxPaintEvent& aEvent )
 {
     wxAutoBufferedPaintDC dc( this );
     wxSize size = GetClientSize();
-    int radius = size.y / 2;
+    double radius = size.y / 2.0;
 
+    // Canvas background.
     dc.SetBrush( wxBrush( COPPER_COLORS::BG_PRIMARY ) );
     dc.SetPen( *wxTRANSPARENT_PEN );
     dc.DrawRectangle( 0, 0, size.x, size.y );
 
-    wxColour bg = m_hovered ? COPPER_COLORS::BG_TERTIARY : COPPER_COLORS::CHIP_BG;
+    wxColour bg     = m_hovered ? COPPER_COLORS::BG_TERTIARY : COPPER_COLORS::CHIP_BG;
     wxColour border = m_hovered ? COPPER_COLORS::ACCENT : COPPER_COLORS::CHIP_BORDER;
+    wxColour fg     = m_hovered ? COPPER_COLORS::ACCENT_HOVER : COPPER_COLORS::TEXT_SECONDARY;
 
-    dc.SetBrush( wxBrush( bg ) );
-    dc.SetPen( wxPen( border, FromDIP( 1 ) ) );
-    dc.DrawRoundedRectangle( 0, 0, size.x, size.y, radius );
+    if( wxGraphicsContext* gc = wxGraphicsContext::Create( dc ) )
+    {
+        gc->SetBrush( wxBrush( bg ) );
+        gc->SetPen( wxPen( border, 1 ) );
+        gc->DrawRoundedRectangle( 0.5, 0.5, size.x - 1.0, size.y - 1.0, radius );
 
-    dc.SetFont( GetFont() );
-    dc.SetTextForeground( m_hovered ? COPPER_COLORS::ACCENT : COPPER_COLORS::TEXT_SECONDARY );
-    wxSize textSize = dc.GetTextExtent( m_text );
-    dc.DrawText( m_text, ( size.x - textSize.x ) / 2, ( size.y - textSize.y ) / 2 );
+        gc->SetFont( GetFont(), fg );
+        double tw, th, d, e;
+        gc->GetTextExtent( m_text, &tw, &th, &d, &e );
+        gc->DrawText( m_text, ( size.x - tw ) / 2, ( size.y - th ) / 2 );
+
+        delete gc;
+    }
 }
 
 
@@ -680,8 +818,8 @@ wxSize COPPER_THINKING_INDICATOR::DoGetBestSize() const
         maxPhrase = std::max( maxPhrase, dc.GetTextExtent( p + wxT( "..." ) ).x );
 
     int barWidth = THINK_DOTS * FromDIP( 9 );
-    return wxSize( FromDIP( 12 + 10 ) + barWidth + FromDIP( 10 ) + maxPhrase + FromDIP( 12 + 12 ),
-                   FromDIP( 34 ) );
+    return wxSize( FromDIP( 18 + 10 ) + barWidth + FromDIP( 10 ) + maxPhrase + FromDIP( 12 + 12 ),
+                   FromDIP( 36 ) );
 }
 
 
@@ -706,14 +844,26 @@ void COPPER_THINKING_INDICATOR::OnPaint( wxPaintEvent& aEvent )
     dc.SetPen( *wxTRANSPARENT_PEN );
     dc.DrawRectangle( 0, 0, size.x, size.y );
 
-    // AI-side bubble
-    dc.SetBrush( wxBrush( COPPER_COLORS::AI_BUBBLE ) );
-    dc.DrawRoundedRectangle( 0, 0, size.x, size.y, FromDIP( 10 ) );
+    // AI-side bubble (anti-aliased, with a subtle hairline + copper marker).
+    if( wxGraphicsContext* gc = wxGraphicsContext::Create( dc ) )
+    {
+        gc->SetBrush( wxBrush( COPPER_COLORS::AI_BUBBLE ) );
+        gc->SetPen( wxPen( COPPER_COLORS::BORDER_SUBTLE, 1 ) );
+        gc->DrawRoundedRectangle( 0.5, 0.5, size.x - 1.0, size.y - 1.0, FromDIP( 12 ) );
+
+        int markW = FromDIP( 3 );
+        int inset = FromDIP( 6 );
+        gc->SetPen( *wxTRANSPARENT_PEN );
+        gc->SetBrush( wxBrush( COPPER_COLORS::ACCENT ) );
+        gc->DrawRoundedRectangle( inset, inset, markW, size.y - 2 * inset, markW / 2.0 );
+
+        delete gc;
+    }
 
     dc.SetFont( GetFont() );
 
     const int dotSpacing = FromDIP( 9 );
-    const int barX = FromDIP( 12 );
+    const int barX = FromDIP( 18 );
     const wxString dot = wxString::FromUTF8( "\xe2\x97\x8f" );  // ● BLACK CIRCLE
     const wxSize dotExtent = dc.GetTextExtent( dot );
     const int textY = ( size.y - dotExtent.y ) / 2;
@@ -832,10 +982,20 @@ COPPER_DESIGN_FORM::COPPER_DESIGN_FORM( wxWindow* aParent ) :
 
     wxBoxSizer* mainSizer = new wxBoxSizer( wxVERTICAL );
 
-    wxStaticText* header = new wxStaticText( this, wxID_ANY, wxT( "DESIGN FROM SCRATCH" ) );
-    header->SetForegroundColour( COPPER_COLORS::ACCENT );
-    header->SetFont( header->GetFont().Bold() );
-    mainSizer->Add( header, 0, wxALL, FromDIP( 8 ) );
+    wxStaticText* header = new wxStaticText( this, wxID_ANY, wxT( "Design from scratch" ) );
+    header->SetForegroundColour( COPPER_COLORS::TEXT_PRIMARY );
+    header->SetFont( header->GetFont().Bold().Larger() );
+    mainSizer->Add( header, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP( 12 ) );
+
+    wxStaticText* subhead = new wxStaticText( this, wxID_ANY,
+            wxT( "Tell Copper what to build and a few constraints." ) );
+    subhead->SetForegroundColour( COPPER_COLORS::TEXT_SECONDARY );
+    mainSizer->Add( subhead, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+
+    wxPanel* formDiv = new wxPanel( this, wxID_ANY, wxDefaultPosition,
+                                    FromDIP( wxSize( -1, 1 ) ) );
+    formDiv->SetBackgroundColour( COPPER_COLORS::BORDER_SUBTLE );
+    mainSizer->Add( formDiv, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
 
     // Purpose (required)
     mainSizer->Add( designFormLabel( this, wxT( "What is this board for?" ) ),
@@ -973,9 +1133,13 @@ void COPPER_DESIGN_FORM::OnPaint( wxPaintEvent& aEvent )
     wxAutoBufferedPaintDC dc( this );
     wxSize size = GetClientSize();
 
-    dc.SetBrush( wxBrush( COPPER_COLORS::PLAN_BG ) );
-    dc.SetPen( wxPen( COPPER_COLORS::ACCENT, FromDIP( 1 ) ) );
-    dc.DrawRoundedRectangle( 0, 0, size.x, size.y, FromDIP( 8 ) );
+    if( wxGraphicsContext* gc = wxGraphicsContext::Create( dc ) )
+    {
+        gc->SetBrush( wxBrush( COPPER_COLORS::PLAN_BG ) );
+        gc->SetPen( wxPen( COPPER_COLORS::ACCENT, 1 ) );
+        gc->DrawRoundedRectangle( 0.5, 0.5, size.x - 1.0, size.y - 1.0, FromDIP( 12 ) );
+        delete gc;
+    }
 }
 
 

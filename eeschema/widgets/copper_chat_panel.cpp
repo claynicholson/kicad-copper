@@ -171,7 +171,7 @@ void COPPER_CHAT_PANEL::buildHeader()
 {
     m_headerPanel = new wxPanel( this, wxID_ANY );
     m_headerPanel->SetBackgroundColour( COPPER_COLORS::BG_SECONDARY );
-    m_headerPanel->SetMinSize( FromDIP( wxSize( -1, 40 ) ) );
+    m_headerPanel->SetMinSize( FromDIP( wxSize( -1, 48 ) ) );
 
     wxBoxSizer* headerSizer = new wxBoxSizer( wxHORIZONTAL );
 
@@ -179,13 +179,13 @@ void COPPER_CHAT_PANEL::buildHeader()
     m_titleLabel = new wxStaticText( m_headerPanel, wxID_ANY, wxT( "Copper AI" ) );
     m_titleLabel->SetForegroundColour( COPPER_COLORS::ACCENT );
     m_titleLabel->SetFont( m_titleLabel->GetFont().Bold().Larger() );
-    headerSizer->Add( m_titleLabel, 1, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP( 12 ) );
+    headerSizer->Add( m_titleLabel, 1, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP( 16 ) );
 
     // User label (hidden until authenticated)
     m_userLabel = new wxStaticText( m_headerPanel, wxID_ANY, wxEmptyString );
     m_userLabel->SetForegroundColour( COPPER_COLORS::TEXT_SECONDARY );
     m_userLabel->Hide();
-    headerSizer->Add( m_userLabel, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP( 8 ) );
+    headerSizer->Add( m_userLabel, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP( 12 ) );
 
     // Login button
     m_loginBtn = new wxButton( m_headerPanel, wxID_ANY, wxT( "Login" ),
@@ -193,7 +193,7 @@ void COPPER_CHAT_PANEL::buildHeader()
     m_loginBtn->SetBackgroundColour( COPPER_COLORS::ACCENT );
     m_loginBtn->SetForegroundColour( *wxWHITE );
     m_loginBtn->Bind( wxEVT_BUTTON, &COPPER_CHAT_PANEL::onLoginClicked, this );
-    headerSizer->Add( m_loginBtn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP( 4 ) );
+    headerSizer->Add( m_loginBtn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP( 6 ) );
 
     // Settings button
     m_settingsBtn = new wxButton( m_headerPanel, wxID_ANY, wxT( "\xe2\x9a\x99" ),  // ⚙
@@ -201,7 +201,7 @@ void COPPER_CHAT_PANEL::buildHeader()
     m_settingsBtn->SetBackgroundColour( COPPER_COLORS::BG_SECONDARY );
     m_settingsBtn->SetForegroundColour( COPPER_COLORS::TEXT_SECONDARY );
     m_settingsBtn->Bind( wxEVT_BUTTON, &COPPER_CHAT_PANEL::onSettingsClicked, this );
-    headerSizer->Add( m_settingsBtn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP( 8 ) );
+    headerSizer->Add( m_settingsBtn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP( 12 ) );
 
     m_headerPanel->SetSizer( headerSizer );
 }
@@ -211,9 +211,11 @@ void COPPER_CHAT_PANEL::buildMessageArea()
 {
     m_scrollArea = new wxScrolledWindow( this, wxID_ANY );
     m_scrollArea->SetBackgroundColour( COPPER_COLORS::BG_PRIMARY );
-    m_scrollArea->SetScrollRate( 0, FromDIP( 8 ) );
+    m_scrollArea->SetScrollRate( 0, FromDIP( 12 ) );
 
     m_messageSizer = new wxBoxSizer( wxVERTICAL );
+    // A little breathing room above the first message / below the last.
+    m_messageSizer->AddSpacer( FromDIP( 8 ) );
     m_scrollArea->SetSizer( m_messageSizer );
 }
 
@@ -222,7 +224,7 @@ void COPPER_CHAT_PANEL::buildInputBar()
 {
     m_inputPanel = new wxPanel( this, wxID_ANY );
     m_inputPanel->SetBackgroundColour( COPPER_COLORS::BG_SECONDARY );
-    m_inputPanel->SetMinSize( FromDIP( wxSize( -1, 50 ) ) );
+    m_inputPanel->SetMinSize( FromDIP( wxSize( -1, 58 ) ) );
 
     wxBoxSizer* inputSizer = new wxBoxSizer( wxHORIZONTAL );
 
@@ -236,25 +238,47 @@ void COPPER_CHAT_PANEL::buildInputBar()
     m_modeChoice = new wxChoice( m_inputPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, modes );
     m_modeChoice->SetSelection( 0 );
     m_modeChoice->Bind( wxEVT_CHOICE, &COPPER_CHAT_PANEL::onModeChanged, this );
-    inputSizer->Add( m_modeChoice, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP( 8 ) );
+    inputSizer->Add( m_modeChoice, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxTOP | wxBOTTOM,
+                     FromDIP( 10 ) );
 
     // Text input
     m_inputText = new wxTextCtrl( m_inputPanel, wxID_ANY, wxEmptyString, wxDefaultPosition,
-                                  wxDefaultSize, wxTE_PROCESS_ENTER );
+                                  FromDIP( wxSize( -1, 34 ) ), wxTE_PROCESS_ENTER );
     m_inputText->SetBackgroundColour( COPPER_COLORS::INPUT_BG );
     m_inputText->SetForegroundColour( COPPER_COLORS::TEXT_PRIMARY );
     m_inputText->SetHint( wxT( "What would you like to build?" ) );
     m_inputText->Bind( wxEVT_TEXT_ENTER, &COPPER_CHAT_PANEL::onSendClicked, this );
     m_inputText->Bind( wxEVT_KEY_DOWN, &COPPER_CHAT_PANEL::onInputKeyDown, this );
-    inputSizer->Add( m_inputText, 1, wxALIGN_CENTER_VERTICAL | wxALL, FromDIP( 6 ) );
+    inputSizer->Add( m_inputText, 1, wxALIGN_CENTER_VERTICAL | wxALL, FromDIP( 10 ) );
 
-    // Send button
+    // Send button — prominent copper, with a hover lift to ACCENT_HOVER.
     m_sendBtn = new wxButton( m_inputPanel, wxID_ANY, wxT( "Send \xe2\x86\x92" ),  // Send →
                               wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
     m_sendBtn->SetBackgroundColour( COPPER_COLORS::ACCENT );
     m_sendBtn->SetForegroundColour( *wxWHITE );
     m_sendBtn->Bind( wxEVT_BUTTON, &COPPER_CHAT_PANEL::onSendClicked, this );
-    inputSizer->Add( m_sendBtn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP( 8 ) );
+    m_sendBtn->Bind( wxEVT_ENTER_WINDOW, []( wxMouseEvent& e )
+    {
+        if( auto* b = dynamic_cast<wxButton*>( e.GetEventObject() ) )
+        {
+            if( b->IsEnabled() )
+            {
+                b->SetBackgroundColour( COPPER_COLORS::ACCENT_HOVER );
+                b->Refresh();
+            }
+        }
+        e.Skip();
+    } );
+    m_sendBtn->Bind( wxEVT_LEAVE_WINDOW, []( wxMouseEvent& e )
+    {
+        if( auto* b = dynamic_cast<wxButton*>( e.GetEventObject() ) )
+        {
+            b->SetBackgroundColour( COPPER_COLORS::ACCENT );
+            b->Refresh();
+        }
+        e.Skip();
+    } );
+    inputSizer->Add( m_sendBtn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP( 10 ) );
 
     m_inputPanel->SetSizer( inputSizer );
 }
@@ -268,12 +292,19 @@ void COPPER_CHAT_PANEL::buildEmptyState()
     wxBoxSizer* emptySizer = new wxBoxSizer( wxVERTICAL );
     emptySizer->AddStretchSpacer( 1 );
 
-    // Welcome text
+    // Welcome headline — clear hierarchy: bold primary line + muted subtitle.
     wxStaticText* welcomeText = new wxStaticText( m_emptyStatePanel, wxID_ANY,
-                                                  wxT( "What would you like\nto build?" ) );
-    welcomeText->SetForegroundColour( COPPER_COLORS::TEXT_MUTED );
-    welcomeText->SetFont( welcomeText->GetFont().Larger().Larger() );
-    emptySizer->Add( welcomeText, 0, wxALIGN_CENTER | wxBOTTOM, FromDIP( 24 ) );
+                                                  wxT( "What would you like to build?" ) );
+    welcomeText->SetForegroundColour( COPPER_COLORS::TEXT_PRIMARY );
+    welcomeText->SetFont( welcomeText->GetFont().Bold().Larger().Larger() );
+    emptySizer->Add( welcomeText, 0, wxALIGN_CENTER | wxBOTTOM | wxLEFT | wxRIGHT,
+                     FromDIP( 8 ) );
+
+    wxStaticText* welcomeSub = new wxStaticText( m_emptyStatePanel, wxID_ANY,
+            wxT( "Describe a circuit, ask a question, or start from scratch." ) );
+    welcomeSub->SetForegroundColour( COPPER_COLORS::TEXT_SECONDARY );
+    emptySizer->Add( welcomeSub, 0, wxALIGN_CENTER | wxBOTTOM | wxLEFT | wxRIGHT,
+                     FromDIP( 24 ) );
 
     // Structured intake — preferred entry point for brand-new boards
     wxButton* scratchBtn = new wxButton( m_emptyStatePanel, wxID_ANY,
